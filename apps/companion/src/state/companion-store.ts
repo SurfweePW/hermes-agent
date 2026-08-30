@@ -22,7 +22,7 @@ import type {
   SessionMessage,
   SessionResult
 } from '../gateway/types'
-import { createSessionSecretStore, type SessionSecretStore } from '../security/secret-store'
+import { createDefaultSecretStore, type SessionSecretStore } from '../security/secret-store'
 
 export type CompanionPhase = 'setup' | 'connecting' | 'ready' | 'disconnected' | 'recovering'
 export type TurnStatus = 'idle' | 'submitting' | 'streaming' | 'uncertain'
@@ -58,6 +58,9 @@ export interface CompanionSnapshot {
   draft: string
   turnStatus: TurnStatus
   error: string | null
+  hasSavedToken: boolean
+  canForgetSavedToken: boolean
+  storesTokenEncrypted: boolean
 }
 
 export interface CompanionGateway {
@@ -98,6 +101,7 @@ export interface CompanionStore {
   interrupt(): Promise<void>
   respondToApproval(choice: ApprovalChoice): Promise<void>
   recover(): Promise<void>
+  forgetSavedToken(): Promise<void>
   destroy(): void
 }
 
@@ -240,7 +244,18 @@ function approvalFromPayload(sessionId: string, payload: ApprovalRequestPayload)
   }
 }
 
+const SECURE_CREDENTIAL_ERROR = 'Companion could not access encrypted token storage. Forget the saved token or try again.'
+
+class SecureCredentialError extends Error {
+  constructor() {
+    super(SECURE_CREDENTIAL_ERROR)
+    this.name = 'SecureCredentialError'
+  }
+}
+
 function publicError(error: unknown): string {
+  if (error instanceof SecureCredentialError) { return error.message }
+
   if (error instanceof Error && /url|required|http|gateway/i.test(error.message) && !/[?&](token|ticket)=/i.test(error.message)) {
     return error.message
   }
@@ -251,7 +266,7 @@ function publicError(error: unknown): string {
 export function createCompanionStore(options: CompanionStoreOptions = {}): CompanionStore {
   const gatewayFactory = options.gatewayFactory ?? (() => new CompanionClient())
   const storage = options.storage ?? browserStorage()
-  const secrets = options.secretStore ?? createSessionSecretStore()
+  const secrets = options.secretStore ?? createDefaultSecretStore()
   const profileIds = new Map<string, string>()
   const listeners = new Set<() => void>()
   let gateway: CompanionGateway | null = null
@@ -262,6 +277,21 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
   let connectionGeneration = 0
   let sessionGeneration = 0
   let completedSessionId: string | null = null
+  let savedToken: string | undefined
+  let savedTokenError: string | null = null
+  let pendingSavedToken: Promise<string | undefined> | null = null
+
+  try {
+    const candidate = secrets.get(TOKEN_SECRET_NAME)
+
+    if (candidate && typeof (candidate as Promise<string | undefined>).then === 'function') {
+      pendingSavedToken = Promise.resolve(candidate)
+    } else {
+      savedToken = candidate as string | undefined
+    }
+  } catch {
+    savedTokenError = SECURE_CREDENTIAL_ERROR
+  }
 
   let pendingSubmit: {
     client: CompanionGateway
@@ -286,7 +316,10 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     pendingApproval: null,
     draft: '',
     turnStatus: 'idle',
-    error: null
+    error: savedTokenError,
+    hasSavedToken: Boolean(savedToken),
+    canForgetSavedToken: Boolean(savedToken || savedTokenError),
+    storesTokenEncrypted: secrets.persistent
   })
 
   const publish = (changes: Partial<CompanionSnapshot>) => {
@@ -303,6 +336,18 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     for (const listener of listeners) {listener()}
   }
 
+  const savedTokenReady = pendingSavedToken
+    ? pendingSavedToken.then((token) => {
+        savedToken = token
+        savedTokenError = null
+        publish({ hasSavedToken: Boolean(token), canForgetSavedToken: Boolean(token), error: null })
+      }).catch(() => {
+        savedToken = undefined
+        savedTokenError = SECURE_CREDENTIAL_ERROR
+        publish({ hasSavedToken: false, canForgetSavedToken: true, error: SECURE_CREDENTIAL_ERROR })
+      })
+    : Promise.resolve()
+
   const isDisconnected = () => snapshot.phase === 'disconnected'
 
   const detachGateway = () => {
@@ -310,6 +355,19 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     removeStateListener?.()
     removeEventListener = null
     removeStateListener = null
+  }
+
+  const discardGateway = (operation: number) => {
+    if (connectionGeneration !== operation) {return}
+    const client = gateway
+
+    detachGateway()
+    gateway = null
+    client?.close()
+    profileIds.clear()
+    pendingSubmit = null
+    completedSessionId = null
+    sessionGeneration += 1
   }
 
   const handleEvent = (event: CompanionEvent) => {
@@ -456,9 +514,11 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     return true
   }
 
-  const connect = async (phase: 'connecting' | 'recovering', operation: number) => {
-    const token = secrets.get(TOKEN_SECRET_NAME)
-
+  const connect = async (
+    phase: 'connecting' | 'recovering',
+    operation: number,
+    token: string | undefined = savedToken
+  ) => {
     if (!token) {
       publish({ phase: 'setup', error: 'Enter a gateway session token to connect.' })
 
@@ -485,19 +545,49 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       return () => listeners.delete(listener)
     },
     async configure(input) {
+      if (pendingSavedToken) {await savedTokenReady}
       const operation = ++connectionGeneration
 
       try {
         const configuration = parseGatewayBaseUrl(input.baseUrl)
-        secrets.set(TOKEN_SECRET_NAME, input.token)
+        const replacementToken = input.token
+        const token = replacementToken || savedToken
 
-        if (storage) {persistGatewayBaseUrl(storage, input)}
+        if (!token) { throw new Error('A gateway session token is required.') }
         publish({ baseUrl: configuration.baseUrl, warnings: configuration.warnings, error: null })
-        const client = await connect('connecting', operation)
+        const client = await connect('connecting', operation, token)
 
-        if (client && isCurrentConnection(client, operation)) {publish({ phase: 'ready' })}
+        if (client && isCurrentConnection(client, operation)) {
+          if (replacementToken) {
+            try {
+              await secrets.set(TOKEN_SECRET_NAME, replacementToken)
+            } catch {
+              throw new SecureCredentialError()
+            }
+
+            savedToken = replacementToken
+            savedTokenError = null
+          }
+
+          if (storage) {persistGatewayBaseUrl(storage, input)}
+          publish({ phase: 'ready', hasSavedToken: Boolean(savedToken), canForgetSavedToken: Boolean(savedToken) })
+        }
       } catch (error) {
-        if (connectionGeneration === operation) {publish({ phase: 'setup', error: publicError(error) })}
+        if (connectionGeneration === operation) {
+          discardGateway(operation)
+          publish({
+            phase: 'setup',
+            teammates: [],
+            selectedTeammateId: null,
+            runtimeSessionId: null,
+            storedSessionId: null,
+            messages: [],
+            pendingApproval: null,
+            streamingText: '',
+            turnStatus: 'idle',
+            error: publicError(error)
+          })
+        }
       }
     },
     async selectTeammate(teammateId, storedSessionId) {
@@ -664,6 +754,16 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         }
       }
     },
+    async forgetSavedToken() {
+      try {
+        await secrets.delete(TOKEN_SECRET_NAME)
+        savedToken = undefined
+        savedTokenError = null
+        publish({ hasSavedToken: false, canForgetSavedToken: false, error: null })
+      } catch {
+        publish({ error: SECURE_CREDENTIAL_ERROR })
+      }
+    },
     destroy() {
       if (destroyed) {return}
       destroyed = true
@@ -672,7 +772,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       detachGateway()
       gateway?.close()
       gateway = null
-      secrets.clear()
+      void secrets.clear()
       listeners.clear()
     }
   }

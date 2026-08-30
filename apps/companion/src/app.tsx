@@ -43,7 +43,7 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
   }, [screen])
 
   if (companion.phase === 'setup' || companion.phase === 'connecting') {
-    return <SetupScreen connecting={companion.phase === 'connecting'} error={companion.error} initialBaseUrl={companion.baseUrl} onConnect={(baseUrl, token) => store.configure({ baseUrl, token })} warnings={companion.warnings} />
+    return <SetupScreen canForgetSavedToken={companion.canForgetSavedToken} connecting={companion.phase === 'connecting'} error={companion.error} hasSavedToken={companion.hasSavedToken} initialBaseUrl={companion.baseUrl} onConnect={(baseUrl, token) => store.configure({ baseUrl, token })} onForgetSavedToken={store.forgetSavedToken} storesTokenEncrypted={companion.storesTokenEncrypted} warnings={companion.warnings} />
   }
 
   const openTeammate = (teammate: Teammate) => {
@@ -102,11 +102,15 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
   )
 }
 
-function SetupScreen({ initialBaseUrl, warnings, connecting, error, onConnect }: { initialBaseUrl: string; warnings: readonly string[]; connecting: boolean; error: string | null; onConnect: (baseUrl: string, token: string) => void }) {
+function SetupScreen({ initialBaseUrl, warnings, connecting, error, hasSavedToken, canForgetSavedToken, storesTokenEncrypted, onConnect, onForgetSavedToken }: { initialBaseUrl: string; warnings: readonly string[]; connecting: boolean; error: string | null; hasSavedToken: boolean; canForgetSavedToken: boolean; storesTokenEncrypted: boolean; onConnect: (baseUrl: string, token: string) => void; onForgetSavedToken: () => void | Promise<void> }) {
   const [baseUrl, setBaseUrl] = useState(initialBaseUrl)
   const [token, setToken] = useState('')
 
-  return <main aria-labelledby="setup-title" className="recovery-screen"><section className="recovery-card"><Wordmark /><p className="kicker">First-run setup</p><h1 id="setup-title">Connect Hermes Companion</h1><p>Use the private HTTP(S) base URL for your Hermes gateway and a session token. Only the base URL is saved.</p><form onSubmit={(event) => { event.preventDefault(); onConnect(baseUrl, token) }}><label>Gateway base URL<input autoComplete="url" onChange={(event) => setBaseUrl(event.target.value)} placeholder="http://localhost:8642" required type="url" value={baseUrl} /></label><label>Session token<input autoComplete="off" onChange={(event) => setToken(event.target.value)} required type="password" value={token} /></label>{warnings.map((warning) => <p key={warning} role="status">{warning}</p>)}{error && <p role="alert">{error}</p>}<button className="primary-button" disabled={connecting} type="submit">{connecting ? 'Connecting…' : 'Connect privately'}</button></form></section></main>
+  const storageCopy = storesTokenEncrypted
+    ? 'The native app stores the token encrypted in macOS secure storage.'
+    : 'The browser keeps the token for this session only.'
+
+  return <main aria-labelledby="setup-title" className="recovery-screen"><section className="recovery-card"><Wordmark /><p className="kicker">Connection setup</p><h1 id="setup-title">Connect Hermes Companion</h1><p>Use the private HTTP(S) base URL for your Hermes gateway and a session token. {storageCopy}</p><form onSubmit={(event) => { event.preventDefault(); onConnect(baseUrl, token) }}><label>Gateway base URL<input autoComplete="url" onChange={(event) => setBaseUrl(event.target.value)} placeholder="http://localhost:8642" required type="url" value={baseUrl} /></label><label>Session token<input autoComplete="off" onChange={(event) => setToken(event.target.value)} placeholder={hasSavedToken ? 'Leave blank to use saved token' : undefined} required={!hasSavedToken} type="password" value={token} /></label>{hasSavedToken && <p role="status">A saved encrypted token is available. Enter a new token to replace it after a successful connection.</p>}{warnings.map((warning) => <p key={warning} role="status">{warning}</p>)}{error && <p role="alert">{error}</p>}<button className="primary-button" disabled={connecting} type="submit">{connecting ? 'Connecting…' : hasSavedToken && !token ? 'Use saved token' : 'Connect privately'}</button>{canForgetSavedToken && <button disabled={connecting} onClick={onForgetSavedToken} type="button">Forget saved token</button>}</form></section></main>
 }
 
 function Wordmark() { return <div className="wordmark"><span aria-hidden="true" className="wordmark__sigil">H+</span><span>Hermes<strong>Companion</strong></span></div> }

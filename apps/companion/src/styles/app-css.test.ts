@@ -61,4 +61,10 @@ describe('Signal House CSS contract', () => {
     expect(appCss).toMatch(/\.rail-section-title\s*\{[^}]*color:\s*#858a7d/i)
     expect(appCss).not.toMatch(/\.rail-section-title\s*\{[^}]*color:\s*#7f8378/i)
   })
+
+  it('lays out connection setup fields as readable full-width controls', () => {
+    expect(appCss).toMatch(/\.recovery-card\s+form\s*\{[^}]*display:\s*grid[^}]*gap:/i)
+    expect(appCss).toMatch(/\.recovery-card\s+label\s*\{[^}]*display:\s*grid[^}]*gap:/i)
+    expect(appCss).toMatch(/\.recovery-card\s+input\s*\{[^}]*width:\s*100%[^}]*min-height:\s*48px/i)
+  })
 })

@@ -175,6 +175,14 @@ button:focus-visible, input:focus-visible { outline: 3px solid var(--blue); outl
 .recovery-card > .kicker { margin-top: 20px; }
 .recovery-card h2 { max-width: 650px; font-size: clamp(35px, 4vw, 48px); }
 .recovery-card > p { color: var(--muted-text); line-height: 1.6; }
+.recovery-card > .wordmark { margin: 22px 22px 0; padding: 0; }
+.recovery-card > h1 { margin: 26px 22px 12px; font-size: clamp(34px, 4vw, 48px); line-height: 1; letter-spacing: -.045em; }
+.recovery-card form { margin: 24px 22px 22px; display: grid; gap: 14px; }
+.recovery-card label { display: grid; gap: 7px; color: var(--muted-text); font-size: 12px; font-weight: 700; }
+.recovery-card input { width: 100%; min-height: 48px; padding: 11px 13px; border: 1px solid #cfd2c8; border-radius: 10px; background: var(--white); }
+.recovery-card form > p { margin: 0; color: var(--muted-text); font-size: 12px; line-height: 1.5; }
+.recovery-card form > button { width: 100%; min-height: 48px; border: 1px solid var(--line); border-radius: 10px; background: var(--white); font-weight: 750; }
+.recovery-card form > .primary-button { border-color: var(--signal); background: var(--signal); }
 .recovery-receipt { margin-top: 25px; margin-bottom: 20px; border-top: 1px solid var(--line); }
 .recovery-receipt div { padding: 13px 0; display: grid; grid-template-columns: 170px 1fr; border-bottom: 1px solid var(--line); font-size: 13px; }
 .recovery-receipt dt { color: var(--muted-text); }

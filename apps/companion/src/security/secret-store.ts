@@ -1,30 +1,33 @@
 export interface SessionSecretStore {
-  set(name: string, value: string): void
-  get(name: string): string | undefined
-  delete(name: string): void
-  clear(): void
+  readonly persistent: boolean
+  set(name: string, value: string): void | Promise<void>
+  get(name: string): string | undefined | Promise<string | undefined>
+  delete(name: string): void | Promise<void>
+  clear(): void | Promise<void>
 }
 
-/**
- * Creates an isolated, memory-only secret store for the current app session.
- *
- * The closure intentionally keeps secret values out of the returned object's
- * enumerable properties. Native shells can replace this implementation with a
- * protected platform store when one is available.
- */
+export interface GatewayTokenBridge {
+  get(): Promise<string | undefined>
+  set(value: string): Promise<void>
+  reset(): Promise<void>
+}
+
+declare global {
+  interface Window {
+    hermesCompanion?: Readonly<{ gatewayToken: GatewayTokenBridge }>
+  }
+}
+
+/** Creates an isolated, memory-only secret store for browser sessions. */
 export function createSessionSecretStore(): SessionSecretStore {
   const secrets = new Map<string, string>()
 
   return Object.freeze({
+    persistent: false,
     set(name: string, value: string): void {
-      if (!name) {
-        throw new Error('A secret name is required.')
-      }
+      if (!name) { throw new Error('A secret name is required.') }
 
-      if (!value) {
-        throw new Error('A secret value is required.')
-      }
-
+      if (!value) { throw new Error('A secret value is required.') }
       secrets.set(name, value)
     },
     get(name: string): string | undefined {
@@ -38,6 +41,49 @@ export function createSessionSecretStore(): SessionSecretStore {
     },
     toString(): string {
       return '[SessionSecretStore]'
+    },
+    toJSON(): Record<string, never> {
+      return {}
     }
   })
+}
+
+function createNativeSecretStore(bridge: GatewayTokenBridge): SessionSecretStore {
+  const assertGatewayToken = (name: string) => {
+    if (name !== 'gateway-token') { throw new Error('Only the gateway token is supported.') }
+  }
+
+  return Object.freeze({
+    persistent: true,
+    async set(name: string, value: string): Promise<void> {
+      assertGatewayToken(name)
+
+      if (!value) { throw new Error('A secret value is required.') }
+      await bridge.set(value)
+    },
+    async get(name: string): Promise<string | undefined> {
+      assertGatewayToken(name)
+
+      return bridge.get()
+    },
+    async delete(name: string): Promise<void> {
+      assertGatewayToken(name)
+      await bridge.reset()
+    },
+    // Store destruction clears ephemeral session state only. Persistent native
+    // state is removed exclusively by the explicit delete/reset operation.
+    clear(): void {},
+    toString(): string {
+      return '[NativeGatewayTokenStore]'
+    },
+    toJSON(): Record<string, never> {
+      return {}
+    }
+  })
+}
+
+export function createDefaultSecretStore(): SessionSecretStore {
+  const bridge = typeof window === 'undefined' ? undefined : window.hermesCompanion?.gatewayToken
+
+  return bridge ? createNativeSecretStore(bridge) : createSessionSecretStore()
 }

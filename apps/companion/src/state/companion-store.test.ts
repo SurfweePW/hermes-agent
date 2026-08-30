@@ -2,6 +2,7 @@ import type { ConnectionState } from '@hermes/shared'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { CompanionEvent, ProfilesListResult, SessionResult } from '../gateway/types'
+import type { SessionSecretStore } from '../security/secret-store'
 
 import { type CompanionGateway, type CompanionGatewayFactory, createCompanionStore } from './companion-store'
 
@@ -78,7 +79,21 @@ function deferred<T>() {
   return { promise, resolve, reject }
 }
 
-function harness(baseUrl: string | null = null, profiles?: ProfilesListResult) {
+function tokenStore(initial?: string, persistent = true) {
+  let token = initial
+
+  const store: SessionSecretStore = {
+    persistent,
+    get: vi.fn(() => token),
+    set: vi.fn((_name, value) => { token = value }),
+    delete: vi.fn(() => { token = undefined }),
+    clear: vi.fn()
+  }
+
+  return store
+}
+
+function harness(baseUrl: string | null = null, profiles?: ProfilesListResult, secretStore?: SessionSecretStore) {
   const gateways: ControlledGateway[] = []
 
   const factory: CompanionGatewayFactory = () => {
@@ -99,12 +114,104 @@ function harness(baseUrl: string | null = null, profiles?: ProfilesListResult) {
     setItem: vi.fn((key: string, value: string) => values.set(key, value))
   }
 
-  const store = createCompanionStore({ gatewayFactory: factory, storage })
+  const store = createCompanionStore({ gatewayFactory: factory, storage, ...(secretStore ? { secretStore } : {}) })
 
   return { store, storage, gateways }
 }
 
 describe('CompanionStore setup and sessions', () => {
+  it('reuses a saved native token on blank submission without exposing it in the snapshot', async () => {
+    const secrets = tokenStore('known-good-token')
+    const { store, gateways } = harness('http://localhost:8642', undefined, secrets)
+
+    expect(store.getSnapshot()).toMatchObject({ hasSavedToken: true, storesTokenEncrypted: true })
+    expect(JSON.stringify(store.getSnapshot())).not.toContain('known-good-token')
+    await store.configure({ baseUrl: 'http://localhost:8642', token: '' })
+
+    expect(gateways[0].calls[0]).toEqual(['connect', 'ws://localhost:8642/api/ws?token=known-good-token'])
+    expect(secrets.set).not.toHaveBeenCalled()
+    expect(store.getSnapshot().phase).toBe('ready')
+  })
+
+  it('waits for asynchronous native token hydration before a blank saved-token connection', async () => {
+    const token = deferred<string | undefined>()
+    const secrets = tokenStore()
+    vi.mocked(secrets.get).mockReturnValue(token.promise)
+    const { store, gateways } = harness('http://localhost:8642', undefined, secrets)
+    const configuring = store.configure({ baseUrl: 'http://localhost:8642', token: '' })
+
+    expect(gateways).toHaveLength(0)
+    token.resolve('async-native-token')
+    await configuring
+
+    expect(gateways[0].calls[0]).toEqual(['connect', 'ws://localhost:8642/api/ws?token=async-native-token'])
+    expect(store.getSnapshot()).toMatchObject({ phase: 'ready', hasSavedToken: true, canForgetSavedToken: true })
+    expect(JSON.stringify(store.getSnapshot())).not.toContain('async-native-token')
+  })
+
+  it('persists a replacement only after authenticated roster load succeeds', async () => {
+    const secrets = tokenStore('known-good-token')
+    const { store, gateways } = harness(null, undefined, secrets)
+    const roster = deferred<ProfilesListResult>()
+    const configuring = store.configure({ baseUrl: 'http://localhost:8642', token: 'replacement-token' })
+    gateways[0].profilesResult = roster.promise
+    await vi.waitFor(() => expect(gateways[0].calls).toContainEqual(['listProfiles']))
+    expect(secrets.set).not.toHaveBeenCalled()
+
+    roster.resolve({ profiles: [{ name: 'atlas' }] })
+    await configuring
+    expect(secrets.set).toHaveBeenCalledWith('gateway-token', 'replacement-token')
+  })
+
+  it('closes and detaches an authenticated client when encrypted token persistence fails', async () => {
+    const secrets = tokenStore('known-good-token')
+    vi.mocked(secrets.set).mockImplementation(() => { throw new Error('secure write failed') })
+    const { store, gateways } = harness(null, undefined, secrets)
+
+    await store.configure({ baseUrl: 'http://localhost:8642', token: 'replacement-token' })
+
+    expect(gateways[0].calls).toContainEqual(['close'])
+    expect(store.getSnapshot()).toMatchObject({ phase: 'setup', teammates: [] })
+    gateways[0].setState('closed')
+    expect(store.getSnapshot().phase).toBe('setup')
+  })
+
+  it('leaves a known-good saved token untouched when a replacement fails authentication', async () => {
+    const secrets = tokenStore('known-good-token')
+    const { store, gateways } = harness(null, undefined, secrets)
+    const configuring = store.configure({ baseUrl: 'http://localhost:8642', token: 'bad-replacement' })
+    gateways[0].profilesResult = Promise.reject(new Error('authentication failed'))
+    await configuring
+
+    expect(secrets.set).not.toHaveBeenCalled()
+    expect(secrets.get('gateway-token')).toBe('known-good-token')
+    expect(JSON.stringify(store.getSnapshot())).not.toContain('bad-replacement')
+  })
+
+  it('handles unavailable secure storage without crashing or leaking implementation details', async () => {
+    const secrets = tokenStore()
+    vi.mocked(secrets.get).mockImplementation(() => { throw new Error('ciphertext /Users/private/token bad-token') })
+    const { store } = harness('http://localhost:8642', undefined, secrets)
+
+    expect(store.getSnapshot()).toMatchObject({
+      phase: 'setup',
+      hasSavedToken: false,
+      canForgetSavedToken: true,
+      error: 'Companion could not access encrypted token storage. Forget the saved token or try again.'
+    })
+    expect(JSON.stringify(store.getSnapshot())).not.toContain('/Users/private')
+    await expect(store.configure({ baseUrl: 'http://localhost:8642', token: '' })).resolves.toBeUndefined()
+  })
+
+  it('forgets a saved token only through the explicit reset action', async () => {
+    const secrets = tokenStore('known-good-token')
+    const { store } = harness(null, undefined, secrets)
+
+    await store.forgetSavedToken()
+    expect(secrets.delete).toHaveBeenCalledWith('gateway-token')
+    expect(store.getSnapshot()).toMatchObject({ hasSavedToken: false, canForgetSavedToken: false, error: null })
+  })
+
   it('starts in first-run setup and persists only normalized base URL', async () => {
     const { store, storage, gateways } = harness()
     expect(store.getSnapshot().phase).toBe('setup')

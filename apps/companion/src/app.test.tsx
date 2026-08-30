@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { App } from './app'
 import { createFakeGateway } from './fixtures/fake-gateway'
+import type { SessionSecretStore } from './security/secret-store'
 import { createCompanionStore } from './state/companion-store'
 
 async function readyStore() {
@@ -19,6 +20,66 @@ describe('App', () => {
     expect(screen.getByRole('heading', { name: 'Connect Hermes Companion' })).toBeTruthy()
     expect(screen.getByLabelText('Session token').getAttribute('type')).toBe('password')
     expect(document.body.textContent).not.toContain('test-token')
+  })
+
+  it('truthfully distinguishes encrypted native storage and allows a saved-token connection', async () => {
+    let token: string | undefined = 'saved-native-token'
+
+    const secretStore: SessionSecretStore = {
+      persistent: true,
+      get: () => token,
+      set: (_name, value) => { token = value },
+      delete: () => { token = undefined },
+      clear: () => undefined
+    }
+
+    const store = createCompanionStore({ gatewayFactory: createFakeGateway, secretStore, storage: { getItem: () => 'http://fixture.invalid', setItem: () => undefined } })
+    render(<App store={store} />)
+
+    expect(screen.getByText(/native app stores the token encrypted/i)).toBeTruthy()
+    expect(screen.getByLabelText('Session token').hasAttribute('required')).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: /use saved token/i }))
+    await waitFor(() => expect(store.getSnapshot().phase).toBe('ready'))
+    expect(document.body.textContent).not.toContain('saved-native-token')
+  })
+
+  it('labels browser credentials session-only and provides an explicit saved-token reset', () => {
+    let token: string | undefined = 'saved-native-token'
+
+    const secretStore: SessionSecretStore = {
+      persistent: true,
+      get: () => token,
+      set: (_name, value) => { token = value },
+      delete: () => { token = undefined },
+      clear: () => undefined
+    }
+
+    const store = createCompanionStore({ gatewayFactory: createFakeGateway, secretStore, storage: { getItem: () => null, setItem: () => undefined } })
+    const { unmount } = render(<App store={store} />)
+    fireEvent.click(screen.getByRole('button', { name: /forget saved token/i }))
+    expect(token).toBeUndefined()
+    unmount()
+
+    render(<App store={createCompanionStore({ gatewayFactory: createFakeGateway, storage: { getItem: () => null, setItem: () => undefined } })} />)
+    expect(screen.getByText(/browser keeps the token for this session only/i)).toBeTruthy()
+  })
+
+  it('offers a working reset when encrypted token storage cannot be read', async () => {
+    const secretStore: SessionSecretStore = {
+      persistent: true,
+      get: () => { throw new Error('corrupt ciphertext') },
+      set: () => undefined,
+      delete: vi.fn(),
+      clear: () => undefined
+    }
+
+    const store = createCompanionStore({ gatewayFactory: createFakeGateway, secretStore, storage: { getItem: () => null, setItem: () => undefined } })
+
+    render(<App store={store} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /forget saved token/i }))
+    await waitFor(() => expect(secretStore.delete).toHaveBeenCalledWith('gateway-token'))
+    expect(store.getSnapshot()).toMatchObject({ canForgetSavedToken: false, error: null })
   })
 
   it('renders the ready application shell and live roster', async () => {

@@ -1,14 +1,20 @@
 {
   "name": "@hermes/companion",
+  "productName": "Hermes Companion",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Secure native companion shell for Hermes Agent.",
+  "author": "Nous Research",
   "type": "module",
+  "main": "dist/electron-main.mjs",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/bundle-electron.mjs",
+    "build:electron": "node scripts/bundle-electron.mjs",
+    "package:mac": "node scripts/package-mac.mjs",
     "test": "vitest run",
-    "typecheck": "tsc -p . --noEmit",
-    "lint": "eslint src/"
+    "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.electron.json --noEmit",
+    "lint": "eslint src/ electron/"
   },
   "dependencies": {
     "@hermes/shared": "file:../shared",
@@ -17,12 +23,55 @@
   },
   "devDependencies": {
     "@testing-library/react": "16.3.2",
+    "@types/node": "22.20.1",
     "@types/react": "19.2.17",
     "@types/react-dom": "19.2.3",
     "@vitejs/plugin-react": "6.0.3",
+    "electron": "40.10.2",
+    "electron-builder": "26.15.3",
+    "esbuild": "0.28.1",
     "jsdom": "29.1.1",
     "typescript": "6.0.3",
     "vite": "8.2.0",
     "vitest": "4.1.10"
+  },
+  "build": {
+    "electronVersion": "40.10.2",
+    "appId": "com.hermes.companion",
+    "productName": "Hermes Companion",
+    "executableName": "Hermes Companion",
+    "artifactName": "Hermes-Companion-${version}-${os}-${arch}.${ext}",
+    "protocols": [
+      {
+        "name": "Hermes Companion Protocol",
+        "schemes": ["hermes-companion"]
+      }
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**",
+      "package.json",
+      "!node_modules/**",
+      "!src/**",
+      "!electron/**",
+      "!scripts/**",
+      "!**/*.test.*"
+    ],
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.productivity",
+      "identity": null,
+      "hardenedRuntime": false,
+      "gatekeeperAssess": false,
+      "extendInfo": {
+        "CFBundleDisplayName": "Hermes Companion",
+        "CFBundleName": "Hermes Companion"
+      },
+      "target": [
+        { "target": "dir", "arch": ["arm64"] }
+      ]
+    }
   }
 }
