@@ -40,10 +40,10 @@ describe('Companion Electron shell', () => {
 
   it('ignores a dev-server override in packaged mode and rejects remote development origins', () => {
     expect(selectRendererTarget({ directory: '/app/dist', isPackaged: true, developmentServer: 'http://localhost:5173' })).toEqual({
-      kind: 'file', value: '/app/dist/index.html', trusted: 'file:///app/dist/index.html'
+      kind: 'file', value: '/app/dist/web/index.html', trusted: 'file:///app/dist/web/index.html'
     })
     expect(selectRendererTarget({ directory: '/app/dist', isPackaged: false, developmentServer: 'https://evil.example' })).toEqual({
-      kind: 'file', value: '/app/dist/index.html', trusted: 'file:///app/dist/index.html'
+      kind: 'file', value: '/app/dist/web/index.html', trusted: 'file:///app/dist/web/index.html'
     })
     expect(selectRendererTarget({ directory: '/app/dist', isPackaged: false, developmentServer: 'http://127.0.0.1:5173' })).toEqual({
       kind: 'url', value: 'http://127.0.0.1:5173/', trusted: 'http://127.0.0.1:5173'

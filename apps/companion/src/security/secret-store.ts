@@ -1,3 +1,5 @@
+import { capacitorGatewayTokenBridge } from './capacitor-token-bridge'
+
 export interface SessionSecretStore {
   readonly persistent: boolean
   set(name: string, value: string): void | Promise<void>
@@ -83,7 +85,8 @@ function createNativeSecretStore(bridge: GatewayTokenBridge): SessionSecretStore
 }
 
 export function createDefaultSecretStore(): SessionSecretStore {
-  const bridge = typeof window === 'undefined' ? undefined : window.hermesCompanion?.gatewayToken
+  const electronBridge = typeof window === 'undefined' ? undefined : window.hermesCompanion?.gatewayToken
+  const bridge = electronBridge ?? capacitorGatewayTokenBridge()
 
   return bridge ? createNativeSecretStore(bridge) : createSessionSecretStore()
 }

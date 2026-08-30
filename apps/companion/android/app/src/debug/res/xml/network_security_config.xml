@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- DEBUG/DOGFOOD ONLY.
+     Android's declarative policy cannot express a runtime-configured host or
+     an IP subnet, so this base capability is necessarily broader than the
+     intended runtime-configured private tailnet endpoint. Production code
+     permits HTTP only for literal 100.64.0.0/10 hosts, and release never
+     packages this resource overlay. Prefer HTTPS via Tailscale Serve. -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

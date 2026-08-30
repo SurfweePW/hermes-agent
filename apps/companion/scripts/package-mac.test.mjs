@@ -3,7 +3,12 @@ import { resolve } from 'node:path'
 
 import { describe, expect, it } from 'vitest'
 
-import { assertAsarContents, createPackagingPlan, createZipVerificationCommands } from './package-mac.mjs'
+import {
+  assertAsarContents,
+  assertPackagedRenderer,
+  createPackagingPlan,
+  createZipVerificationCommands
+} from './package-mac.mjs'
 
 const root = resolve(import.meta.dirname, '..')
 const packageJson = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
@@ -23,10 +28,21 @@ describe('macOS packaging workflow', () => {
       '!scripts/**',
       '!**/*.test.*'
     ])
-    expect(() => assertAsarContents(['/dist', '/dist/index.html', '/dist/electron-main.mjs', '/package.json'])).not.toThrow()
-    expect(() => assertAsarContents(['/dist/index.html', '/node_modules/react/index.js'])).toThrow(/unexpected ASAR content/i)
-    expect(() => assertAsarContents(['/dist/index.html', '/src/main.tsx'])).toThrow(/unexpected ASAR content/i)
-    expect(() => assertAsarContents(['/dist/index.html', '/dist/main.test.js'])).toThrow(/unexpected ASAR content/i)
+    const validEntries = [
+      '/dist',
+      '/dist/web',
+      '/dist/web/index.html',
+      '/dist/electron-main.mjs',
+      '/package.json'
+    ]
+    expect(() => assertAsarContents(validEntries)).not.toThrow()
+    expect(() => assertPackagedRenderer(validEntries)).not.toThrow()
+    expect(() => assertPackagedRenderer(['/dist/index.html'])).toThrow(/renderer HTML is missing/i)
+    expect(() => assertAsarContents([...validEntries, '/dist/index.html'])).toThrow(/unexpected ASAR content/i)
+    expect(() => assertAsarContents([...validEntries, '/dist/assets/stale.js'])).toThrow(/unexpected ASAR content/i)
+    expect(() => assertAsarContents(['/dist/web/index.html', '/node_modules/react/index.js'])).toThrow(/unexpected ASAR content/i)
+    expect(() => assertAsarContents(['/dist/web/index.html', '/src/main.tsx'])).toThrow(/unexpected ASAR content/i)
+    expect(() => assertAsarContents(['/dist/web/index.html', '/dist/main.test.js'])).toThrow(/unexpected ASAR content/i)
   })
 
   it('derives deterministic artifacts and safe argument-array commands from package metadata', () => {

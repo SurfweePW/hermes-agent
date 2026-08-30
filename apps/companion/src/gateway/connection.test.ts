@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   buildGatewayWebSocketUrl,
+  isAllowedAndroidGatewayTransport,
   parseGatewayBaseUrl,
   persistGatewayBaseUrl,
   redactGatewayUrl,
@@ -9,6 +10,15 @@ import {
 } from './connection'
 
 describe('gateway connection configuration', () => {
+  it('limits Android dogfood HTTP to literal Tailscale CGNAT addresses', () => {
+    expect(isAllowedAndroidGatewayTransport(new URL('http://100.64.0.1:8642'))).toBe(true)
+    expect(isAllowedAndroidGatewayTransport(new URL('http://100.127.255.254:8642'))).toBe(true)
+    expect(isAllowedAndroidGatewayTransport(new URL('http://100.128.0.1:8642'))).toBe(false)
+    expect(isAllowedAndroidGatewayTransport(new URL('http://192.168.1.5:8642'))).toBe(false)
+    expect(isAllowedAndroidGatewayTransport(new URL('http://host.tailnet.ts.net:8642'))).toBe(false)
+    expect(isAllowedAndroidGatewayTransport(new URL('https://host.tailnet.ts.net'))).toBe(true)
+  })
+
   it.each([
     ['http://100.96.12.4:8642', 'ws://100.96.12.4:8642/api/ws?token=static-token'],
     ['https://mac-mini.tailnet.ts.net', 'wss://mac-mini.tailnet.ts.net/api/ws?token=static-token'],

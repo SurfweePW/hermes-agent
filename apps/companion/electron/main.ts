@@ -53,7 +53,7 @@ export function selectRendererTarget({ directory, isPackaged, developmentServer 
   isPackaged: boolean
   developmentServer?: string
 }): RendererTarget {
-  const file = join(directory, 'index.html')
+  const file = join(directory, 'web', 'index.html')
   const bundled = { kind: 'file' as const, value: file, trusted: pathToFileURL(file).href }
 
   if (isPackaged || !developmentServer) { return bundled }

@@ -1,3 +1,4 @@
+import { Capacitor } from '@capacitor/core'
 import { buildHermesWebSocketUrl } from '@hermes/shared'
 
 export const GATEWAY_BASE_URL_STORAGE_KEY = 'hermes.companion.gatewayBaseUrl'
@@ -53,6 +54,17 @@ function isPrivateIpv4(octets: number[]): boolean {
   )
 }
 
+/** Android debug cleartext is intentionally limited in-app to Tailscale's CGNAT range. */
+export function isAllowedAndroidGatewayTransport(url: URL): boolean {
+  if (url.protocol === 'https:') { return true }
+
+  if (url.protocol !== 'http:') { return false }
+
+  const ipv4 = parseIpv4(stripIpv6Brackets(url.hostname))
+
+  return Boolean(ipv4 && ipv4[0] === 100 && ipv4[1] >= 64 && ipv4[1] <= 127)
+}
+
 function isPrivateLookingHost(hostname: string): boolean {
   const host = stripIpv6Brackets(hostname).toLowerCase().replace(/\.$/, '')
   const ipv4 = parseIpv4(host)
@@ -93,6 +105,10 @@ export function parseGatewayBaseUrl(input: string): GatewayBaseUrlConfiguration 
 
   if (url.protocol !== 'http:' && url.protocol !== 'https:') {
     throw invalidUrl('Gateway URLs must use HTTP or HTTPS.')
+  }
+
+  if (Capacitor.getPlatform() === 'android' && !isAllowedAndroidGatewayTransport(url)) {
+    throw invalidUrl('Android requires HTTPS, except for a literal private Tailscale address in a debug dogfood build.')
   }
 
   if (!url.hostname) {

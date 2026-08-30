@@ -12,11 +12,22 @@ const OS = 'mac'
 export function assertAsarContents(entries) {
   const unexpected = entries.filter((entry) => {
     const path = entry.replace(/^\//, '')
-    return path !== 'package.json'
-      && path !== 'dist'
-      && (!path.startsWith('dist/') || /(^|\/)node_modules(\/|$)|(^|\/)(src|electron|scripts)(\/|$)|\.test\./.test(path))
+    const expectedRuntime = path === 'package.json'
+      || path === 'dist'
+      || path === 'dist/web'
+      || path.startsWith('dist/web/')
+      || path === 'dist/electron-main.mjs'
+      || path === 'dist/electron-preload.cjs'
+
+    return !expectedRuntime || /(^|\/)node_modules(\/|$)|(^|\/)(src|electron|scripts)(\/|$)|\.test\./.test(path)
   })
   if (unexpected.length > 0) { throw new Error(`Unexpected ASAR content: ${unexpected.join(', ')}`) }
+}
+
+export function assertPackagedRenderer(entries) {
+  if (!entries.includes('/dist/web/index.html')) {
+    throw new Error('Packaged renderer HTML is missing from ASAR')
+  }
 }
 
 function requireString(value, field) {
@@ -132,6 +143,7 @@ export async function packageMac() {
 
   await mkdir(plan.outputPath, { recursive: true })
   await Promise.all([
+    rm(resolve(root, 'dist'), { force: true, recursive: true }),
     rm(plan.appPath, { force: true, recursive: true }),
     rm(plan.zipPath, { force: true })
   ])
@@ -140,9 +152,9 @@ export async function packageMac() {
   run(plan.commands[1], root)
   await requireArtifact(plan.appPath, 'app')
   const asarPath = resolve(plan.appPath, 'Contents', 'Resources', 'app.asar')
-  assertAsarContents(listPackage(asarPath))
-  const packagedHtml = listPackage(asarPath).includes('/dist/index.html')
-  if (!packagedHtml) { throw new Error('Packaged renderer HTML is missing from ASAR') }
+  const asarEntries = listPackage(asarPath)
+  assertAsarContents(asarEntries)
+  assertPackagedRenderer(asarEntries)
   run(plan.commands[2], root)
   run(plan.commands[3], root)
   run(plan.commands[4], root)

@@ -10,6 +10,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build && node scripts/bundle-electron.mjs",
+    "build:web": "vite build",
+    "android:sync": "npm run build:web && cap sync android",
+    "android:debug": "npm run android:sync && cd android && ./gradlew assembleDebug",
     "build:electron": "node scripts/bundle-electron.mjs",
     "package:mac": "node scripts/package-mac.mjs",
     "test": "vitest run",
@@ -17,11 +20,14 @@
     "lint": "eslint src/ electron/"
   },
   "dependencies": {
+    "@capacitor/android": "^8.5.0",
+    "@capacitor/core": "^8.5.0",
     "@hermes/shared": "file:../shared",
     "react": "19.2.7",
     "react-dom": "19.2.7"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.0",
     "@testing-library/react": "16.3.2",
     "@types/node": "22.20.1",
     "@types/react": "19.2.17",
@@ -44,7 +50,9 @@
     "protocols": [
       {
         "name": "Hermes Companion Protocol",
-        "schemes": ["hermes-companion"]
+        "schemes": [
+          "hermes-companion"
+        ]
       }
     ],
     "directories": {
@@ -70,7 +78,12 @@
         "CFBundleName": "Hermes Companion"
       },
       "target": [
-        { "target": "dir", "arch": ["arm64"] }
+        {
+          "target": "dir",
+          "arch": [
+            "arm64"
+          ]
+        }
       ]
     }
   }

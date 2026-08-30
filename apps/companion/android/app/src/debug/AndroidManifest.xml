@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+    <!-- Debug dogfood only. Android network-security XML cannot express an
+         allowlist for a runtime-configured host. The app therefore constrains
+         HTTP at its URL-validation boundary to literal Tailscale CGNAT hosts;
+         this overlay supplies the broader OS capability that WebView requires.
+         Release does not merge this source set and remains cleartext-disabled. -->
+    <application
+        android:networkSecurityConfig="@xml/network_security_config"
+        android:usesCleartextTraffic="true"
+        tools:replace="android:usesCleartextTraffic" />
+</manifest>
