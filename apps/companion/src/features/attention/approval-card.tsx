@@ -1,28 +1,39 @@
-export type ApprovalDecision = 'once' | 'session' | 'deny'
+import type { ApprovalChoice } from '../../gateway/types'
+import type { PendingApproval } from '../../state/companion-store'
 
 interface ApprovalCardProps {
-  onDecision: (decision: ApprovalDecision) => void
+  approval: PendingApproval
+  onDecision: (decision: ApprovalChoice) => void
 }
 
-export function ApprovalCard({ onDecision }: ApprovalCardProps) {
+const labels: Record<ApprovalChoice, string> = {
+  once: 'Approve once',
+  session: 'Approve for session',
+  always: 'Always approve',
+  deny: 'Deny'
+}
+
+export function ApprovalCard({ approval, onDecision }: ApprovalCardProps) {
   return (
     <section aria-labelledby="approval-title" className="approval-card">
       <div className="approval-card__top">
         <span aria-hidden="true" className="approval-icon">!</span>
-        <div>
-          <p className="kicker">Your approval</p>
-          <h3 id="approval-title">Publish the investment brief?</h3>
-        </div>
+        <div><p className="kicker">Your approval</p><h3 id="approval-title">{approval.title}</h3></div>
       </div>
-      <p>Atlas checked the sources and prepared the final PDF. This will post it to the Investments group.</p>
-      <dl className="approval-facts">
-        <div><dt>Audience</dt><dd>8 group members</dd></div>
-        <div><dt>Can undo</dt><dd>Yes, delete the post</dd></div>
-      </dl>
+      <p>{approval.description}</p>
+      {approval.command && <pre aria-label="Requested command">{approval.command}</pre>}
       <div aria-label="Approval choices" className="approval-actions" role="group">
-        <button className="button button--deny" onClick={() => onDecision('deny')} type="button">Deny</button>
-        <button className="button" onClick={() => onDecision('session')} type="button">Approve for session</button>
-        <button className="button button--primary" onClick={() => onDecision('once')} type="button">Approve once</button>
+        {approval.choices.map((choice) => (
+          <button
+            className={`button${choice === 'deny' ? ' button--deny' : choice === 'once' ? ' button--primary' : ''}`}
+            disabled={approval.responding}
+            key={choice}
+            onClick={() => onDecision(choice)}
+            type="button"
+          >
+            {labels[choice]}
+          </button>
+        ))}
       </div>
     </section>
   )

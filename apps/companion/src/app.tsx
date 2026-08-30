@@ -1,110 +1,123 @@
 import { useEffect, useRef, useState } from 'react'
 
 import { ActivityRail } from './features/attention/activity-rail'
-import type { ApprovalDecision } from './features/attention/approval-card'
 import { NeedsMe } from './features/attention/needs-me'
 import { Conversation } from './features/conversation/conversation'
 import { Recovery } from './features/recovery/recovery'
 import { Roster, type Teammate } from './features/roster/roster'
 import { TeammateDetails } from './features/roster/teammate-details'
+import { createFakeGateway } from './fixtures/fake-gateway'
+import { type CompanionStore, createCompanionStore } from './state/companion-store'
+import { useCompanion } from './state/use-companion'
 
 type Screen = 'teammates' | 'conversation' | 'attention' | 'search' | 'details' | 'recovery'
 
-const teammates: Teammate[] = [
-  { id: 'atlas', initials: 'A', name: 'Atlas', role: 'Chief of Staff', status: 'needs-approval', summary: 'Prepared a decision and is waiting for your approval.' },
-  { id: 'mentor', initials: 'M', name: 'Mentor', role: 'Investments', status: 'working', summary: 'Reviewing portfolio concentration against new data.' },
-  { id: 'maven', initials: 'MV', name: 'Maven', role: 'Data Operations', status: 'blocked', summary: 'Paused safely when the portal connection expired.' },
-  { id: 'scout', initials: 'S', name: 'Scout', role: 'Research', status: 'completed', summary: 'Finished the source map and left a clear handoff.' }
-]
+const fixtureMode = import.meta.env.VITE_COMPANION_FIXTURE === 'true'
+const defaultStore = createCompanionStore(fixtureMode ? { gatewayFactory: createFakeGateway } : {})
 
 const screenTitles: Record<Screen, string> = {
   teammates: 'Teammates', conversation: 'Conversation', attention: 'Needs Me', search: 'Search', details: 'Teammate Details', recovery: 'Recovery'
 }
 
-export function App() {
+export function App({ store = defaultStore }: { store?: CompanionStore }) {
+  const companion = useCompanion(store)
   const [screen, setScreen] = useState<Screen>('teammates')
-  const [selected, setSelected] = useState<Teammate>(teammates[0])
-  const [decision, setDecision] = useState<string>()
   const mainRef = useRef<HTMLElement>(null)
   const initialScreen = useRef(true)
+  const fixtureStarted = useRef(false)
+  const selected = companion.teammates.find((teammate) => teammate.id === companion.selectedTeammateId)
+  const attentionCount = Number(Boolean(companion.pendingApproval)) + Number(companion.phase === 'disconnected')
 
   useEffect(() => {
-    if (initialScreen.current) {
-      initialScreen.current = false
+    if (!fixtureMode || store !== defaultStore || fixtureStarted.current) {return}
+    fixtureStarted.current = true
+    void store.configure({ baseUrl: 'http://fixture.invalid', token: 'fixture-qa-token' })
+  }, [store])
 
-      return
-    }
+  useEffect(() => {
+    if (initialScreen.current) { initialScreen.current = false;
+
+ return }
 
     mainRef.current?.focus()
   }, [screen])
 
+  if (companion.phase === 'setup' || companion.phase === 'connecting') {
+    return <SetupScreen connecting={companion.phase === 'connecting'} error={companion.error} initialBaseUrl={companion.baseUrl} onConnect={(baseUrl, token) => store.configure({ baseUrl, token })} warnings={companion.warnings} />
+  }
+
   const openTeammate = (teammate: Teammate) => {
-    setSelected(teammate)
+    void store.selectTeammate(teammate.id)
     setScreen('details')
   }
 
-  const decide = (choice: ApprovalDecision) => {
-    setDecision(choice === 'once' ? 'Approved once' : choice === 'session' ? 'Approved for session' : 'Denied')
-  }
-
   const content = (() => {
-    if (screen === 'conversation') {return <Conversation decision={decision} isStreaming onApproval={decide} />}
+    if (companion.phase === 'disconnected' || companion.phase === 'recovering' || screen === 'recovery') {
+      return <Recovery error={companion.error} hasDraft={Boolean(companion.draft)} onBack={companion.phase === 'disconnected' ? undefined : () => setScreen('attention')} onRetry={() => void store.recover()} recovering={companion.phase === 'recovering'} teammateName={selected?.name} turnUncertain={companion.turnStatus === 'uncertain'} />
+    }
 
-    if (screen === 'attention') {return <NeedsMe onOpenApproval={() => setScreen('conversation')} onOpenRecovery={() => setScreen('recovery')} />}
+    if (screen === 'conversation') {
+      return selected
+        ? <Conversation approval={companion.pendingApproval} connected={companion.phase === 'ready'} draft={companion.draft} messages={companion.messages} onApproval={(choice) => void store.respondToApproval(choice)} onDraftChange={store.setDraft} onInterrupt={() => void store.interrupt()} onSubmit={() => void store.submitDraft()} streamingText={companion.streamingText} teammate={selected} turnStatus={companion.turnStatus} />
+        : <ChooseTeammate onBack={() => setScreen('teammates')} />
+    }
 
-    if (screen === 'details') {return <TeammateDetails onBack={() => setScreen('teammates')} onMessage={() => setScreen('conversation')} teammate={selected} />}
+    if (screen === 'attention') {return <NeedsMe approvalTitle={companion.pendingApproval?.title} disconnected={false} onOpenApproval={() => setScreen('conversation')} onOpenRecovery={() => setScreen('recovery')} />}
 
-    if (screen === 'recovery') {return <Recovery onBack={() => setScreen('attention')} onRetry={() => setScreen('conversation')} />}
+    if (screen === 'details' && selected) {return <TeammateDetails onBack={() => setScreen('teammates')} onMessage={() => setScreen('conversation')} teammate={selected} />}
 
     if (screen === 'search') {return <SearchPlaceholder />}
 
-    return <TeammatesHome onNeedsMe={() => setScreen('attention')} onSelect={openTeammate} />
+    return <TeammatesHome attentionCount={attentionCount} onNeedsMe={() => setScreen('attention')} onSelect={openTeammate} teammates={companion.teammates} />
   })()
 
   return (
     <div className="app-shell">
-      <header className="mobile-header"><Wordmark /><span aria-label="Profile: Atlas Weber" className="avatar avatar--user" role="img">AW</span></header>
+      <header className="mobile-header"><Wordmark /><span aria-label="Profile: Companion user" className="avatar avatar--user" role="img">CU</span></header>
       <aside className="left-rail">
         <Wordmark />
         <nav aria-label="Main navigation" className="primary-nav">
           <NavButton active={screen === 'teammates' || screen === 'details'} icon="⌂" label="Teammates" onClick={() => setScreen('teammates')} />
           <NavButton active={screen === 'conversation'} icon="◌" label="Conversation" onClick={() => setScreen('conversation')} />
-          <NavButton active={screen === 'attention' || screen === 'recovery'} badge="2" icon="!" label="Needs Me" onClick={() => setScreen('attention')} />
+          <NavButton active={screen === 'attention' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Needs Me" onClick={() => setScreen('attention')} />
           <NavButton active={screen === 'search'} icon="⌕" label="Search" onClick={() => setScreen('search')} />
         </nav>
-        <div className="rail-roster"><div className="rail-section-title"><span>Teammates</span><span>4</span></div><Roster compact onSelect={openTeammate} teammates={teammates} /></div>
-        <div className="connection"><span aria-hidden="true" /><div><strong>Companion is ready</strong><small>4 teammates available</small></div></div>
+        <div className="rail-roster"><div className="rail-section-title"><span>Teammates</span><span>{companion.teammates.length}</span></div><Roster compact onSelect={openTeammate} teammates={companion.teammates} /></div>
+        <div className="connection"><span aria-hidden="true" /><div><strong>Companion is ready</strong><small>{companion.teammates.length} teammates available</small></div></div>
       </aside>
       <main aria-label={screenTitles[screen]} className="main-content" ref={mainRef} tabIndex={-1}>
         <h1 className="sr-only">Hermes Companion</h1>
-        <header className="desktop-topbar"><div><span>Hermes Companion</span><strong>{screenTitles[screen]}</strong></div><span aria-label="Profile: Atlas Weber" className="avatar avatar--user" role="img">AW</span></header>
+        <header className="desktop-topbar"><div><span>Hermes Companion</span><strong>{screenTitles[screen]}</strong></div><span aria-label="Profile: Companion user" className="avatar avatar--user" role="img">CU</span></header>
+        {companion.error && <div className="decision-toast" role="alert">{companion.error}</div>}
         {content}
       </main>
-      <ActivityRail decision={decision} />
+      <ActivityRail messages={companion.messages} teammateName={selected?.name} />
       <nav aria-label="Mobile navigation" className="bottom-nav">
         <NavButton active={screen === 'teammates' || screen === 'details'} icon="⌂" label="Teammates" onClick={() => setScreen('teammates')} />
         <NavButton active={screen === 'conversation'} icon="◌" label="Chat" onClick={() => setScreen('conversation')} />
-        <NavButton active={screen === 'attention' || screen === 'recovery'} badge="2" icon="!" label="Needs Me" onClick={() => setScreen('attention')} />
+        <NavButton active={screen === 'attention' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Needs Me" onClick={() => setScreen('attention')} />
         <NavButton active={screen === 'search'} icon="⌕" label="Search" onClick={() => setScreen('search')} />
       </nav>
     </div>
   )
 }
 
-function Wordmark() {
-  return <div className="wordmark"><span aria-hidden="true" className="wordmark__sigil">H+</span><span>Hermes<strong>Companion</strong></span></div>
+function SetupScreen({ initialBaseUrl, warnings, connecting, error, onConnect }: { initialBaseUrl: string; warnings: readonly string[]; connecting: boolean; error: string | null; onConnect: (baseUrl: string, token: string) => void }) {
+  const [baseUrl, setBaseUrl] = useState(initialBaseUrl)
+  const [token, setToken] = useState('')
+
+  return <main aria-labelledby="setup-title" className="recovery-screen"><section className="recovery-card"><Wordmark /><p className="kicker">First-run setup</p><h1 id="setup-title">Connect Hermes Companion</h1><p>Use the private HTTP(S) base URL for your Hermes gateway and a session token. Only the base URL is saved.</p><form onSubmit={(event) => { event.preventDefault(); onConnect(baseUrl, token) }}><label>Gateway base URL<input autoComplete="url" onChange={(event) => setBaseUrl(event.target.value)} placeholder="http://localhost:8642" required type="url" value={baseUrl} /></label><label>Session token<input autoComplete="off" onChange={(event) => setToken(event.target.value)} required type="password" value={token} /></label>{warnings.map((warning) => <p key={warning} role="status">{warning}</p>)}{error && <p role="alert">{error}</p>}<button className="primary-button" disabled={connecting} type="submit">{connecting ? 'Connecting…' : 'Connect privately'}</button></form></section></main>
 }
 
+function Wordmark() { return <div className="wordmark"><span aria-hidden="true" className="wordmark__sigil">H+</span><span>Hermes<strong>Companion</strong></span></div> }
 interface NavButtonProps { active: boolean; icon: string; label: string; onClick: () => void; badge?: string }
 
-function NavButton({ active, icon, label, onClick, badge }: NavButtonProps) {
-  return <button aria-current={active ? 'page' : undefined} className={`nav-button${active ? ' nav-button--active' : ''}`} onClick={onClick} type="button"><span aria-hidden="true" className="nav-button__icon">{icon}</span><span>{label}</span>{badge && <span aria-label={`${badge} items`} className="nav-badge">{badge}</span>}</button>
+function NavButton({ active, icon, label, onClick, badge }: NavButtonProps) { return <button aria-current={active ? 'page' : undefined} className={`nav-button${active ? ' nav-button--active' : ''}`} onClick={onClick} type="button"><span aria-hidden="true" className="nav-button__icon">{icon}</span><span>{label}</span>{badge && <span aria-label={`${badge} items`} className="nav-badge">{badge}</span>}</button> }
+
+function TeammatesHome({ teammates, attentionCount, onSelect, onNeedsMe }: { teammates: readonly Teammate[]; attentionCount: number; onSelect: (teammate: Teammate) => void; onNeedsMe: () => void }) {
+  return <section aria-labelledby="teammates-title" className="teammates-home"><div className="hero-copy"><p className="kicker">Your team at a glance</p><h2 id="teammates-title">Your team is ready.</h2><p className="screen-lede">Choose a teammate to start or resume a conversation.</p></div>{attentionCount > 0 && <button className="attention-banner" onClick={onNeedsMe} type="button"><span className="attention-banner__count">{attentionCount}</span><span><strong>Needs your judgment</strong><small>Review current approvals and interruptions</small></span><span aria-hidden="true">→</span></button>}<div className="section-heading"><div><p className="kicker">Available profiles</p><h3>Teammates</h3></div><span>{teammates.length} total</span></div><Roster onSelect={onSelect} teammates={[...teammates]} /></section>
 }
 
-function TeammatesHome({ onSelect, onNeedsMe }: { onSelect: (teammate: Teammate) => void; onNeedsMe: () => void }) {
-  return <section aria-labelledby="teammates-title" className="teammates-home"><div className="hero-copy"><p className="kicker">Sunday · your team at a glance</p><h2 id="teammates-title">Good morning.<br />Your team is moving.</h2><p className="screen-lede">Two moments need your attention. Everything else is in hand.</p></div><button className="attention-banner" onClick={onNeedsMe} type="button"><span className="attention-banner__count">2</span><span><strong>Needs your judgment</strong><small>One approval, one safe recovery</small></span><span aria-hidden="true">→</span></button><div className="section-heading"><div><p className="kicker">The people doing the work</p><h3>Teammates</h3></div><span>4 total</span></div><Roster onSelect={onSelect} teammates={teammates} /></section>
-}
+function ChooseTeammate({ onBack }: { onBack: () => void }) { return <section className="search-empty"><h2>Choose a teammate first</h2><p>Select a teammate to create a conversation.</p><button className="primary-button" onClick={onBack} type="button">View teammates</button></section> }
 
-function SearchPlaceholder() {
-  return <section aria-labelledby="search-title" className="search-screen"><p className="kicker">Find the thread, not the machinery</p><h2 id="search-title">Search</h2><label className="search-box"><span aria-hidden="true">⌕</span><span className="sr-only">Search conversations and teammates</span><input autoFocus placeholder="Search conversations and teammates…" /></label><div className="search-empty"><span aria-hidden="true">⌕</span><h3>What are you looking for?</h3><p>Try a teammate name, a conversation, or a result.</p></div></section>
-}
+function SearchPlaceholder() { return <section aria-labelledby="search-title" className="search-screen"><p className="kicker">Find the thread, not the machinery</p><h2 id="search-title">Search</h2><label className="search-box"><span aria-hidden="true">⌕</span><span className="sr-only">Search conversations and teammates</span><input autoFocus placeholder="Search conversations and teammates…" /></label><div className="search-empty"><span aria-hidden="true">⌕</span><h3>Search is local to loaded Companion data</h3><p>Conversation search will appear when history has loaded.</p></div></section> }

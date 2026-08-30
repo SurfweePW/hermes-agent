@@ -1,8 +1,10 @@
 export type ApprovalChoice = 'once' | 'session' | 'always' | 'deny'
 
 export interface GatewayProfile {
+  /** Exact gateway profile name; this is the transport identity. */
+  name: string
+  /** Kept optional for compatibility with older gateway responses. */
   id?: string
-  name?: string
   [key: string]: unknown
 }
 

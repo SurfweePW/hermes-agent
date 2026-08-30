@@ -62,6 +62,7 @@ button:focus-visible, input:focus-visible { outline: 3px solid var(--blue); outl
 .teammate-card__role { margin-top: 3px; color: var(--muted-text); font-size: 12px; }
 .teammate-card__summary { margin-top: 17px; color: #55594f; font-size: 13px; line-height: 1.45; }
 .status { padding: 5px 7px; border-radius: 99px; font: 800 9px var(--mono); text-transform: uppercase; }
+.status--idle { background: #eceee8; color: #55594f; }
 .status--working { background: #e1e5ff; color: #344fcf; }
 .status--completed { background: #dff5e9; color: #08724b; }
 .status--blocked { background: #ffe5df; color: #a32e1d; }

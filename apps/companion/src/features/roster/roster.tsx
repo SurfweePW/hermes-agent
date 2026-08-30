@@ -1,4 +1,4 @@
-export type TeammateStatus = 'working' | 'completed' | 'blocked' | 'needs-approval'
+export type TeammateStatus = 'idle' | 'working' | 'completed' | 'blocked' | 'needs-approval'
 
 export interface Teammate {
   id: string
@@ -10,6 +10,7 @@ export interface Teammate {
 }
 
 const statusLabels: Record<TeammateStatus, string> = {
+  idle: 'No activity observed',
   working: 'Working',
   completed: 'Completed',
   blocked: 'Blocked',
@@ -17,7 +18,7 @@ const statusLabels: Record<TeammateStatus, string> = {
 }
 
 interface RosterProps {
-  teammates: Teammate[]
+  teammates: readonly Teammate[]
   onSelect: (teammate: Teammate) => void
   compact?: boolean
 }

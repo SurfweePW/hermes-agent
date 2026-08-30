@@ -28,6 +28,59 @@ function isApprovalChoice(value: unknown): value is ApprovalChoice {
   return value === 'once' || value === 'session' || value === 'always' || value === 'deny'
 }
 
+function malformedPendingApprovals(): never {
+  throw new Error('Malformed approval.pending response.')
+}
+
+function validatedApproval(value: unknown): ApprovalRequestPayload {
+  if (!isRecord(value)
+    || typeof value.request_id !== 'string'
+    || value.request_id.trim().length === 0) {return malformedPendingApprovals()}
+
+  const approval: ApprovalRequestPayload = { request_id: value.request_id }
+  const optionalStrings = ['command', 'description', 'pattern_key'] as const
+  const optionalBooleans = ['allow_session', 'allow_permanent', 'smart_denied'] as const
+
+  for (const key of optionalStrings) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      if (typeof value[key] !== 'string') {return malformedPendingApprovals()}
+
+      approval[key] = value[key]
+    }
+  }
+
+  for (const key of optionalBooleans) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) {
+      if (typeof value[key] !== 'boolean') {return malformedPendingApprovals()}
+
+      approval[key] = value[key]
+    }
+  }
+
+  if (Object.prototype.hasOwnProperty.call(value, 'choices')) {
+    if (!Array.isArray(value.choices)
+      || !value.choices.every(isApprovalChoice)
+      || new Set(value.choices).size !== value.choices.length) {return malformedPendingApprovals()}
+
+    approval.choices = [...value.choices]
+  }
+
+  if (Object.prototype.hasOwnProperty.call(value, 'pattern_keys')) {
+    if (!Array.isArray(value.pattern_keys)
+      || !value.pattern_keys.every((key): key is string => typeof key === 'string')) {return malformedPendingApprovals()}
+
+    approval.pattern_keys = [...value.pattern_keys]
+  }
+
+  return approval
+}
+
+function validatedPendingApprovals(value: unknown): PendingApprovalsResult {
+  if (!isRecord(value) || !Array.isArray(value.approvals)) {return malformedPendingApprovals()}
+
+  return { approvals: value.approvals.map(validatedApproval) }
+}
+
 function toCompanionEvent(event: GatewayEvent): CompanionEvent | null {
   if (typeof event.session_id !== 'string' || !isRecord(event.payload)) {
     return null
@@ -64,7 +117,7 @@ function toCompanionEvent(event: GatewayEvent): CompanionEvent | null {
     case 'tool.complete':
       return { type: 'tool.complete', session_id, payload: event.payload }
     case 'approval.request': {
-      if (typeof payload.request_id !== 'string') {
+      if (typeof payload.request_id !== 'string' || payload.request_id.trim().length === 0) {
         return null
       }
 
@@ -195,7 +248,8 @@ export class CompanionClient {
   }
 
   listPendingApprovals(runtimeSessionId: string): Promise<PendingApprovalsResult> {
-    return this.gateway.request('approval.pending', { session_id: runtimeSessionId })
+    return this.gateway.request<unknown>('approval.pending', { session_id: runtimeSessionId })
+      .then(validatedPendingApprovals)
   }
 
   respondToApproval(

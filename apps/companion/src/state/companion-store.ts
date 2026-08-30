@@ -1,0 +1,679 @@
+import type { ConnectionState } from '@hermes/shared'
+
+import type { Teammate } from '../features/roster/roster'
+import { CompanionClient } from '../gateway/companion-client'
+import {
+  buildGatewayWebSocketUrl,
+  GATEWAY_BASE_URL_STORAGE_KEY,
+  parseGatewayBaseUrl,
+  persistGatewayBaseUrl
+} from '../gateway/connection'
+import type {
+  ApprovalChoice,
+  ApprovalRequestPayload,
+  ApprovalRespondResult,
+  CompanionEvent,
+  CompanionEventHandler,
+  CreateSessionOptions,
+  PendingApprovalsResult,
+  ProfilesListResult,
+  PromptSubmitResult,
+  SessionInterruptResult,
+  SessionMessage,
+  SessionResult
+} from '../gateway/types'
+import { createSessionSecretStore, type SessionSecretStore } from '../security/secret-store'
+
+export type CompanionPhase = 'setup' | 'connecting' | 'ready' | 'disconnected' | 'recovering'
+export type TurnStatus = 'idle' | 'submitting' | 'streaming' | 'uncertain'
+export type MessageRole = 'user' | 'assistant' | 'system'
+
+export interface CompanionMessage {
+  id: string
+  role: MessageRole
+  text: string
+}
+
+export interface PendingApproval {
+  requestId: string
+  sessionId: string
+  title: string
+  description: string
+  command?: string
+  choices: readonly ApprovalChoice[]
+  responding: boolean
+}
+
+export interface CompanionSnapshot {
+  phase: CompanionPhase
+  baseUrl: string
+  warnings: readonly string[]
+  teammates: readonly Teammate[]
+  selectedTeammateId: string | null
+  runtimeSessionId: string | null
+  storedSessionId: string | null
+  messages: readonly CompanionMessage[]
+  streamingText: string
+  pendingApproval: PendingApproval | null
+  draft: string
+  turnStatus: TurnStatus
+  error: string | null
+}
+
+export interface CompanionGateway {
+  readonly connectionState: ConnectionState
+  connect(wsUrl: string): Promise<void>
+  close(): void
+  onEvent(handler: CompanionEventHandler): () => void
+  onState(handler: (state: ConnectionState) => void): () => void
+  listProfiles(): Promise<ProfilesListResult>
+  createSession(options?: CreateSessionOptions): Promise<SessionResult>
+  resumeSession(storedSessionId: string, profile?: string): Promise<SessionResult>
+  submitPrompt(runtimeSessionId: string, text: string): Promise<PromptSubmitResult>
+  interruptSession(runtimeSessionId: string): Promise<SessionInterruptResult>
+  listPendingApprovals(runtimeSessionId: string): Promise<PendingApprovalsResult>
+  respondToApproval(runtimeSessionId: string, requestId: string, choice: ApprovalChoice): Promise<ApprovalRespondResult>
+}
+
+export type CompanionGatewayFactory = () => CompanionGateway
+
+export interface CompanionStorage {
+  getItem(key: string): string | null
+  setItem(key: string, value: string): void
+}
+
+export interface CompanionStoreOptions {
+  gatewayFactory?: CompanionGatewayFactory
+  storage?: CompanionStorage
+  secretStore?: SessionSecretStore
+}
+
+export interface CompanionStore {
+  getSnapshot(): CompanionSnapshot
+  subscribe(listener: () => void): () => void
+  configure(input: { baseUrl: string; token: string }): Promise<void>
+  selectTeammate(teammateId: string, storedSessionId?: string): Promise<void>
+  setDraft(draft: string): void
+  submitDraft(): Promise<void>
+  interrupt(): Promise<void>
+  respondToApproval(choice: ApprovalChoice): Promise<void>
+  recover(): Promise<void>
+  destroy(): void
+}
+
+const TOKEN_SECRET_NAME = 'gateway-token'
+
+const teammateMetadata: Record<string, Pick<Teammate, 'name' | 'role' | 'initials'>> = {
+  atlas: { name: 'Atlas', role: 'Chief of Staff', initials: 'A' },
+  mentor: { name: 'Mentor', role: 'Investments', initials: 'M' },
+  maven: { name: 'Maven', role: 'Data Operations', initials: 'MV' },
+  scout: { name: 'Scout', role: 'Research', initials: 'S' }
+}
+
+function browserStorage(): CompanionStorage | undefined {
+  if (typeof window === 'undefined') {return undefined}
+
+  return window.localStorage
+}
+
+function safeStoredBaseUrl(storage?: CompanionStorage): string {
+  if (!storage) {return ''}
+
+  try {
+    return storage.getItem(GATEWAY_BASE_URL_STORAGE_KEY) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function freezeSnapshot(snapshot: CompanionSnapshot): CompanionSnapshot {
+  for (const teammate of snapshot.teammates) {Object.freeze(teammate)}
+
+  for (const message of snapshot.messages) {Object.freeze(message)}
+  Object.freeze(snapshot.warnings)
+  Object.freeze(snapshot.teammates)
+  Object.freeze(snapshot.messages)
+
+  if (snapshot.pendingApproval) {
+    Object.freeze(snapshot.pendingApproval.choices)
+    Object.freeze(snapshot.pendingApproval)
+  }
+
+  return Object.freeze(snapshot)
+}
+
+function displayName(value: unknown, fallback: string): string {
+  if (typeof value !== 'string') {return fallback}
+
+  if (/[\\/]/.test(value) || value.startsWith('.') || value.includes('://')) {return fallback}
+  const normalized = value.trim().replace(/[_-]+/g, ' ').replace(/\s+/g, ' ')
+
+  if (!normalized || normalized.length > 60) {return fallback}
+
+  return normalized.replace(/\b\w/g, (letter) => letter.toUpperCase())
+}
+
+function profileAlias(id: unknown, name: unknown): keyof typeof teammateMetadata | null {
+  const candidate = `${typeof id === 'string' ? id : ''} ${typeof name === 'string' ? name : ''}`.toLowerCase()
+
+  for (const alias of Object.keys(teammateMetadata)) {
+    if (new RegExp(`(^|[^a-z])${alias}([^a-z]|$)`).test(candidate)) {return alias}
+  }
+
+  return null
+}
+
+function initialsFor(name: string): string {
+  return name.split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase() || 'H'
+}
+
+function rosterState(
+  teammateId: string,
+  state: Pick<CompanionSnapshot, 'phase' | 'selectedTeammateId' | 'runtimeSessionId' | 'pendingApproval' | 'turnStatus'>,
+  completedSessionId: string | null
+): Pick<Teammate, 'status' | 'summary'> {
+  if (teammateId !== state.selectedTeammateId) {
+    return { status: 'idle', summary: 'No local activity observed.' }
+  }
+
+  if (state.phase === 'disconnected' || state.phase === 'recovering' || state.turnStatus === 'uncertain') {
+    return { status: 'blocked', summary: 'Connection interrupted.' }
+  }
+
+  if (state.pendingApproval?.sessionId === state.runtimeSessionId) {
+    return { status: 'needs-approval', summary: 'Waiting for your approval.' }
+  }
+
+  if (state.turnStatus === 'streaming' || state.turnStatus === 'submitting') {
+    return { status: 'working', summary: 'Conversation in progress.' }
+  }
+
+  if (state.runtimeSessionId && completedSessionId === state.runtimeSessionId) {
+    return { status: 'completed', summary: 'Turn completed.' }
+  }
+
+  return { status: 'idle', summary: 'No local activity observed.' }
+}
+
+function messageText(message: SessionMessage): string | null {
+  const content = message.content
+
+  if (typeof content === 'string') {return content}
+
+  if (Array.isArray(content)) {
+    const text = content
+      .map((part) => typeof part === 'string' ? part : (part && typeof part === 'object' && 'text' in part && typeof part.text === 'string' ? part.text : ''))
+      .join('')
+
+    return text || null
+  }
+
+  if (typeof message.text === 'string') {return message.text}
+
+  return null
+}
+
+function toMessages(messages: SessionMessage[]): CompanionMessage[] {
+  return messages.flatMap((message, index) => {
+    const text = messageText(message)
+
+    if (!text) {return []}
+    const role: MessageRole = message.role === 'user' || message.role === 'system' ? message.role : 'assistant'
+
+    return [{ id: `history-${index}`, role, text }]
+  })
+}
+
+function approvalFromPayload(sessionId: string, payload: ApprovalRequestPayload): PendingApproval {
+  const choices = payload.choices?.length
+    ? [...payload.choices]
+    : (['once', ...(payload.allow_session === false ? [] : ['session'] as const), ...(payload.allow_permanent ? ['always'] as const : []), 'deny'] as ApprovalChoice[])
+
+  return {
+    requestId: payload.request_id,
+    sessionId,
+    title: payload.description || 'Approval requested',
+    description: payload.command ? 'Review this action before Hermes continues.' : (payload.description || 'Hermes needs your decision to continue.'),
+    ...(payload.command ? { command: payload.command } : {}),
+    choices,
+    responding: false
+  }
+}
+
+function publicError(error: unknown): string {
+  if (error instanceof Error && /url|required|http|gateway/i.test(error.message) && !/[?&](token|ticket)=/i.test(error.message)) {
+    return error.message
+  }
+
+  return 'Companion could not reach the gateway. Check the connection and try again.'
+}
+
+export function createCompanionStore(options: CompanionStoreOptions = {}): CompanionStore {
+  const gatewayFactory = options.gatewayFactory ?? (() => new CompanionClient())
+  const storage = options.storage ?? browserStorage()
+  const secrets = options.secretStore ?? createSessionSecretStore()
+  const profileIds = new Map<string, string>()
+  const listeners = new Set<() => void>()
+  let gateway: CompanionGateway | null = null
+  let removeEventListener: (() => void) | null = null
+  let removeStateListener: (() => void) | null = null
+  let destroyed = false
+  let messageSequence = 0
+  let connectionGeneration = 0
+  let sessionGeneration = 0
+  let completedSessionId: string | null = null
+
+  let pendingSubmit: {
+    client: CompanionGateway
+    connectionGeneration: number
+    sessionGeneration: number
+    runtimeSessionId: string
+    text: string
+    userRecorded: boolean
+    completed: boolean
+  } | null = null
+
+  let snapshot = freezeSnapshot({
+    phase: 'setup',
+    baseUrl: safeStoredBaseUrl(storage),
+    warnings: [],
+    teammates: [],
+    selectedTeammateId: null,
+    runtimeSessionId: null,
+    storedSessionId: null,
+    messages: [],
+    streamingText: '',
+    pendingApproval: null,
+    draft: '',
+    turnStatus: 'idle',
+    error: null
+  })
+
+  const publish = (changes: Partial<CompanionSnapshot>) => {
+    if (destroyed) {return}
+    const next = { ...snapshot, ...changes }
+
+    const teammates = next.teammates.map((teammate) => ({
+      ...teammate,
+      ...rosterState(teammate.id, next, completedSessionId)
+    }))
+
+    snapshot = freezeSnapshot({ ...next, teammates })
+
+    for (const listener of listeners) {listener()}
+  }
+
+  const isDisconnected = () => snapshot.phase === 'disconnected'
+
+  const detachGateway = () => {
+    removeEventListener?.()
+    removeStateListener?.()
+    removeEventListener = null
+    removeStateListener = null
+  }
+
+  const handleEvent = (event: CompanionEvent) => {
+    if (event.session_id !== snapshot.runtimeSessionId) {return}
+
+    if (event.type === 'message.delta') {
+      publish({ streamingText: snapshot.streamingText + event.payload.text, turnStatus: 'streaming' })
+
+      return
+    }
+
+    if (event.type === 'message.complete') {
+      const text = event.payload.text ?? snapshot.streamingText
+
+      const submittedTurn = pendingSubmit?.runtimeSessionId === event.session_id
+        && pendingSubmit.client === gateway
+        && pendingSubmit.connectionGeneration === connectionGeneration
+        && pendingSubmit.sessionGeneration === sessionGeneration
+        ? pendingSubmit
+        : null
+
+      const messages = [...snapshot.messages]
+
+      if (submittedTurn && !submittedTurn.userRecorded) {
+        messages.push({ id: `message-${++messageSequence}`, role: 'user', text: submittedTurn.text })
+        submittedTurn.userRecorded = true
+      }
+
+      if (text) {messages.push({ id: `message-${++messageSequence}`, role: 'assistant', text })}
+
+      if (submittedTurn) {submittedTurn.completed = true}
+      completedSessionId = event.session_id
+      publish({
+        draft: submittedTurn && snapshot.draft === submittedTurn.text ? '' : snapshot.draft,
+        messages,
+        streamingText: '',
+        turnStatus: 'idle'
+      })
+
+      return
+    }
+
+    if (event.type === 'approval.request') {
+      publish({ pendingApproval: approvalFromPayload(event.session_id, event.payload) })
+    }
+  }
+
+  const handleState = (state: ConnectionState) => {
+    if (state !== 'closed' && state !== 'error') {return}
+    publish({
+      phase: 'disconnected',
+      turnStatus: snapshot.turnStatus === 'streaming' || snapshot.turnStatus === 'submitting'
+        ? 'uncertain'
+        : snapshot.turnStatus,
+      error: null
+    })
+  }
+
+  const installGateway = (generation: number) => {
+    const replaced = gateway
+    detachGateway()
+    replaced?.close()
+    const client = gatewayFactory()
+    gateway = client
+    sessionGeneration += 1
+    completedSessionId = null
+    pendingSubmit = null
+    publish({ runtimeSessionId: null, pendingApproval: null, streamingText: '', turnStatus: 'idle' })
+    removeEventListener = client.onEvent((event) => {
+      if (gateway === client && connectionGeneration === generation) {handleEvent(event)}
+    })
+    removeStateListener = client.onState((state) => {
+      if (gateway === client && connectionGeneration === generation) {handleState(state)}
+    })
+
+    return client
+  }
+
+  const isCurrentConnection = (client: CompanionGateway, generation: number) => (
+    !destroyed && gateway === client && connectionGeneration === generation
+  )
+
+  const loadRoster = async (client: CompanionGateway, generation: number) => {
+    const result = await client.listProfiles()
+
+    if (!isCurrentConnection(client, generation)) {return false}
+    const nextProfileIds = new Map<string, string>()
+    const idCounts = new Map<string, number>()
+
+    const teammates = result.profiles.flatMap((profile, index): Teammate[] => {
+      if (typeof profile.name !== 'string' || !profile.name) {return []}
+      const alias = profileAlias(profile.id, profile.name)
+      const metadata = alias ? teammateMetadata[alias] : null
+      const name = metadata?.name ?? displayName(profile.name, `Hermes Teammate ${index + 1}`)
+      const baseId = alias ?? `teammate-${index + 1}`
+      const count = (idCounts.get(baseId) ?? 0) + 1
+      idCounts.set(baseId, count)
+      const id = count === 1 ? baseId : `${baseId}-${count}`
+      nextProfileIds.set(id, profile.name)
+
+      return [{
+        id,
+        name,
+        initials: metadata?.initials ?? initialsFor(name),
+        role: metadata?.role ?? 'Hermes Teammate',
+        status: 'idle',
+        summary: 'No local activity observed.'
+      }]
+    })
+
+    if (!isCurrentConnection(client, generation)) {return false}
+    profileIds.clear()
+
+    for (const [id, profile] of nextProfileIds) {profileIds.set(id, profile)}
+    publish({ teammates })
+
+    return true
+  }
+
+  const applySession = async (
+    client: CompanionGateway,
+    result: SessionResult,
+    connectionOperation: number,
+    sessionOperation: number
+  ) => {
+    if (!isCurrentConnection(client, connectionOperation) || sessionGeneration !== sessionOperation) {return false}
+    completedSessionId = null
+    publish({
+      runtimeSessionId: result.session_id,
+      storedSessionId: result.stored_session_id,
+      messages: toMessages(result.messages),
+      streamingText: '',
+      pendingApproval: null,
+      turnStatus: 'idle'
+    })
+    const pending = await client.listPendingApprovals(result.session_id)
+
+    if (!isCurrentConnection(client, connectionOperation)
+      || sessionGeneration !== sessionOperation
+      || snapshot.runtimeSessionId !== result.session_id) {return false}
+
+    publish({ pendingApproval: pending.approvals[0] ? approvalFromPayload(result.session_id, pending.approvals[0]) : null })
+
+    return true
+  }
+
+  const connect = async (phase: 'connecting' | 'recovering', operation: number) => {
+    const token = secrets.get(TOKEN_SECRET_NAME)
+
+    if (!token) {
+      publish({ phase: 'setup', error: 'Enter a gateway session token to connect.' })
+
+      return null
+    }
+
+    publish({ phase, error: null })
+    const client = installGateway(operation)
+    const wsUrl = buildGatewayWebSocketUrl({ baseUrl: snapshot.baseUrl, token })
+    await client.connect(wsUrl)
+
+    if (!isCurrentConnection(client, operation)) {return null}
+
+    if (!await loadRoster(client, operation)) {return null}
+
+    return client
+  }
+
+  return {
+    getSnapshot: () => snapshot,
+    subscribe(listener) {
+      listeners.add(listener)
+
+      return () => listeners.delete(listener)
+    },
+    async configure(input) {
+      const operation = ++connectionGeneration
+
+      try {
+        const configuration = parseGatewayBaseUrl(input.baseUrl)
+        secrets.set(TOKEN_SECRET_NAME, input.token)
+
+        if (storage) {persistGatewayBaseUrl(storage, input)}
+        publish({ baseUrl: configuration.baseUrl, warnings: configuration.warnings, error: null })
+        const client = await connect('connecting', operation)
+
+        if (client && isCurrentConnection(client, operation)) {publish({ phase: 'ready' })}
+      } catch (error) {
+        if (connectionGeneration === operation) {publish({ phase: 'setup', error: publicError(error) })}
+      }
+    },
+    async selectTeammate(teammateId, storedSessionId) {
+      const client = gateway
+
+      if (!client || snapshot.phase !== 'ready') {return}
+      const profileId = profileIds.get(teammateId)
+      const teammate = snapshot.teammates.find((item) => item.id === teammateId)
+
+      if (!profileId || !teammate) {return}
+      const connectionOperation = connectionGeneration
+      const sessionOperation = ++sessionGeneration
+      completedSessionId = null
+      pendingSubmit = null
+      publish({
+        selectedTeammateId: teammateId,
+        runtimeSessionId: null,
+        storedSessionId: null,
+        messages: [],
+        streamingText: '',
+        pendingApproval: null,
+        turnStatus: 'idle',
+        error: null
+      })
+
+      try {
+        const result = storedSessionId
+          ? await client.resumeSession(storedSessionId, profileId)
+          : await client.createSession({ profile: profileId, title: `Conversation with ${teammate.name}` })
+
+        await applySession(client, result, connectionOperation, sessionOperation)
+      } catch (error) {
+        if (isCurrentConnection(client, connectionOperation) && sessionGeneration === sessionOperation) {
+          publish({ error: publicError(error) })
+        }
+      }
+    },
+    setDraft(draft) { publish({ draft }) },
+    async submitDraft() {
+      const client = gateway
+      const runtimeId = snapshot.runtimeSessionId
+      const text = snapshot.draft.trim()
+
+      if (!client || !runtimeId || !text || snapshot.phase !== 'ready') {return}
+
+      const submittedTurn = {
+        client,
+        connectionGeneration,
+        sessionGeneration,
+        runtimeSessionId: runtimeId,
+        text,
+        userRecorded: false,
+        completed: false
+      }
+
+      pendingSubmit = submittedTurn
+      publish({ turnStatus: 'submitting', error: null })
+
+      try {
+        await client.submitPrompt(runtimeId, text)
+
+        if (gateway !== client
+          || connectionGeneration !== submittedTurn.connectionGeneration
+          || sessionGeneration !== submittedTurn.sessionGeneration
+          || snapshot.runtimeSessionId !== runtimeId) {return}
+
+        const disconnected = isDisconnected() || gateway !== client
+
+        const messages = submittedTurn.userRecorded
+          ? snapshot.messages
+          : [...snapshot.messages, { id: `message-${++messageSequence}`, role: 'user' as const, text }]
+
+        submittedTurn.userRecorded = true
+
+        publish({
+          draft: snapshot.draft === text ? '' : snapshot.draft,
+          messages,
+          turnStatus: submittedTurn.completed ? 'idle' : disconnected ? 'uncertain' : 'streaming'
+        })
+      } catch (error) {
+        if (gateway === client
+          && connectionGeneration === submittedTurn.connectionGeneration
+          && sessionGeneration === submittedTurn.sessionGeneration
+          && !isDisconnected()
+          && !submittedTurn.completed) {publish({ turnStatus: 'idle', error: publicError(error) })}
+      } finally {
+        if (pendingSubmit === submittedTurn) {pendingSubmit = null}
+      }
+    },
+    async interrupt() {
+      const client = gateway
+      const runtimeId = snapshot.runtimeSessionId
+      const connectionOperation = connectionGeneration
+      const sessionOperation = sessionGeneration
+
+      if (!client || !runtimeId) {return}
+
+      try { await client.interruptSession(runtimeId) } catch (error) {
+        if (isCurrentConnection(client, connectionOperation) && sessionGeneration === sessionOperation) {
+          publish({ error: publicError(error) })
+        }
+      }
+    },
+    async respondToApproval(choice) {
+      const approval = snapshot.pendingApproval
+      const client = gateway
+
+      if (!approval || !client || snapshot.phase !== 'ready') {return}
+      const connectionOperation = connectionGeneration
+      const sessionOperation = sessionGeneration
+      publish({ pendingApproval: { ...approval, responding: true }, error: null })
+
+      try {
+        const result = await client.respondToApproval(approval.sessionId, approval.requestId, choice)
+
+        const isSameApproval = isCurrentConnection(client, connectionOperation)
+          && sessionGeneration === sessionOperation
+          && snapshot.pendingApproval?.sessionId === approval.sessionId
+          && snapshot.pendingApproval.requestId === approval.requestId
+
+        if (result.resolved > 0 && isSameApproval) {
+          publish({ pendingApproval: null })
+        } else if (isSameApproval) {
+          publish({ pendingApproval: { ...approval, responding: false }, error: 'The approval is still pending.' })
+        }
+      } catch (error) {
+        if (isCurrentConnection(client, connectionOperation)
+          && sessionGeneration === sessionOperation
+          && snapshot.pendingApproval?.sessionId === approval.sessionId
+          && snapshot.pendingApproval.requestId === approval.requestId) {
+          publish({ pendingApproval: { ...approval, responding: false }, error: publicError(error) })
+        }
+      }
+    },
+    async recover() {
+      const selectedId = snapshot.selectedTeammateId
+      const profileId = selectedId ? profileIds.get(selectedId) : undefined
+      const storedId = snapshot.storedSessionId
+
+      const connectionOperation = ++connectionGeneration
+
+      try {
+        const client = await connect('recovering', connectionOperation)
+
+        if (!client || !isCurrentConnection(client, connectionOperation)) {return}
+
+        if (selectedId && profileId) {
+          const teammate = snapshot.teammates.find((item) => item.id === selectedId)
+          const sessionOperation = ++sessionGeneration
+
+          const result = storedId
+            ? await client.resumeSession(storedId, profileId)
+            : await client.createSession({ profile: profileId, title: `Conversation with ${teammate?.name ?? 'Hermes'}` })
+
+          if (!await applySession(client, result, connectionOperation, sessionOperation)) {return}
+        } else {
+          publish({ runtimeSessionId: null, storedSessionId: null, messages: [], pendingApproval: null, turnStatus: 'idle' })
+        }
+
+        if (isCurrentConnection(client, connectionOperation)) {publish({ phase: 'ready', error: null })}
+      } catch (error) {
+        if (connectionGeneration === connectionOperation) {
+          publish({ phase: 'disconnected', error: publicError(error) })
+        }
+      }
+    },
+    destroy() {
+      if (destroyed) {return}
+      destroyed = true
+      connectionGeneration += 1
+      sessionGeneration += 1
+      detachGateway()
+      gateway?.close()
+      gateway = null
+      secrets.clear()
+      listeners.clear()
+    }
+  }
+}

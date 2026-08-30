@@ -112,8 +112,8 @@ describe('CompanionClient RPC domain methods', () => {
 
     const profilesPromise = client.listProfiles()
     expect(socket.frame()).toMatchObject({ method: 'profiles.list', params: {} })
-    socket.respond({ profiles: [{ id: 'default', name: 'Default' }] })
-    await expect(profilesPromise).resolves.toEqual({ profiles: [{ id: 'default', name: 'Default' }] })
+    socket.respond({ profiles: [{ name: 'default' }] })
+    await expect(profilesPromise).resolves.toEqual({ profiles: [{ name: 'default' }] })
 
     const createPromise = client.createSession({ profile: 'loki', title: 'Exact title' })
     expect(socket.frame()).toMatchObject({
@@ -170,7 +170,7 @@ describe('CompanionClient RPC domain methods', () => {
     })
     socket.respond({ approvals: [{ request_id: 'request/raw:α', command: 'rm tmp', flags: ['risky'] }] })
     await expect(pendingPromise).resolves.toEqual({
-      approvals: [{ request_id: 'request/raw:α', command: 'rm tmp', flags: ['risky'] }]
+      approvals: [{ request_id: 'request/raw:α', command: 'rm tmp' }]
     })
 
     const respondPromise = client.respondToApproval(
@@ -213,9 +213,72 @@ describe('CompanionClient RPC domain methods', () => {
     })
     await resumePromise
   })
+
+  it.each([
+    { approvals: 'not-an-array' },
+    { approvals: [null] },
+    { approvals: [{ command: 'missing request id' }] },
+    { approvals: [{ request_id: '' }] },
+    { approvals: [{ request_id: ' \t\n ' }] },
+    { approvals: [{ request_id: 'bad-boolean', allow_permanent: 'false' }] },
+    { approvals: [{ request_id: 'bad-choice', choices: ['once', 'later'] }] },
+    { approvals: [{ request_id: 'bad-array', pattern_keys: ['ok', false] }] }
+  ])('rejects malformed approval.pending records: %j', async (result) => {
+    const { client, connect } = harness()
+    const socket = await connect()
+    const pending = client.listPendingApprovals('runtime-safe')
+    socket.respond(result)
+
+    await expect(pending).rejects.toThrow(/malformed approval\.pending response/i)
+  })
+
+  it('allowlists validated approval.pending fields and preserves strict false booleans', async () => {
+    const { client, connect } = harness()
+    const socket = await connect()
+    const pending = client.listPendingApprovals('runtime-safe')
+    socket.respond({
+      approvals: [{
+        request_id: ' safe ',
+        allow_session: false,
+        allow_permanent: false,
+        choices: ['once', 'deny'],
+        ignored: { constructor: 'metadata' }
+      }]
+    })
+
+    await expect(pending).resolves.toEqual({
+      approvals: [{
+        request_id: ' safe ',
+        allow_session: false,
+        allow_permanent: false,
+        choices: ['once', 'deny']
+      }]
+    })
+  })
 })
 
 describe('CompanionClient typed event stream', () => {
+  it.each(['', ' \t\n '])(
+    'drops approval.request events with an empty request ID: %j',
+    async (requestId) => {
+      const { client, connect } = harness()
+      const socket = await connect()
+      const events: CompanionEvent[] = []
+      client.onEvent((event) => events.push(event))
+
+      socket.receive({
+        method: 'event',
+        params: {
+          type: 'approval.request',
+          session_id: 's:empty-request-id',
+          payload: { request_id: requestId }
+        }
+      })
+
+      expect(events).toEqual([])
+    }
+  )
+
   it('delivers typed events before a racing RPC result and keeps sessions distinguishable', async () => {
     const { client, connect } = harness()
     const socket = await connect()
@@ -254,7 +317,7 @@ describe('CompanionClient typed event stream', () => {
         type: 'approval.request',
         session_id: 's:2',
         payload: {
-          request_id: 'request:raw/7',
+          request_id: ' request:raw/7 ',
           command: 'deploy',
           description: 'Deploy now?',
           allow_session: true,
@@ -278,7 +341,7 @@ describe('CompanionClient typed event stream', () => {
         type: 'approval.request',
         session_id: 's:2',
         payload: {
-          request_id: 'request:raw/7',
+          request_id: ' request:raw/7 ',
           command: 'deploy',
           description: 'Deploy now?',
           allow_session: true,
