@@ -14,6 +14,10 @@ public class MainActivity extends BridgeActivity {
         registerPlugin(GatewayTokenPlugin.class);
         super.onCreate(savedInstanceState);
 
+        if (getBridge() == null || getBridge().getWebView() == null) {
+            return;
+        }
+
         WindowCompat.enableEdgeToEdge(getWindow());
         WebView.setWebContentsDebuggingEnabled(BuildConfig.DEBUG);
         getBridge().getWebView().getSettings().setMixedContentMode(

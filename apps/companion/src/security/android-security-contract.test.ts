@@ -46,6 +46,12 @@ describe('Android native security contract', () => {
     expect(debugPolicy).toContain('cannot express')
   })
 
+  it('fails closed without crashing when Capacitor cannot create a WebView bridge', () => {
+    const activity = read('android/app/src/main/java/com/hermes/companion/MainActivity.java')
+
+    expect(activity).toMatch(/if \(getBridge\(\) == null \|\| getBridge\(\)\.getWebView\(\) == null\) \{\s*return;\s*\}/)
+  })
+
   it('does not embed a server URL or broaden navigation in Capacitor config', () => {
     const config = read('capacitor.config.ts')
 
