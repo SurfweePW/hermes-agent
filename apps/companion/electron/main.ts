@@ -10,6 +10,11 @@ export const APP_ID = 'com.hermes.companion'
 export const PRODUCT_NAME = 'Hermes Companion'
 export const PROTOCOL = 'hermes-companion'
 export const USER_DATA_DIRECTORY = 'Hermes Companion'
+export const DEVELOPMENT_USER_DATA_DIRECTORY = 'Hermes Companion Development'
+
+export function userDataDirectory(isPackaged: boolean): string {
+  return isPackaged ? USER_DATA_DIRECTORY : DEVELOPMENT_USER_DATA_DIRECTORY
+}
 
 protocol.registerSchemesAsPrivileged([{
   scheme: PROTOCOL,
@@ -161,7 +166,10 @@ export function createCompanionWindow(target?: RendererTarget): BrowserWindow {
 
 if (app?.whenReady) {
   app.setName(PRODUCT_NAME)
-  app.setPath('userData', join(app.getPath('appData'), USER_DATA_DIRECTORY))
+  // A source/dev build has a different Electron code identity from the
+  // packaged Companion. Never let it decrypt the packaged app's Keychain
+  // ciphertext: macOS can otherwise stack password prompts on every reload.
+  app.setPath('userData', join(app.getPath('appData'), userDataDirectory(app.isPackaged)))
 
   void app.whenReady().then(() => {
     const directory = dirname(fileURLToPath(import.meta.url))

@@ -8,12 +8,14 @@ import { CHANNELS } from './channels'
 import {
   APP_ID,
   browserWindowOptions,
+  DEVELOPMENT_USER_DATA_DIRECTORY,
   isTrustedRendererUrl,
   PRODUCT_NAME,
   PROTOCOL,
   registerGatewayTokenIpc,
   selectRendererTarget,
-  USER_DATA_DIRECTORY
+  USER_DATA_DIRECTORY,
+  userDataDirectory
 } from './main'
 
 describe('Companion Electron shell', () => {
@@ -24,6 +26,12 @@ describe('Companion Electron shell', () => {
     expect(USER_DATA_DIRECTORY).toBe('Hermes Companion')
     expect(APP_ID).not.toBe('com.nousresearch.hermes')
     expect(PROTOCOL).not.toBe('hermes')
+  })
+
+  it('isolates development credentials from the packaged Keychain identity', () => {
+    expect(userDataDirectory(true)).toBe(USER_DATA_DIRECTORY)
+    expect(userDataDirectory(false)).toBe(DEVELOPMENT_USER_DATA_DIRECTORY)
+    expect(DEVELOPMENT_USER_DATA_DIRECTORY).not.toBe(USER_DATA_DIRECTORY)
   })
 
   it('uses hardened renderer preferences', () => {
