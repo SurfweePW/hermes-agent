@@ -6,6 +6,8 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import android.webkit.WebView;
+
 import org.json.JSONObject;
 
 import java.net.URI;
@@ -22,64 +24,66 @@ public final class GatewayTokenPlugin extends Plugin {
 
     @PluginMethod
     public void get(PluginCall call) {
-        if (!isTrustedCall(call) || !hasExactKeys(call, new String[] {})) {
-            call.reject(GENERIC_ERROR);
-            return;
-        }
-
-        try {
-            String token = store.get();
-            JSObject result = new JSObject();
-            if (token != null) {
-                result.put("value", token);
+        withTrustedCall(call, new String[] {}, () -> {
+            try {
+                String token = store.get();
+                JSObject result = new JSObject();
+                if (token != null) {
+                    result.put("value", token);
+                }
+                call.resolve(result);
+            } catch (Exception ignored) {
+                call.reject(GENERIC_ERROR);
             }
-            call.resolve(result);
-        } catch (Exception ignored) {
-            call.reject(GENERIC_ERROR);
-        }
+        });
     }
 
     @PluginMethod
     public void set(PluginCall call) {
-        if (!isTrustedCall(call) || !hasExactKeys(call, new String[] {"value"})) {
-            call.reject(GENERIC_ERROR);
-            return;
-        }
+        withTrustedCall(call, new String[] {"value"}, () -> {
+            String token = call.getString("value");
+            if (!GatewayTokenValidator.isValid(token)) {
+                call.reject(GENERIC_ERROR);
+                return;
+            }
 
-        String token = call.getString("value");
-        if (!GatewayTokenValidator.isValid(token)) {
-            call.reject(GENERIC_ERROR);
-            return;
-        }
-
-        try {
-            store.set(token);
-            call.resolve();
-        } catch (Exception ignored) {
-            call.reject(GENERIC_ERROR);
-        }
+            try {
+                store.set(token);
+                call.resolve();
+            } catch (Exception ignored) {
+                call.reject(GENERIC_ERROR);
+            }
+        });
     }
 
     @PluginMethod
     public void reset(PluginCall call) {
-        if (!isTrustedCall(call) || !hasExactKeys(call, new String[] {})) {
-            call.reject(GENERIC_ERROR);
+        withTrustedCall(call, new String[] {}, () -> {
+            try {
+                store.reset();
+                call.resolve();
+            } catch (Exception ignored) {
+                call.reject(GENERIC_ERROR);
+            }
+        });
+    }
+
+    private void withTrustedCall(PluginCall call, String[] expectedKeys, Runnable action) {
+        if (call == null || getBridge() == null || getBridge().getWebView() == null) {
+            if (call != null) {
+                call.reject(GENERIC_ERROR);
+            }
             return;
         }
 
-        try {
-            store.reset();
-            call.resolve();
-        } catch (Exception ignored) {
-            call.reject(GENERIC_ERROR);
-        }
-    }
-
-    private boolean isTrustedCall(PluginCall call) {
-        if (call == null || getBridge() == null || getBridge().getWebView() == null) {
-            return false;
-        }
-        return isTrustedBundledOrigin(getBridge().getWebView().getUrl());
+        WebView webView = getBridge().getWebView();
+        webView.post(() -> {
+            if (!isTrustedBundledOrigin(webView.getUrl()) || !hasExactKeys(call, expectedKeys)) {
+                call.reject(GENERIC_ERROR);
+                return;
+            }
+            action.run();
+        });
     }
 
     static boolean isTrustedBundledOrigin(String candidate) {

@@ -30,6 +30,14 @@ describe('Android native security contract', () => {
     expect(plugin).not.toMatch(/call\.reject\([^\n]*(exception|getMessage|token)/i)
   })
 
+  it('reads the WebView URL only from the WebView thread', () => {
+    const plugin = read(pluginPath)
+
+    expect(plugin).toContain('webView.post(() -> {')
+    expect(plugin).toMatch(/webView\.post\(\(\) -> \{[\s\S]*webView\.getUrl\(\)/)
+    expect(plugin).not.toMatch(/return isTrustedBundledOrigin\([^;]*getUrl\(\)\)/)
+  })
+
   it('keeps release cleartext disabled and isolates the honest limitation to debug', () => {
     const mainManifest = read('android/app/src/main/AndroidManifest.xml')
     const debugManifest = read('android/app/src/debug/AndroidManifest.xml')

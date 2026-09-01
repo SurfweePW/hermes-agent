@@ -107,7 +107,7 @@ function SetupScreen({ initialBaseUrl, warnings, connecting, error, hasSavedToke
   const [token, setToken] = useState('')
 
   const storageCopy = storesTokenEncrypted
-    ? 'The native app stores the token encrypted in macOS secure storage.'
+    ? 'The native app stores the token encrypted in secure device storage.'
     : 'The browser keeps the token for this session only.'
 
   return <main aria-labelledby="setup-title" className="recovery-screen"><section className="recovery-card"><Wordmark /><p className="kicker">Connection setup</p><h1 id="setup-title">Connect Hermes Companion</h1><p>Use the private HTTP(S) base URL for your Hermes gateway and a session token. {storageCopy}</p><form onSubmit={(event) => { event.preventDefault(); onConnect(baseUrl, token) }}><label>Gateway base URL<input autoComplete="url" onChange={(event) => setBaseUrl(event.target.value)} placeholder="http://localhost:8642" required type="url" value={baseUrl} /></label><label>Session token<input autoComplete="off" onChange={(event) => setToken(event.target.value)} placeholder={hasSavedToken ? 'Leave blank to use saved token' : undefined} required={!hasSavedToken} type="password" value={token} /></label>{hasSavedToken && <p role="status">A saved encrypted token is available. Enter a new token to replace it after a successful connection.</p>}{warnings.map((warning) => <p key={warning} role="status">{warning}</p>)}{error && <p role="alert">{error}</p>}<button className="primary-button" disabled={connecting} type="submit">{connecting ? 'Connecting…' : hasSavedToken && !token ? 'Use saved token' : 'Connect privately'}</button>{canForgetSavedToken && <button disabled={connecting} onClick={onForgetSavedToken} type="button">Forget saved token</button>}</form></section></main>
