@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { type FormEvent, useEffect, useRef, useState } from 'react'
 
 import { NeedsMe } from './features/attention/needs-me'
 import { Conversation } from './features/conversation/conversation'
@@ -9,13 +9,13 @@ import { createFakeGateway } from './fixtures/fake-gateway'
 import { type CompanionStore, createCompanionStore } from './state/companion-store'
 import { useCompanion } from './state/use-companion'
 
-type Screen = 'teammates' | 'conversation' | 'attention' | 'search' | 'details' | 'recovery'
+type Screen = 'teammates' | 'conversation' | 'attention' | 'details' | 'recovery'
 
 const fixtureMode = import.meta.env.VITE_COMPANION_FIXTURE === 'true'
 const defaultStore = createCompanionStore(fixtureMode ? { gatewayFactory: createFakeGateway } : {})
 
 const screenTitles: Record<Screen, string> = {
-  teammates: 'Teammates', conversation: 'Conversation', attention: 'Needs Me', search: 'Search', details: 'Teammate Details', recovery: 'Recovery'
+  teammates: 'Teammates', conversation: 'Conversation', attention: 'Needs Me', details: 'Teammate Details', recovery: 'Recovery'
 }
 
 export function App({ store = defaultStore }: { store?: CompanionStore }) {
@@ -56,16 +56,16 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
     }
 
     if (screen === 'conversation') {
+      const activeSession = companion.recentSessions.find((session) => session.id === companion.storedSessionId || session.resolved_id === companion.storedSessionId)
+
       return selected
-        ? <Conversation approval={companion.pendingApproval} connected={companion.phase === 'ready'} draft={companion.draft} messages={companion.messages} onApproval={(choice) => void store.respondToApproval(choice)} onDraftChange={store.setDraft} onInterrupt={() => void store.interrupt()} onSubmit={() => void store.submitDraft()} streamingText={companion.streamingText} teammate={selected} turnStatus={companion.turnStatus} />
+        ? <Conversation approval={companion.pendingApproval} connected={companion.phase === 'ready'} draft={companion.draft} messages={companion.messages} onApproval={(choice) => void store.respondToApproval(choice)} onBackToSessions={() => setScreen('details')} onDraftChange={store.setDraft} onInterrupt={() => void store.interrupt()} onSubmit={() => void store.submitDraft()} sessionTitle={activeSession?.title || 'Main conversation'} streamingText={companion.streamingText} teammate={selected} turnStatus={companion.turnStatus} />
         : <ChooseTeammate onBack={() => setScreen('teammates')} />
     }
 
     if (screen === 'attention') {return <NeedsMe items={companion.attentionItems} onOpen={(item) => { void store.openAttention(item).then(() => setScreen('conversation')) }} onRefresh={() => void store.refreshAttention()} scope={companion.attentionScope} />}
 
-    if (screen === 'details' && selected) {return <TeammateDetails onBack={() => setScreen('teammates')} onBotChat={() => { void store.openBotChat(selected.id).then(() => setScreen('conversation')) }} onMessage={() => setScreen('conversation')} onPin={(id, pinned) => void store.setSessionPinned(id, pinned)} onResume={(id) => { void store.selectTeammate(selected.id, id).then(() => setScreen('conversation')) }} sessions={companion.recentSessions} sessionsLoading={companion.sessionsLoading} teammate={selected} />}
-
-    if (screen === 'search') {return <SearchPlaceholder />}
+    if (screen === 'details' && selected) {return <TeammateDetails onBack={() => setScreen('teammates')} onMessage={() => setScreen('conversation')} onOpenSession={(id) => { void store.selectTeammate(selected.id, id).then(() => setScreen('conversation')) }} onPin={(id, pinned) => void store.setSessionPinned(id, pinned)} sessions={companion.recentSessions} sessionsLoading={companion.sessionsLoading} teammate={selected} />}
 
     return <TeammatesHome attentionCount={attentionCount} onNeedsMe={() => setScreen('attention')} onQuickTask={(teammateId, text) => { void store.submitQuickTask(teammateId, text).then(() => setScreen('conversation')) }} onSelect={openTeammate} teammates={companion.teammates} />
   })()
@@ -79,14 +79,13 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
           <NavButton active={screen === 'teammates' || screen === 'details'} icon="⌂" label="Teammates" onClick={() => setScreen('teammates')} />
           <NavButton active={screen === 'conversation'} icon="◌" label="Conversation" onClick={() => setScreen('conversation')} />
           <NavButton active={screen === 'attention' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Needs Me" onClick={() => setScreen('attention')} />
-          <NavButton active={screen === 'search'} icon="⌕" label="Search" onClick={() => setScreen('search')} />
         </nav>
         <div className="rail-roster"><div className="rail-section-title"><span>Teammates</span><span>{companion.teammates.length}</span></div><Roster compact onSelect={openTeammate} teammates={companion.teammates} /></div>
         <div className="connection"><span aria-hidden="true" /><div><strong>Companion is ready</strong><small>{companion.teammates.length} teammates available</small></div></div>
       </aside>
-      <main aria-label={screenTitles[screen]} className="main-content" ref={mainRef} tabIndex={-1}>
+      <main aria-label={screenTitles[screen]} className={`main-content${screen === 'conversation' ? ' main-content--conversation' : ''}`} ref={mainRef} tabIndex={-1}>
         <h1 className="sr-only">Hermes Companion</h1>
-        <header className="desktop-topbar"><div><span>Hermes Companion</span><strong>{screenTitles[screen]}</strong></div><span aria-label="Profile: Companion user" className="avatar avatar--user" role="img">CU</span></header>
+        {screen !== 'conversation' && <header className="desktop-topbar"><div><span>Hermes Companion</span><strong>{screenTitles[screen]}</strong></div><span aria-label="Profile: Companion user" className="avatar avatar--user" role="img">CU</span></header>}
         {companion.error && <div className="decision-toast" role="alert">{companion.error}</div>}
         {content}
       </main>
@@ -94,7 +93,6 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
         <NavButton active={screen === 'teammates' || screen === 'details'} icon="⌂" label="Teammates" onClick={() => setScreen('teammates')} />
         <NavButton active={screen === 'conversation'} icon="◌" label="Chat" onClick={() => setScreen('conversation')} />
         <NavButton active={screen === 'attention' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Needs Me" onClick={() => setScreen('attention')} />
-        <NavButton active={screen === 'search'} icon="⌕" label="Search" onClick={() => setScreen('search')} />
       </nav>
     </div>
   )
@@ -121,9 +119,16 @@ function TeammatesHome({ teammates, attentionCount, onSelect, onNeedsMe, onQuick
   const [target, setTarget] = useState(atlasId)
   const [task, setTask] = useState('')
 
-  return <section aria-labelledby="teammates-title" className="teammates-home"><div className="hero-copy"><p className="kicker">Your team at a glance</p><h2 id="teammates-title">Your team is ready.</h2><p className="screen-lede">Send a quick text task or open a teammate.</p></div><form aria-label="Quick task" className="quick-task" onSubmit={(event) => { event.preventDefault(); if (task.trim() && target) {onQuickTask(target, task); setTask('')} }}><div className="quick-task__heading"><div><p className="kicker">Quick task</p><h3>Delegate something now</h3></div><span aria-hidden="true">↗</span></div><label htmlFor="quick-task-target">Assign to</label><select id="quick-task-target" onChange={(event) => setTarget(event.target.value)} value={target}>{teammates.map((teammate) => <option key={teammate.id} value={teammate.id}>{teammate.name}</option>)}</select><label htmlFor="quick-task-text">Task</label><textarea id="quick-task-text" onChange={(event) => setTask(event.target.value)} placeholder="What should Hermes do?" rows={3} value={task} /><button className="primary-button" disabled={!task.trim() || !target} type="submit">Send task</button></form>{attentionCount > 0 && <button className="attention-banner" onClick={onNeedsMe} type="button"><span className="attention-banner__count">{attentionCount}</span><span><strong>Needs your judgment</strong><small>Review runtime-local attention</small></span><span aria-hidden="true">→</span></button>}<div className="section-heading"><div><p className="kicker">Available profiles</p><h3>Teammates</h3></div><span>{teammates.length} total</span></div><Roster onSelect={onSelect} teammates={[...teammates]} /></section>
+  const handleQuickTaskSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    if (!task.trim() || !target) {return}
+
+    onQuickTask(target, task)
+    setTask('')
+  }
+
+  return <section aria-labelledby="teammates-title" className="teammates-home"><div className="hero-copy"><p className="kicker">Your team at a glance</p><h2 id="teammates-title">Your team is ready.</h2><p className="screen-lede">Send a quick text task or open a teammate.</p></div><form aria-label="Quick task" className="quick-task" onSubmit={handleQuickTaskSubmit}><div className="quick-task__heading"><div><p className="kicker">Quick task</p><h3>Delegate something now</h3></div><span aria-hidden="true">↗</span></div><label htmlFor="quick-task-target">Assign to</label><select id="quick-task-target" onChange={(event) => setTarget(event.target.value)} value={target}>{teammates.map((teammate) => <option key={teammate.id} value={teammate.id}>{teammate.name}</option>)}</select><label htmlFor="quick-task-text">Task</label><textarea id="quick-task-text" onChange={(event) => setTask(event.target.value)} placeholder="What should Hermes do?" rows={3} value={task} /><button className="primary-button" disabled={!task.trim() || !target} type="submit">Send task</button></form>{attentionCount > 0 && <button className="attention-banner" onClick={onNeedsMe} type="button"><span className="attention-banner__count">{attentionCount}</span><span><strong>Needs your judgment</strong><small>Review runtime-local attention</small></span><span aria-hidden="true">→</span></button>}<div className="section-heading"><div><p className="kicker">Available profiles</p><h3>Teammates</h3></div><span>{teammates.length} total</span></div><Roster onSelect={onSelect} teammates={[...teammates]} /></section>
 }
 
 function ChooseTeammate({ onBack }: { onBack: () => void }) { return <section className="search-empty"><h2>Choose a teammate first</h2><p>Select a teammate to create a conversation.</p><button className="primary-button" onClick={onBack} type="button">View teammates</button></section> }
-
-function SearchPlaceholder() { return <section aria-labelledby="search-title" className="search-screen"><p className="kicker">Find the thread, not the machinery</p><h2 id="search-title">Search</h2><label className="search-box"><span aria-hidden="true">⌕</span><span className="sr-only">Search conversations and teammates</span><input autoFocus placeholder="Search conversations and teammates…" /></label><div className="search-empty"><span aria-hidden="true">⌕</span><h3>Search is local to loaded Companion data</h3><p>Conversation search will appear when history has loaded.</p></div></section> }

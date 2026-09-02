@@ -22,6 +22,33 @@ const baseProps = {
 }
 
 describe('Conversation', () => {
+  it('shows the active session and a direct route back to its session list', () => {
+    const onBackToSessions = vi.fn()
+    render(<Conversation {...baseProps} onBackToSessions={onBackToSessions} sessionTitle="Companion navigation polish" />)
+
+    expect(screen.getByText('Companion navigation polish')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Back to Atlas sessions' }))
+    expect(onBackToSessions).toHaveBeenCalledOnce()
+  })
+
+  it('offers a jump to latest control after the reader scrolls away from the bottom', () => {
+    const scrollIntoView = vi.fn()
+    Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, value: scrollIntoView })
+    render(<Conversation {...baseProps} messages={[{ id: 'm1', role: 'assistant', text: 'Older work' }]} />)
+    const messageList = document.querySelector('.message-list') as HTMLDivElement
+    Object.defineProperties(messageList, {
+      clientHeight: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, value: 1_200 },
+      scrollTop: { configurable: true, value: 200, writable: true }
+    })
+
+    fireEvent.scroll(messageList)
+    const jump = screen.getByRole('button', { name: '↓ Latest' })
+    fireEvent.click(jump)
+    expect(scrollIntoView).toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: '↓ Latest' })).toBeNull()
+  })
+
   it('announces real streaming text in a semantic live region', () => {
     render(<Conversation {...baseProps} streamingText="Checking the final sources" turnStatus="streaming" />)
     const status = screen.getByRole('status')

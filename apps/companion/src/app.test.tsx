@@ -89,6 +89,7 @@ describe('App', () => {
     expect(screen.getAllByText('Atlas').length).toBeGreaterThan(0)
     expect(document.querySelector('.activity-rail')).toBeNull()
     expect(document.querySelector('.app-shell')?.classList.contains('app-shell--two-column')).toBe(true)
+    expect(screen.queryByRole('button', { name: 'Search' })).toBeNull()
   })
 
   it('renders quick task as a labelled stacked composer', async () => {
@@ -106,13 +107,15 @@ describe('App', () => {
     fireEvent.click(conversationButtons[0])
     await waitFor(() => expect(screen.getByRole('main')).toBe(document.activeElement))
     expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Conversation')
+    expect(screen.getByRole('main').classList.contains('main-content--conversation')).toBe(true)
+    expect(document.querySelector('.desktop-topbar')).toBeNull()
     expect(conversationButtons[0].getAttribute('aria-current')).toBe('page')
   })
 
   it('creates a selected teammate session and operates the fixture conversation', async () => {
     render(<App store={await readyStore()} />)
     fireEvent.click(screen.getAllByRole('button', { name: /Atlas/ })[0])
-    fireEvent.click(await screen.findByRole('button', { name: 'Message Atlas' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Open conversation' }))
     const input = await screen.findByLabelText('Message Atlas')
     fireEvent.change(input, { target: { value: 'Check this' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }))

@@ -26,6 +26,7 @@ class ControlledGateway implements CompanionGateway {
   profilesResult: Promise<ProfilesListResult> | null = null
   sessionResults: Promise<SessionResult>[] = []
   resumeResults: Promise<SessionResult>[] = []
+  sessionListResults: Promise<{ sessions: GatewaySessionSummary[] }>[] = []
   sessions: GatewaySessionSummary[] = []
   attentionResult = { items: [], scope: 'This gateway runtime only' } as Awaited<ReturnType<CompanionGateway['listAttention']>>
   pendingApprovalsResult: Promise<{ approvals: [] }> | null = null
@@ -53,7 +54,13 @@ class ControlledGateway implements CompanionGateway {
   async resumeSession(id: string, profile?: string) { this.calls.push(['resumeSession', id, profile]);
 
  return this.resumeResults.shift() ?? this.session }
-  async listSessions(options: { profile: string; limit?: number; include_hidden?: boolean; include_archived?: boolean; title?: string }) { this.calls.push(['listSessions', options]); return { sessions: this.sessions } }
+  async listSessions(options: { profile: string; limit?: number; include_hidden?: boolean; include_archived?: boolean; title?: string }) {
+    this.calls.push(['listSessions', options])
+
+    if (!options.title && this.sessionListResults.length > 0) {return this.sessionListResults.shift()!}
+
+    return { sessions: this.sessions }
+  }
   async setSessionPinned(profile: string, id: string, pinned: boolean) { this.calls.push(['setSessionPinned', profile, id, pinned]); return { pinned, session_id: id, changed: true } }
   async listAttention() { this.calls.push(['listAttention']); return this.attentionResult }
   async submitPrompt(id: string, text: string) { this.calls.push(['submitPrompt', id, text]);
@@ -257,9 +264,61 @@ describe('CompanionStore setup and sessions', () => {
     }])
     expect(store.getSnapshot()).toMatchObject({ runtimeSessionId: 'runtime-1', storedSessionId: 'stored-1' })
     expect(store.getSnapshot().messages[0]).toMatchObject({ role: 'assistant', text: 'Welcome back.' })
+    await vi.waitFor(() => expect(gateways[0].calls.filter(([name, options]) =>
+      name === 'listSessions' && !(options as { title?: string }).title
+    )).toHaveLength(2))
 
     await store.selectTeammate(atlas.id, 'stored-explicit')
     expect(gateways[0].calls).toContainEqual(['resumeSession', 'stored-explicit', 'atlas'])
+  })
+
+  it('does not start a stale session refresh after a teammate switch supersedes session activation', async () => {
+    const { store, gateways } = harness()
+    await store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
+    const [atlas, operations] = store.getSnapshot().teammates
+    const staleSession = deferred<SessionResult>()
+    gateways[0].sessionResults.push(staleSession.promise)
+
+    const staleSelection = store.selectTeammate(atlas.id)
+    await vi.waitFor(() => expect(gateways[0].calls.some(([name]) => name === 'createSession')).toBe(true))
+
+    await store.selectTeammate(operations.id)
+    staleSession.resolve({ session_id: 'stale-runtime', stored_session_id: 'stale-stored', messages: [] })
+    await staleSelection
+
+    const atlasRefreshes = gateways[0].calls.filter(([name, options]) => (
+      name === 'listSessions'
+      && (options as { profile?: string; title?: string })?.profile === 'atlas'
+      && !(options as { title?: string })?.title
+    ))
+
+    expect(atlasRefreshes).toHaveLength(1)
+    expect(store.getSnapshot()).toMatchObject({ selectedTeammateId: operations.id, sessionsLoading: false })
+  })
+
+  it('keeps the newest session-list response when the initial and authoritative refresh resolve out of order', async () => {
+    const { store, gateways } = harness()
+    await store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
+    const atlas = store.getSnapshot().teammates[0]
+    const initialList = deferred<{ sessions: GatewaySessionSummary[] }>()
+    const authoritativeList = deferred<{ sessions: GatewaySessionSummary[] }>()
+    gateways[0].sessionListResults.push(initialList.promise, authoritativeList.promise)
+
+    await store.selectTeammate(atlas.id)
+    authoritativeList.resolve({ sessions: [{
+      id: 'newer', title: 'Newer session', preview: '', started_at: 1, last_active: 2,
+      message_count: 1, source: 'companion', pinned: false
+    }] })
+    await vi.waitFor(() => expect(store.getSnapshot().recentSessions[0]?.id).toBe('newer'))
+
+    initialList.resolve({ sessions: [{
+      id: 'older', title: 'Older session', preview: '', started_at: 1, last_active: 1,
+      message_count: 1, source: 'companion', pinned: false
+    }] })
+    await new Promise((resolve) => setTimeout(resolve, 0))
+
+    expect(store.getSnapshot().recentSessions[0]?.id).toBe('newer')
+    expect(store.getSnapshot().sessionsLoading).toBe(false)
   })
 
   it('reuses an exact hidden Bot Chat instead of creating a duplicate', async () => {

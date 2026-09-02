@@ -45,11 +45,19 @@ describe('Signal House CSS contract', () => {
     expect(appCss).not.toMatch(/\.activity-rail\s*\{/i)
   })
 
+  it('keeps desktop navigation and conversation scrolling independent', () => {
+    expect(appCss).toMatch(/\.app-shell\s*\{[^}]*height:\s*100dvh[^}]*overflow:\s*hidden/i)
+    expect(appCss).toMatch(/\.left-rail\s*\{[^}]*height:\s*100dvh[^}]*overflow:\s*hidden/i)
+    expect(appCss).toMatch(/\.rail-roster\s*\{[^}]*flex:\s*1[^}]*overflow-y:\s*auto/i)
+    expect(appCss).toMatch(/\.main-content--conversation\s*\{[^}]*overflow:\s*hidden/i)
+    expect(appCss).toMatch(/\.message-list\s*\{[^}]*overflow-y:\s*auto/i)
+  })
+
   it('accounts for mobile safe areas in shell, fixed chrome, and conversation height', () => {
     expect(appCss).toMatch(/\.app-shell\s*\{[^}]*padding:\s*calc\(68px\s*\+\s*env\(safe-area-inset-top\)\)[^;}]*calc\(78px\s*\+\s*env\(safe-area-inset-bottom\)\)/i)
     expect(appCss).toMatch(/\.mobile-header\s*\{[^}]*height:\s*calc\(68px\s*\+\s*env\(safe-area-inset-top\)\)[^}]*padding-top:\s*calc\(10px\s*\+\s*env\(safe-area-inset-top\)\)/i)
     expect(appCss).toMatch(/\.main-content\s*\{[^}]*min-height:\s*calc\(100dvh\s*-\s*146px\s*-\s*env\(safe-area-inset-top\)\s*-\s*env\(safe-area-inset-bottom\)\)/i)
-    expect(appCss).toMatch(/\.conversation-screen\s*\{[^}]*height:\s*calc\(100dvh\s*-\s*146px\s*-\s*env\(safe-area-inset-top\)\s*-\s*env\(safe-area-inset-bottom\)\)/i)
+    expect(appCss).toMatch(/\.main-content--conversation\s*\{[^}]*height:\s*calc\(100dvh\s*-\s*146px\s*-\s*env\(safe-area-inset-top\)\s*-\s*env\(safe-area-inset-bottom\)\)[^}]*overflow:\s*hidden/i)
   })
 
   it('uses an accessible small-text alias while preserving the approved muted token', () => {

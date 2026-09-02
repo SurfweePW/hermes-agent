@@ -7,20 +7,21 @@ interface TeammateDetailsProps {
   sessions: readonly GatewaySessionSummary[]
   sessionsLoading: boolean
   onMessage: () => void
-  onResume: (sessionId: string) => void
+  onOpenSession: (sessionId: string) => void
   onPin: (sessionId: string, pinned: boolean) => void
-  onBotChat: () => void
   onBack?: () => void
 }
 
-export function TeammateDetails({ teammate, sessions, sessionsLoading, onMessage, onResume, onPin, onBotChat, onBack }: TeammateDetailsProps) {
+export function TeammateDetails({ teammate, sessions, sessionsLoading, onMessage, onOpenSession, onPin, onBack }: TeammateDetailsProps) {
   return (
     <section aria-labelledby="details-title" className="details-screen">
       {onBack && <button className="back-button" onClick={onBack} type="button">← Back</button>}
-      <div className="details-hero"><span aria-hidden="true" className={`avatar avatar--large avatar--${teammate.id}`}>{teammate.initials}</span><p className="kicker">Teammate details</p><h2 id="details-title">{teammate.name}</h2><p>{teammate.role}</p></div>
-      <div className="details-status"><p className="label">Right now</p><h3>{teammate.summary}</h3></div>
-      <div className="details-grid"><button className="primary-button" onClick={onMessage} type="button">Message {teammate.name}</button><button onClick={onBotChat} type="button">Open Bot Chat</button></div>
-      <div className="section-heading"><div><p className="kicker">Selected profile only</p><h3>Recent sessions</h3></div></div>
+      <header className="details-profile">
+        <span aria-hidden="true" className={`avatar avatar--large avatar--${teammate.id}`}>{teammate.initials}</span>
+        <div><p className="kicker">{teammate.role}</p><h2 id="details-title">{teammate.name}</h2><p>{teammate.summary}</p></div>
+        <button className="primary-button" onClick={onMessage} type="button">Open conversation</button>
+      </header>
+      <div className="section-heading session-heading"><div><p className="kicker">Conversation history</p><h3>Recent sessions</h3></div><span>Click a session to open it</span></div>
       {sessionsLoading && <p role="status">Loading sessions…</p>}
       <div className="session-list">
         {sessions.map((session) => {
@@ -30,15 +31,15 @@ export function TeammateDetails({ teammate, sessions, sessionsLoading, onMessage
 
           return (
             <article aria-labelledby={titleId} className="session-row" key={session.id}>
-              <div className="session-row__content">
-                <strong className="session-row__title" id={titleId}>{title}</strong>
-                <p className="session-row__preview">{session.preview || 'No preview available'}</p>
-                <time dateTime={lastActiveDate?.toISOString()}>{formatSessionTime(session.last_active)}</time>
-              </div>
-              <div className="session-row__actions">
-                <button aria-label={`${session.pinned ? 'Unpin' : 'Pin'} ${title}`} className="session-pin" onClick={() => onPin(session.id, !session.pinned)} title={session.pinned ? 'Unpin session' : 'Pin session'} type="button">{session.pinned ? '★' : '☆'}</button>
-                <button className="session-resume" onClick={() => onResume(session.resolved_id ?? session.id)} type="button">Resume</button>
-              </div>
+              <button aria-label={`Open session ${title}`} className="session-row__open" onClick={() => onOpenSession(session.resolved_id ?? session.id)} type="button">
+                <span className="session-row__content">
+                  <strong className="session-row__title" id={titleId}>{title}</strong>
+                  <span className="session-row__preview">{session.preview || 'No preview available'}</span>
+                  <time dateTime={lastActiveDate?.toISOString()}>{formatSessionTime(session.last_active)}</time>
+                </span>
+                <span aria-hidden="true" className="session-row__arrow">→</span>
+              </button>
+              <button aria-label={`${session.pinned ? 'Unpin' : 'Pin'} ${title}`} className="session-pin" onClick={() => onPin(session.id, !session.pinned)} title={session.pinned ? 'Unpin session' : 'Pin session'} type="button">{session.pinned ? '★' : '☆'}</button>
             </article>
           )
         })}

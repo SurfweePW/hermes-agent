@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
 import type { ApprovalChoice } from '../../gateway/types'
 import type { CompanionMessage, PendingApproval, TurnStatus } from '../../state/companion-store'
@@ -19,6 +19,8 @@ interface ConversationProps {
   onSubmit: () => void
   onInterrupt: () => void
   onApproval: (decision: ApprovalChoice) => void
+  sessionTitle?: string
+  onBackToSessions?: () => void
 }
 
 export function Conversation({
@@ -32,9 +34,15 @@ export function Conversation({
   onDraftChange,
   onSubmit,
   onInterrupt,
-  onApproval
+  onApproval,
+  sessionTitle = 'Main conversation',
+  onBackToSessions
 }: ConversationProps) {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
+  const messageListRef = useRef<HTMLDivElement>(null)
+  const transcriptEndRef = useRef<HTMLDivElement>(null)
+  const followingLatestRef = useRef(true)
+  const [showJumpToLatest, setShowJumpToLatest] = useState(false)
   const working = turnStatus === 'submitting' || turnStatus === 'streaming'
   const canSubmit = connected && Boolean(draft.trim()) && !working
 
@@ -46,6 +54,10 @@ export function Conversation({
     textarea.style.height = `${Math.min(textarea.scrollHeight, 176)}px`
   }, [draft])
 
+  useEffect(() => {
+    if (followingLatestRef.current) { transcriptEndRef.current?.scrollIntoView?.({ block: 'end' }) }
+  }, [approval, messages.length, streamingText])
+
   const submit = () => {
     if (canSubmit) { onSubmit() }
   }
@@ -53,11 +65,17 @@ export function Conversation({
   return (
     <section aria-labelledby="conversation-title" className="conversation-screen">
       <header className="conversation-head">
+        {onBackToSessions && <button aria-label={`Back to ${teammate.name} sessions`} className="conversation-back" onClick={onBackToSessions} type="button">←</button>}
         <div aria-hidden="true" className={`avatar avatar--${teammate.id}`}>{teammate.initials}</div>
-        <div><p className="kicker">Conversation</p><h2 id="conversation-title">{teammate.name}</h2></div>
+        <div className="conversation-head__title"><p className="kicker">{sessionTitle}</p><h2 id="conversation-title">{teammate.name}</h2></div>
         <span className="presence"><span aria-hidden="true">●</span> {connected ? 'Online' : 'Offline'}</span>
       </header>
-      <div className="message-list">
+      <div className="message-list" onScroll={(event) => {
+        const element = event.currentTarget
+        const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 96
+        followingLatestRef.current = nearBottom
+        setShowJumpToLatest(!nearBottom)
+      }} ref={messageListRef}>
         <div className="transcript">
           {messages.length === 0 && <p className="screen-lede conversation-empty">Start a conversation with {teammate.name}.</p>}
           {messages.map((message) => {
@@ -81,8 +99,14 @@ export function Conversation({
           )}
           {turnStatus === 'uncertain' && <div className="decision-toast decision-toast--conversation" role="status">Connection closed after the turn was accepted. Its server-side outcome is not yet known.</div>}
           {approval && <ApprovalCard approval={approval} onDecision={onApproval} />}
+          <div aria-hidden="true" ref={transcriptEndRef} />
         </div>
       </div>
+      {showJumpToLatest && <button className="jump-to-latest" onClick={() => {
+        followingLatestRef.current = true
+        setShowJumpToLatest(false)
+        transcriptEndRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'end' })
+      }} type="button">↓ Latest</button>}
       <div className="composer-dock">
         <form className="composer" onSubmit={(event) => { event.preventDefault(); submit() }}>
           <label className="sr-only" htmlFor="message-draft">Message {teammate.name}</label>

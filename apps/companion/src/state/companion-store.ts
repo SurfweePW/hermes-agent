@@ -313,6 +313,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
   let messageSequence = 0
   let connectionGeneration = 0
   let sessionGeneration = 0
+  let sessionListGeneration = 0
   let completedSessionId: string | null = null
   let savedToken: string | undefined
   let savedTokenError: string | null = null
@@ -567,10 +568,11 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
   const loadSessions = async (client: CompanionGateway, teammateId: string) => {
     const profile = profileIds.get(teammateId)
     if (!profile) {return}
+    const requestGeneration = ++sessionListGeneration
     publish({ sessionsLoading: true })
     try {
       const result = await client.listSessions({ profile, limit: 20 })
-      if (gateway === client && snapshot.selectedTeammateId === teammateId) {
+      if (gateway === client && snapshot.selectedTeammateId === teammateId && sessionListGeneration === requestGeneration) {
         publish({
           recentSessions: result.sessions.map((session) => ({
             ...session,
@@ -580,7 +582,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         })
       }
     } catch (error) {
-      if (gateway === client && snapshot.selectedTeammateId === teammateId) {
+      if (gateway === client && snapshot.selectedTeammateId === teammateId && sessionListGeneration === requestGeneration) {
         publish({ sessionsLoading: false, error: publicError(error) })
       }
     }
@@ -749,7 +751,9 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
           ? await client.resumeSession(storedSessionId, profileId)
           : await resolveBotChat(client, profileId)
 
-        await applySession(client, result, connectionOperation, sessionOperation)
+        const applied = await applySession(client, result, connectionOperation, sessionOperation)
+
+        if (applied) {void loadSessions(client, teammateId)}
       } catch (error) {
         if (isCurrentConnection(client, connectionOperation) && sessionGeneration === sessionOperation) {
           publish({ error: publicError(error) })
