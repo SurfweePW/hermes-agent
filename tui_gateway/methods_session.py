@@ -126,8 +126,11 @@ def _session_row_summary(row: dict, *, tip_row: dict | None = None, resolved_id=
     tip_row = tip_row or row
     return {"id": row["id"], **({} if resolved_id is None else {"resolved_id": resolved_id}),
             "title": row.get("title") or "", "preview": tip_row.get("preview") or "",
-            "started_at": row.get("started_at") or 0, "message_count": tip_row.get("message_count") or 0,
-            "source": row.get("source") or ""}
+            "started_at": row.get("started_at") or 0,
+            "last_active": tip_row.get("last_active") or tip_row.get("last_activity_at")
+            or tip_row.get("started_at") or 0,
+            "message_count": tip_row.get("message_count") or 0,
+            "source": row.get("source") or "", "pinned": bool(row.get("pinned"))}
 
 
 # Hidden from human listings (sub-agent runs, kanban workers); a deny-list so new platforms surface automatically.
@@ -311,6 +314,7 @@ def _(rid, params: dict) -> dict:
     now = time.time()
     with _sessions_lock:
         _sessions[sid] = {
+            "_sid": sid,
             "agent": None, "agent_error": None, "agent_ready": threading.Event(), "attached_images": [],
             "close_on_disconnect": _flag(params, "close_on_disconnect"),
             "active_session_lease": None,  # claimed lazily on the first turn (_ensure_active_session_slot)
@@ -360,12 +364,14 @@ def _(rid, params: dict) -> dict:
                  "profile_name": _response_profile_name(profile)}})
 
 
-def _session_list_by_title(rid, db, title_lookup: str) -> dict:
+def _session_list_by_title(
+    rid, db, title_lookup: str, *, include_hidden: bool = False, include_archived: bool = False
+) -> dict:
     """EXACT-title lookup (title as identity), window-free on purpose (a busy profile's windowed listing can
-    push the row out). Hidden rows resolve (canonical chats are born hidden); archived / deny-listed do not;
-    lineages resolve to the live tip (``resolved_id``)."""
+    push the row out). Hidden / archived rows resolve only when explicitly requested; deny-listed rows do not.
+    Compression lineages resolve to the live tip (``resolved_id``)."""
     row = db.get_session_by_title(title_lookup)
-    if row and row.get("archived"):
+    if row and row.get("archived") and not include_archived:
         from tools.bot_mode_probe import BOT_CHAT_TITLE
         # A Bot Chat archived by the ws-orphan reaper / agent_close is an accident (the desktop would mint
         # replacements forever): resurrect recoverable reasons only. Re-fetch by ID — title is not UNIQUE.
@@ -377,7 +383,8 @@ def _session_list_by_title(rid, db, title_lookup: str) -> dict:
             # still hide. Re-fetch by ID: title has no DB-level UNIQUE, so a title re-query could grab a
             # different (still-archived) duplicate row.
             row = db.get_session(row["id"])
-    if not row or row.get("archived") or _denied_source(row):
+    if (not row or (row.get("archived") and not include_archived)
+            or (row.get("hidden") and not include_hidden) or _denied_source(row)):
         return _ok(rid, {"sessions": []})
     tip = row["id"]
     with contextlib.suppress(Exception):
@@ -392,7 +399,11 @@ def _session_list_by_title(rid, db, title_lookup: str) -> dict:
 def _(rid, params: dict, db) -> dict:
     try:
         if title_lookup := _str_param(params, "title"):
-            return _session_list_by_title(rid, db, title_lookup)
+            return _session_list_by_title(
+                rid, db, title_lookup,
+                include_hidden=_flag(params, "include_hidden"),
+                include_archived=_flag(params, "include_archived"),
+            )
         limit = int(params.get("limit", 200) or 200)
         # Over-fetch: per-source filtering + tip merging must not leave us short. ``include_hidden`` is for
         # surfaces that OWN hidden sessions (Bots pane, pickers).
@@ -1000,6 +1011,113 @@ def _(rid, params: dict) -> dict:
             return _ok(rid, {"hidden": hidden, "session_key": key})
         except Exception as e:
             return _err(rid, 5007, str(e))
+
+
+@method("session.set_pinned")
+def _(rid, params: dict) -> dict:
+    """Persist a conversation pin in the explicitly requested profile DB."""
+    requested_profile = _str_param(params, "profile")
+    if requested_profile:
+        try:
+            from hermes_cli.profiles import normalize_profile_name, validate_profile_name
+
+            requested_profile = normalize_profile_name(requested_profile)
+            validate_profile_name(requested_profile)
+        except (ImportError, ValueError) as exc:
+            return _err(rid, 4006, f"invalid profile: {exc}")
+        if requested_profile != _current_profile_name() and _profile_home(requested_profile) is None:
+            return _err(rid, 4001, "profile not found")
+        params = {**params, "profile": requested_profile}
+    target = _str_param(params, "session_id")
+    if not target:
+        return _err(rid, 4006, "session_id required")
+    pinned = _flag(params, "pinned") if "pinned" in params else True
+    with _profile_db(params) as db:
+        if db is None:
+            return _db_unavailable_error(rid, code=5007)
+        try:
+            resolved = db.resolve_session_id(target) if hasattr(db, "resolve_session_id") else target
+            if not resolved:
+                return _err(rid, 4001, "session not found")
+            changed = db.set_session_pinned(resolved, pinned)
+            return _ok(rid, {"pinned": pinned, "session_id": resolved, "changed": bool(changed)})
+        except Exception as exc:
+            return _err(rid, 5007, str(exc))
+
+
+@method("attention.list")
+def _(rid, params: dict) -> dict:
+    """Return attention signals visible to this connected gateway process."""
+    try:
+        limit = max(1, min(int(params.get("limit", 100) or 100), 100))
+    except (TypeError, ValueError):
+        limit = 100
+    with _sessions_lock:
+        sessions = [(sid, dict(session)) for sid, session in _sessions.items()
+                    if not session.get("_finalized")]
+        outcomes = {sid: dict(value) for sid, value in _companion_attention_outcomes.items()}
+    with _prompt_lock:
+        prompts = []
+        for request_id, (pending_sid, _event) in _pending.items():
+            event, payload = _pending_prompt_payloads.get(request_id, ("", {}))
+            prompts.append((request_id, pending_sid, event, dict(payload)))
+    items = []
+    try:
+        from pathlib import Path
+        from tools.approval import list_gateway_approvals
+
+        for sid, session in sessions:
+            profile = (Path(session["profile_home"]).name if session.get("profile_home")
+                       else _current_profile_name())
+            base = {"profile": profile, "runtime_session_id": sid,
+                    "stored_session_id": session.get("session_key") or None}
+            for approval in list_gateway_approvals(session.get("session_key") or ""):
+                if not isinstance(approval, dict) or not approval.get("request_id"):
+                    continue
+                safe_approval = _approval_request_payload(approval)
+                raw_choices = safe_approval.get("choices")
+                choices = [choice for choice in (raw_choices if isinstance(raw_choices, list) else [])
+                           if choice in {"once", "session", "always", "deny"}][:4]
+                request = {"request_id": str(safe_approval["request_id"])[:128],
+                           "allow_session": bool(safe_approval.get("allow_session")),
+                           "allow_permanent": bool(safe_approval.get("allow_permanent")),
+                           "choices": choices}
+                items.append({**base, "id": f"approval:{sid}:{approval['request_id']}",
+                              "kind": "approval", "title": "Approval requested",
+                              "detail": "Review the requested action before Hermes continues.",
+                              "occurred_at": session.get("last_active") or 0,
+                              "actionable": True, "resolution": "approval", "request": request})
+            for request_id, pending_sid, event, payload in prompts:
+                if pending_sid != sid:
+                    continue
+                if event == "clarify.request":
+                    question = payload.get("question")
+                    title = (question.strip()[:240] if isinstance(question, str) and question.strip()
+                             else "Hermes has a question")
+                    kind, detail = "question", "Answer this question in a full Hermes client to continue."
+                else:
+                    title = {"secret.request": "Secure input required",
+                             "sudo.request": "Administrator input required",
+                             "terminal.read.request": "Terminal input required",
+                             "mcp.setup.request": "Setup decision required"}.get(event, "Input required")
+                    kind, detail = "blocker", "This secure input must be resolved in a full Hermes client."
+                items.append({**base, "id": f"prompt:{sid}:{request_id}", "kind": kind,
+                              "title": title, "detail": detail,
+                              "occurred_at": session.get("last_active") or 0,
+                              "actionable": False, "resolution": "unsupported_here",
+                              "request_id": request_id})
+            if outcome := outcomes.get(sid):
+                items.append({**base, "id": f"outcome:{sid}:{outcome.get('occurred_at', 0)}",
+                              "actionable": True, "resolution": "open_session", **outcome})
+    except Exception as exc:
+        return _err(rid, 5062, str(exc))
+    rank = {"approval": 0, "question": 1, "blocker": 2, "error": 3, "completion": 4}
+    items.sort(key=lambda item: (rank.get(item.get("kind"), 9),
+                                 -float(item.get("occurred_at") or 0)))
+    return _ok(rid, {
+        "items": items[:limit], "scope": "connected_runtime",
+        "scope_note": "Only sessions and requests visible to this gateway process are included.",
+    })
 
 
 @_session_method("message.react")

@@ -192,6 +192,53 @@ describe('CompanionClient RPC domain methods', () => {
     await expect(respondPromise).resolves.toEqual({ resolved: 1 })
   })
 
+  it('uses companion attention, session history, pinning, and canonical Bot Chat parameters', async () => {
+    const { client, connect } = harness()
+    const socket = await connect()
+
+    const attention = client.listAttention()
+    expect(socket.frame()).toMatchObject({ method: 'attention.list', params: {} })
+    socket.respond({
+      scope: 'runtime-local',
+      items: [{
+        id: 'a1', kind: 'approval', profile: 'atlas', runtime_session_id: 'runtime-1',
+        stored_session_id: 'stored-1', title: 'Approval requested', detail: 'Review.',
+        occurred_at: 1, actionable: true, resolution: 'approval'
+      }]
+    })
+    await expect(attention).resolves.toMatchObject({
+      scope: 'runtime-local', items: [{ actionable: true, resolution: 'approval' }]
+    })
+
+    const sessions = client.listSessions({ profile: 'atlas', limit: 1, include_hidden: true, include_archived: true, title: 'Bot Chat' })
+    expect(socket.frame()).toMatchObject({ method: 'session.list', params: { profile: 'atlas', limit: 1, include_hidden: true, include_archived: true, title: 'Bot Chat' } })
+    socket.respond({ sessions: [] })
+    await sessions
+
+    const pin = client.setSessionPinned('atlas', 'stored-1', true)
+    expect(socket.frame()).toMatchObject({ method: 'session.set_pinned', params: { profile: 'atlas', session_id: 'stored-1', pinned: true } })
+    socket.respond({ session_id: 'stored-1', pinned: true, changed: true })
+    await pin
+
+    const create = client.createSession({ profile: 'atlas', title: 'Bot Chat', hidden: true, source: 'companion' })
+    expect(socket.frame()).toMatchObject({ method: 'session.create', params: { profile: 'atlas', title: 'Bot Chat', hidden: true, source: 'companion' } })
+    socket.respond({ session_id: 'runtime-1', stored_session_id: 'stored-1', messages: [] })
+    await create
+  })
+
+  it('rejects malformed attention and session-list payloads at the trust boundary', async () => {
+    const { client, connect } = harness()
+    const socket = await connect()
+
+    const attention = client.listAttention()
+    socket.respond({ items: [{ kind: 'approval', profile: '/private/profile' }] })
+    await expect(attention).rejects.toThrow(/malformed attention\.list response/i)
+
+    const sessions = client.listSessions({ profile: 'atlas' })
+    socket.respond({ sessions: [{ id: 'only-an-id' }] })
+    await expect(sessions).rejects.toThrow(/malformed session\.list response/i)
+  })
+
   it('omits optional session parameters instead of sending undefined values', async () => {
     const { client, connect } = harness()
     const socket = await connect()

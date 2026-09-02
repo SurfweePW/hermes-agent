@@ -82,6 +82,10 @@ _sessions: dict[str, dict] = {}
 _methods: dict[str, callable] = {}
 _pending: dict[str, tuple[str, threading.Event]] = {}
 _pending_prompt_payloads: dict[str, tuple[str, dict]] = {}
+# Latest terminal turn outcome per live session. This bounded, in-memory ledger
+# lets read-only Companion clients report completions/errors without exposing
+# transcript text, tool payloads, or secrets.
+_companion_attention_outcomes: dict[str, dict] = {}
 _answers: dict[str, str] = {}
 # Batch clarify accumulators: rid → {"qids": [...], "answers": {qid: answer}}. Written by
 # clarify.respond (per-question lock, update-in-place), read out by _block on resolution/timeout
@@ -101,6 +105,12 @@ _cfg_mtime: float | None = None
 _cfg_path = None
 _session_resume_lock = threading.Lock()
 _SLASH_WORKER_TIMEOUT_S = max(5.0, env_float("HERMES_TUI_SLASH_TIMEOUT_S", 45.0))
+
+
+def _clear_companion_attention_outcome(sid: str) -> None:
+    """Forget the prior terminal outcome when a new turn starts or closes."""
+    with _sessions_lock:
+        _companion_attention_outcomes.pop(sid, None)
 
 def _ws_orphan_setting(env_var: str, cfg_key: str, default: float) -> float:
     """``dashboard.<cfg_key>`` seconds; the env var is an internal override that wins when set."""
@@ -575,6 +585,20 @@ def _event_frame(event: str, sid: str, payload: dict | None = None) -> dict:
 
 
 def _emit(event: str, sid: str, payload: dict | None = None):
+    if event in {"message.complete", "error"} and sid:
+        safe_payload = payload if isinstance(payload, dict) else {}
+        is_error = event == "error" or safe_payload.get("status") == "error"
+        with _sessions_lock:
+            session = _sessions.get(sid)
+            active_turn = bool(session and (session.get("running") or session.get("inflight_turn")))
+            if session is not None and (is_error or active_turn):
+                _companion_attention_outcomes[sid] = {
+                    "kind": "error" if is_error else "completion",
+                    "title": "Turn failed" if is_error else "Turn completed",
+                    "detail": ("Open the conversation to review the error." if is_error
+                               else "Open the conversation to review the result."),
+                    "occurred_at": time.time(),
+                }
     write_json(_event_frame(event, sid, payload))
 
 
@@ -2344,6 +2368,7 @@ def _init_session(
     now = time.time()
     with _sessions_lock:
         _sessions[sid] = {
+            "_sid": sid,
             "agent": agent, "session_key": key, "history": history, "history_lock": threading.Lock(),
             "history_version": 0, "inflight_turn": None, "created_at": now, "last_active": now,
             "running": False, "attached_images": [], "image_counter": 0, "cwd": cwd or _completion_cwd(),
@@ -3221,3 +3246,21 @@ for _m in (
     _methods_session_control):
     _m.register(sys.modules[__name__])
 del _m
+
+# session_lifecycle owns the current-main implementations; wrap its exported
+# teardown seams here so the Companion's process-local outcome ledger follows
+# the same paths without duplicating lifecycle logic in the facade.
+_teardown_session_impl = _teardown_session
+_pop_session_by_id_impl = _pop_session_by_id
+
+
+def _teardown_session(session: dict | None, *, end_reason: str = "tui_close") -> None:
+    if session and (sid := str(session.get("_sid") or "")):
+        _clear_companion_attention_outcome(sid)
+    _teardown_session_impl(session, end_reason=end_reason)
+
+
+def _pop_session_by_id(sid: str) -> dict | None:
+    session = _pop_session_by_id_impl(sid)
+    _clear_companion_attention_outcome(sid)
+    return session

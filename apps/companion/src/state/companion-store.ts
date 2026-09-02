@@ -12,15 +12,21 @@ import type {
   ApprovalChoice,
   ApprovalRequestPayload,
   ApprovalRespondResult,
+  AttentionListResult,
   CompanionEvent,
   CompanionEventHandler,
   CreateSessionOptions,
+  GatewayAttentionItem,
+  GatewaySessionSummary,
   PendingApprovalsResult,
   ProfilesListResult,
   PromptSubmitResult,
   SessionInterruptResult,
+  SessionListOptions,
+  SessionListResult,
   SessionMessage,
-  SessionResult
+  SessionResult,
+  SetPinnedResult
 } from '../gateway/types'
 import { createDefaultSecretStore, type SessionSecretStore } from '../security/secret-store'
 
@@ -55,6 +61,10 @@ export interface CompanionSnapshot {
   messages: readonly CompanionMessage[]
   streamingText: string
   pendingApproval: PendingApproval | null
+  attentionItems: readonly GatewayAttentionItem[]
+  attentionScope: string
+  recentSessions: readonly GatewaySessionSummary[]
+  sessionsLoading: boolean
   draft: string
   turnStatus: TurnStatus
   error: string | null
@@ -72,6 +82,9 @@ export interface CompanionGateway {
   listProfiles(): Promise<ProfilesListResult>
   createSession(options?: CreateSessionOptions): Promise<SessionResult>
   resumeSession(storedSessionId: string, profile?: string): Promise<SessionResult>
+  listSessions(options: SessionListOptions): Promise<SessionListResult>
+  setSessionPinned(profile: string, sessionId: string, pinned: boolean): Promise<SetPinnedResult>
+  listAttention(): Promise<AttentionListResult>
   submitPrompt(runtimeSessionId: string, text: string): Promise<PromptSubmitResult>
   interruptSession(runtimeSessionId: string): Promise<SessionInterruptResult>
   listPendingApprovals(runtimeSessionId: string): Promise<PendingApprovalsResult>
@@ -96,6 +109,12 @@ export interface CompanionStore {
   subscribe(listener: () => void): () => void
   configure(input: { baseUrl: string; token: string }): Promise<void>
   selectTeammate(teammateId: string, storedSessionId?: string): Promise<void>
+  refreshAttention(): Promise<void>
+  openAttention(item: GatewayAttentionItem): Promise<void>
+  refreshSessions(): Promise<void>
+  setSessionPinned(sessionId: string, pinned: boolean): Promise<void>
+  openBotChat(teammateId?: string): Promise<void>
+  submitQuickTask(teammateId: string, text: string): Promise<void>
   setDraft(draft: string): void
   submitDraft(): Promise<void>
   interrupt(): Promise<void>
@@ -106,6 +125,7 @@ export interface CompanionStore {
 }
 
 const TOKEN_SECRET_NAME = 'gateway-token'
+const LOCAL_PINS_STORAGE_KEY = 'hermes.companion.localPins'
 
 const teammateMetadata: Record<string, Pick<Teammate, 'name' | 'role' | 'initials'>> = {
   atlas: { name: 'Atlas', role: 'Chief of Staff', initials: 'A' },
@@ -137,6 +157,8 @@ function freezeSnapshot(snapshot: CompanionSnapshot): CompanionSnapshot {
   Object.freeze(snapshot.warnings)
   Object.freeze(snapshot.teammates)
   Object.freeze(snapshot.messages)
+  Object.freeze(snapshot.attentionItems)
+  Object.freeze(snapshot.recentSessions)
 
   if (snapshot.pendingApproval) {
     Object.freeze(snapshot.pendingApproval.choices)
@@ -263,12 +285,27 @@ function publicError(error: unknown): string {
   return 'Companion could not reach the gateway. Check the connection and try again.'
 }
 
+function isUnsupportedMethod(error: unknown): boolean {
+  return error instanceof Error && /(?:method not found|-32601)/i.test(error.message)
+}
+
 export function createCompanionStore(options: CompanionStoreOptions = {}): CompanionStore {
   const gatewayFactory = options.gatewayFactory ?? (() => new CompanionClient())
   const storage = options.storage ?? browserStorage()
   const secrets = options.secretStore ?? createDefaultSecretStore()
   const profileIds = new Map<string, string>()
   const listeners = new Set<() => void>()
+  const localPins = new Set<string>()
+  try {
+    const storedPins = storage?.getItem(LOCAL_PINS_STORAGE_KEY)
+    const parsed = storedPins ? JSON.parse(storedPins) : []
+    if (Array.isArray(parsed)) {
+      for (const key of parsed) {if (typeof key === 'string') {localPins.add(key)}}
+    }
+  } catch { /* Ignore corrupt optional fallback state. */ }
+  let attentionSupported = true
+  let pinsSupported = true
+  const canonicalSessions = new Map<string, Promise<SessionResult>>()
   let gateway: CompanionGateway | null = null
   let removeEventListener: (() => void) | null = null
   let removeStateListener: (() => void) | null = null
@@ -314,6 +351,10 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     messages: [],
     streamingText: '',
     pendingApproval: null,
+    attentionItems: [],
+    attentionScope: 'This gateway runtime only',
+    recentSessions: [],
+    sessionsLoading: false,
     draft: '',
     turnStatus: 'idle',
     error: savedTokenError,
@@ -371,6 +412,12 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
   }
 
   const handleEvent = (event: CompanionEvent) => {
+    if (event.type === 'approval.request' || event.type === 'message.complete' || event.type === 'error') {
+      const client = gateway
+      if (client) {
+        void loadAttention(client, connectionGeneration).catch(() => undefined)
+      }
+    }
     if (event.session_id !== snapshot.runtimeSessionId) {return}
 
     if (event.type === 'message.delta') {
@@ -432,6 +479,9 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     replaced?.close()
     const client = gatewayFactory()
     gateway = client
+    attentionSupported = true
+    pinsSupported = true
+    canonicalSessions.clear()
     sessionGeneration += 1
     completedSessionId = null
     pendingSubmit = null
@@ -487,6 +537,55 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     return true
   }
 
+  const loadAttention = async (client: CompanionGateway, generation: number) => {
+    if (!attentionSupported) {return true}
+    try {
+      const result = await client.listAttention()
+      if (!isCurrentConnection(client, generation)) {return false}
+      const scope = typeof result.scope === 'string'
+        ? result.scope
+        : result.scope?.label || 'This gateway runtime only'
+      publish({ attentionItems: result.items, attentionScope: scope })
+
+      return true
+    } catch (error) {
+      if (isUnsupportedMethod(error) && isCurrentConnection(client, generation)) {
+        attentionSupported = false
+        publish({ attentionItems: [], attentionScope: 'Unavailable on this gateway version' })
+
+        return true
+      }
+      throw error
+    }
+  }
+
+  const localPinKey = (profile: string, sessionId: string) => `${profile}\u0000${sessionId}`
+  const persistLocalPins = () => {
+    try {storage?.setItem(LOCAL_PINS_STORAGE_KEY, JSON.stringify([...localPins]))} catch { /* Optional fallback. */ }
+  }
+
+  const loadSessions = async (client: CompanionGateway, teammateId: string) => {
+    const profile = profileIds.get(teammateId)
+    if (!profile) {return}
+    publish({ sessionsLoading: true })
+    try {
+      const result = await client.listSessions({ profile, limit: 20 })
+      if (gateway === client && snapshot.selectedTeammateId === teammateId) {
+        publish({
+          recentSessions: result.sessions.map((session) => ({
+            ...session,
+            pinned: session.pinned || localPins.has(localPinKey(profile, session.id))
+          })),
+          sessionsLoading: false
+        })
+      }
+    } catch (error) {
+      if (gateway === client && snapshot.selectedTeammateId === teammateId) {
+        publish({ sessionsLoading: false, error: publicError(error) })
+      }
+    }
+  }
+
   const applySession = async (
     client: CompanionGateway,
     result: SessionResult,
@@ -514,6 +613,34 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     return true
   }
 
+  const resolveBotChat = async (client: CompanionGateway, profile: string) => {
+    const inFlight = canonicalSessions.get(profile)
+    if (inFlight) {return inFlight}
+    const operation = (async () => {
+      const found = await client.listSessions({
+        profile,
+        limit: 1,
+        include_hidden: true,
+        include_archived: true,
+        title: 'Bot Chat'
+      })
+      const exact = found.sessions.find((session) => session.title === 'Bot Chat')
+      if (exact) {return client.resumeSession(exact.resolved_id ?? exact.id, profile)}
+
+      try {
+        return await client.createSession({ profile, title: 'Bot Chat', hidden: true, source: 'companion' })
+      } catch (error) {
+        // Another client may have won the unique-title race, or an archived
+        // canonical row may exist on a gateway that ignores include_archived.
+        try {return await client.resumeSession('Bot Chat', profile)} catch {throw error}
+      }
+    })()
+    canonicalSessions.set(profile, operation)
+    try {return await operation} finally {
+      if (canonicalSessions.get(profile) === operation) {canonicalSessions.delete(profile)}
+    }
+  }
+
   const connect = async (
     phase: 'connecting' | 'recovering',
     operation: number,
@@ -533,6 +660,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     if (!isCurrentConnection(client, operation)) {return null}
 
     if (!await loadRoster(client, operation)) {return null}
+    if (!await loadAttention(client, operation)) {return null}
 
     return client
   }
@@ -609,14 +737,17 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         messages: [],
         streamingText: '',
         pendingApproval: null,
+        recentSessions: [],
+        sessionsLoading: true,
         turnStatus: 'idle',
         error: null
       })
+      void loadSessions(client, teammateId)
 
       try {
         const result = storedSessionId
           ? await client.resumeSession(storedSessionId, profileId)
-          : await client.createSession({ profile: profileId, title: `Conversation with ${teammate.name}` })
+          : await resolveBotChat(client, profileId)
 
         await applySession(client, result, connectionOperation, sessionOperation)
       } catch (error) {
@@ -624,6 +755,106 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
           publish({ error: publicError(error) })
         }
       }
+    },
+    async refreshAttention() {
+      const client = gateway
+      if (!client || snapshot.phase !== 'ready') {return}
+      try { await loadAttention(client, connectionGeneration) } catch (error) { publish({ error: publicError(error) }) }
+    },
+    async openAttention(item) {
+      const client = gateway
+      if (!client || snapshot.phase !== 'ready' || !item.stored_session_id) {return}
+      const teammateId = [...profileIds].find(([, profile]) => profile === item.profile)?.[0]
+      if (!teammateId) {return}
+      const connectionOperation = connectionGeneration
+      const sessionOperation = ++sessionGeneration
+      publish({ selectedTeammateId: teammateId, runtimeSessionId: null, storedSessionId: null, messages: [], pendingApproval: null, error: null })
+      try {
+        const result = await client.resumeSession(item.stored_session_id, item.profile)
+        await applySession(client, result, connectionOperation, sessionOperation)
+        void loadSessions(client, teammateId)
+      } catch (error) { publish({ error: publicError(error) }) }
+    },
+    async refreshSessions() {
+      const client = gateway
+      const teammateId = snapshot.selectedTeammateId
+      if (client && teammateId) {await loadSessions(client, teammateId)}
+    },
+    async setSessionPinned(sessionId, pinned) {
+      const client = gateway
+      const teammateId = snapshot.selectedTeammateId
+      const profile = teammateId ? profileIds.get(teammateId) : undefined
+      if (!client || !profile) {return}
+      try {
+        if (pinsSupported) {
+          try {
+            await client.setSessionPinned(profile, sessionId, pinned)
+          } catch (error) {
+            if (!isUnsupportedMethod(error)) {throw error}
+            pinsSupported = false
+          }
+        }
+        const key = localPinKey(profile, sessionId)
+        if (pinsSupported) {localPins.delete(key)}
+        else if (pinned) {localPins.add(key)}
+        else {localPins.delete(key)}
+        persistLocalPins()
+        publish({ recentSessions: snapshot.recentSessions.map((session) => session.id === sessionId ? { ...session, pinned } : session) })
+      } catch (error) {publish({ error: publicError(error) })}
+    },
+    async openBotChat(teammateId = snapshot.selectedTeammateId ?? 'atlas') {
+      const client = gateway
+      const profile = profileIds.get(teammateId)
+      if (!client || !profile || snapshot.phase !== 'ready') {return}
+      const connectionOperation = connectionGeneration
+      const sessionOperation = ++sessionGeneration
+      publish({ selectedTeammateId: teammateId, runtimeSessionId: null, storedSessionId: null, messages: [], pendingApproval: null, error: null })
+      try {
+        const result = await resolveBotChat(client, profile)
+        await applySession(client, result, connectionOperation, sessionOperation)
+        void loadSessions(client, teammateId)
+      } catch (error) {publish({ error: publicError(error) })}
+    },
+    async submitQuickTask(teammateId, text) {
+      const client = gateway
+      const profile = profileIds.get(teammateId)
+      const task = text.trim()
+      if (!client || !profile || !task || snapshot.phase !== 'ready') {return}
+      const connectionOperation = connectionGeneration
+      const sessionOperation = ++sessionGeneration
+      publish({ selectedTeammateId: teammateId, runtimeSessionId: null, storedSessionId: null, messages: [], pendingApproval: null, error: null })
+      try {
+        const result = await resolveBotChat(client, profile)
+        if (!await applySession(client, result, connectionOperation, sessionOperation)) {return}
+        const submittedTurn = {
+          client,
+          connectionGeneration: connectionOperation,
+          sessionGeneration: sessionOperation,
+          runtimeSessionId: result.session_id,
+          text: task,
+          userRecorded: false,
+          completed: false
+        }
+        pendingSubmit = submittedTurn
+        publish({ turnStatus: 'submitting', error: null })
+        try {
+          await client.submitPrompt(result.session_id, task)
+          if (!isCurrentConnection(client, connectionOperation)
+            || sessionGeneration !== sessionOperation
+            || snapshot.runtimeSessionId !== result.session_id) {return}
+          const messages = submittedTurn.userRecorded
+            ? snapshot.messages
+            : [...snapshot.messages, { id: `message-${++messageSequence}`, role: 'user' as const, text: task }]
+          submittedTurn.userRecorded = true
+          publish({ messages, turnStatus: submittedTurn.completed ? 'idle' : isDisconnected() ? 'uncertain' : 'streaming' })
+        } catch (error) {
+          if (isCurrentConnection(client, connectionOperation)
+            && sessionGeneration === sessionOperation
+            && !submittedTurn.completed) {publish({ turnStatus: 'idle', error: publicError(error) })}
+        } finally {
+          if (pendingSubmit === submittedTurn) {pendingSubmit = null}
+        }
+      } catch (error) {publish({ turnStatus: 'idle', error: publicError(error) })}
     },
     setDraft(draft) { publish({ draft }) },
     async submitDraft() {
@@ -710,6 +941,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
         if (result.resolved > 0 && isSameApproval) {
           publish({ pendingApproval: null })
+          void loadAttention(client, connectionOperation).catch(() => undefined)
         } else if (isSameApproval) {
           publish({ pendingApproval: { ...approval, responding: false }, error: 'The approval is still pending.' })
         }
@@ -735,12 +967,11 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         if (!client || !isCurrentConnection(client, connectionOperation)) {return}
 
         if (selectedId && profileId) {
-          const teammate = snapshot.teammates.find((item) => item.id === selectedId)
           const sessionOperation = ++sessionGeneration
 
           const result = storedId
             ? await client.resumeSession(storedId, profileId)
-            : await client.createSession({ profile: profileId, title: `Conversation with ${teammate?.name ?? 'Hermes'}` })
+            : await resolveBotChat(client, profileId)
 
           if (!await applySession(client, result, connectionOperation, sessionOperation)) {return}
         } else {

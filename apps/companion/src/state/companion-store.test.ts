@@ -1,7 +1,7 @@
 import type { ConnectionState } from '@hermes/shared'
 import { describe, expect, it, vi } from 'vitest'
 
-import type { CompanionEvent, ProfilesListResult, SessionResult } from '../gateway/types'
+import type { CompanionEvent, GatewaySessionSummary, ProfilesListResult, SessionResult } from '../gateway/types'
 import type { SessionSecretStore } from '../security/secret-store'
 
 import { type CompanionGateway, type CompanionGatewayFactory, createCompanionStore } from './companion-store'
@@ -26,6 +26,8 @@ class ControlledGateway implements CompanionGateway {
   profilesResult: Promise<ProfilesListResult> | null = null
   sessionResults: Promise<SessionResult>[] = []
   resumeResults: Promise<SessionResult>[] = []
+  sessions: GatewaySessionSummary[] = []
+  attentionResult = { items: [], scope: 'This gateway runtime only' } as Awaited<ReturnType<CompanionGateway['listAttention']>>
   pendingApprovalsResult: Promise<{ approvals: [] }> | null = null
   private eventHandlers = new Set<(event: CompanionEvent) => void>()
   private stateHandlers = new Set<(state: ConnectionState) => void>()
@@ -51,6 +53,9 @@ class ControlledGateway implements CompanionGateway {
   async resumeSession(id: string, profile?: string) { this.calls.push(['resumeSession', id, profile]);
 
  return this.resumeResults.shift() ?? this.session }
+  async listSessions(options: { profile: string; limit?: number; include_hidden?: boolean; include_archived?: boolean; title?: string }) { this.calls.push(['listSessions', options]); return { sessions: this.sessions } }
+  async setSessionPinned(profile: string, id: string, pinned: boolean) { this.calls.push(['setSessionPinned', profile, id, pinned]); return { pinned, session_id: id, changed: true } }
+  async listAttention() { this.calls.push(['listAttention']); return this.attentionResult }
   async submitPrompt(id: string, text: string) { this.calls.push(['submitPrompt', id, text]);
 
  return this.submit }
@@ -120,6 +125,18 @@ function harness(baseUrl: string | null = null, profiles?: ProfilesListResult, s
 }
 
 describe('CompanionStore setup and sessions', () => {
+  it('connects to an older gateway when attention.list is unavailable', async () => {
+    const { store, gateways } = harness()
+    const configuring = store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
+    gateways[0].listAttention = async () => {throw new Error('Method not found (-32601)')}
+
+    await configuring
+
+    expect(store.getSnapshot()).toMatchObject({
+      phase: 'ready', attentionItems: [], attentionScope: 'Unavailable on this gateway version'
+    })
+  })
+
   it('reuses a saved native token on blank submission without exposing it in the snapshot', async () => {
     const secrets = tokenStore('known-good-token')
     const { store, gateways } = harness('http://localhost:8642', undefined, secrets)
@@ -226,18 +243,57 @@ describe('CompanionStore setup and sessions', () => {
     expect(store.getSnapshot().teammates.map((item) => item.id)).not.toContain('Operations Assistant')
   })
 
-  it('creates for a selected profile and resumes an explicitly known stored session', async () => {
+  it('opens the canonical Bot Chat for a selected profile and resumes an explicitly known stored session', async () => {
     const { store, gateways } = harness()
     await store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
     const atlas = store.getSnapshot().teammates[0]
 
     await store.selectTeammate(atlas.id)
-    expect(gateways[0].calls).toContainEqual(['createSession', { profile: 'atlas', title: 'Conversation with Atlas' }])
+    expect(gateways[0].calls).toContainEqual(['listSessions', {
+      profile: 'atlas', limit: 1, include_hidden: true, include_archived: true, title: 'Bot Chat'
+    }])
+    expect(gateways[0].calls).toContainEqual(['createSession', {
+      profile: 'atlas', title: 'Bot Chat', hidden: true, source: 'companion'
+    }])
     expect(store.getSnapshot()).toMatchObject({ runtimeSessionId: 'runtime-1', storedSessionId: 'stored-1' })
     expect(store.getSnapshot().messages[0]).toMatchObject({ role: 'assistant', text: 'Welcome back.' })
 
     await store.selectTeammate(atlas.id, 'stored-explicit')
     expect(gateways[0].calls).toContainEqual(['resumeSession', 'stored-explicit', 'atlas'])
+  })
+
+  it('reuses an exact hidden Bot Chat instead of creating a duplicate', async () => {
+    const { store, gateways } = harness()
+    await store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
+    gateways[0].sessions = [{
+      id: 'bot-root', resolved_id: 'bot-tip', title: 'Bot Chat', preview: 'Previous work',
+      started_at: 1, last_active: 2, message_count: 3, source: 'companion', pinned: true
+    }]
+
+    await store.selectTeammate('atlas')
+
+    expect(gateways[0].calls).toContainEqual(['resumeSession', 'bot-tip', 'atlas'])
+    expect(gateways[0].calls.some(([name]) => name === 'createSession')).toBe(false)
+  })
+
+  it('falls back to local pin persistence when the gateway lacks session.set_pinned', async () => {
+    const { store, gateways, storage } = harness()
+    await store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
+    gateways[0].sessions = [{
+      id: 'recent-1', title: 'Recent', preview: '', started_at: 1, last_active: 2,
+      message_count: 1, source: 'companion', pinned: false
+    }]
+    await store.selectTeammate('atlas')
+    await vi.waitFor(() => expect(store.getSnapshot().recentSessions).toHaveLength(1))
+    gateways[0].setSessionPinned = async () => {throw new Error('Method not found (-32601)')}
+
+    await store.setSessionPinned('recent-1', true)
+
+    expect(store.getSnapshot().recentSessions[0].pinned).toBe(true)
+    expect(storage.setItem).toHaveBeenCalledWith(
+      'hermes.companion.localPins',
+      expect.stringContaining('recent-1')
+    )
   })
 
   it('loads live name-only profiles while keeping raw profile names out of the UI', async () => {
@@ -261,7 +317,7 @@ describe('CompanionStore setup and sessions', () => {
     await store.selectTeammate(teammates[1].id)
     expect(gateways[0].calls).toContainEqual([
       'createSession',
-      { profile: '/Users/operator/.hermes/profiles/ops_internal', title: 'Conversation with Hermes Teammate 2' }
+      { profile: '/Users/operator/.hermes/profiles/ops_internal', title: 'Bot Chat', hidden: true, source: 'companion' }
     ])
   })
 
@@ -278,11 +334,11 @@ describe('CompanionStore setup and sessions', () => {
     await store.selectTeammate(teammates[1].id)
     expect(gateways[0].calls).toContainEqual([
       'createSession',
-      { profile: 'atlas', title: 'Conversation with Atlas' }
+      { profile: 'atlas', title: 'Bot Chat', hidden: true, source: 'companion' }
     ])
     expect(gateways[0].calls).toContainEqual([
       'createSession',
-      { profile: 'team-atlas', title: 'Conversation with Atlas' }
+      { profile: 'team-atlas', title: 'Bot Chat', hidden: true, source: 'companion' }
     ])
   })
 
@@ -310,6 +366,68 @@ describe('CompanionStore setup and sessions', () => {
 })
 
 describe('CompanionStore prompts, approvals, and recovery', () => {
+  it('refreshes authoritative attention for events from a non-selected runtime session', async () => {
+    const { store, gateways } = harness()
+    await store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
+    gateways[0].attentionResult = {
+      scope: 'connected_runtime',
+      items: [{
+        id: 'outcome:other:1', kind: 'error', profile: 'mentor', runtime_session_id: 'other',
+        stored_session_id: 'stored-other', title: 'Turn failed', detail: 'Open session.',
+        occurred_at: 1, actionable: true, resolution: 'open_session'
+      }]
+    }
+
+    gateways[0].emit({ type: 'error', session_id: 'other', payload: {} })
+
+    await vi.waitFor(() => expect(store.getSnapshot().attentionItems).toHaveLength(1))
+    expect(store.getSnapshot().attentionItems[0].resolution).toBe('open_session')
+  })
+
+  it('submits a quick task exactly once through Atlas canonical Bot Chat', async () => {
+    const { store, gateways } = harness()
+    await store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
+
+    await store.submitQuickTask('atlas', '  Prepare the brief  ')
+
+    expect(gateways[0].calls).toContainEqual(['listSessions', {
+      profile: 'atlas', limit: 1, include_hidden: true, include_archived: true, title: 'Bot Chat'
+    }])
+    expect(gateways[0].calls).toContainEqual(['submitPrompt', 'runtime-1', 'Prepare the brief'])
+    expect(gateways[0].calls.filter(([name]) => name === 'submitPrompt')).toHaveLength(1)
+    expect(store.getSnapshot()).toMatchObject({ selectedTeammateId: 'atlas', turnStatus: 'streaming' })
+  })
+
+  it('does not display a rejected quick task as sent', async () => {
+    const { store, gateways } = harness()
+    await store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
+    gateways[0].submit = Promise.reject(new Error('gateway rejected'))
+
+    await store.submitQuickTask('atlas', 'Reject this')
+
+    expect(store.getSnapshot().messages.some((message) => message.text === 'Reject this')).toBe(false)
+    expect(store.getSnapshot().turnStatus).toBe('idle')
+  })
+
+  it('keeps a quick task completed when completion arrives before submit acknowledgement', async () => {
+    const { store, gateways } = harness()
+    await store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
+    const pending = deferred<{ status: 'streaming' }>()
+    gateways[0].submit = pending.promise
+
+    const submitting = store.submitQuickTask('atlas', 'Race-safe quick task')
+    await vi.waitFor(() => expect(store.getSnapshot().turnStatus).toBe('submitting'))
+    gateways[0].emit({ type: 'message.complete', session_id: 'runtime-1', payload: { text: 'Finished.' } })
+    pending.resolve({ status: 'streaming' })
+    await submitting
+
+    expect(store.getSnapshot().messages.slice(-2).map(({ role, text }) => ({ role, text }))).toEqual([
+      { role: 'user', text: 'Race-safe quick task' },
+      { role: 'assistant', text: 'Finished.' }
+    ])
+    expect(store.getSnapshot().turnStatus).toBe('idle')
+  })
+
   it('reports only locally observed roster state across work, approval, completion, and recovery', async () => {
     const { store, gateways } = harness()
     await store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })

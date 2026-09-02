@@ -81,6 +81,21 @@ export class FakeCompanionGateway implements CompanionGateway {
     return { ...this.activeSession, messages: [...this.activeSession.messages] }
   }
 
+  async listSessions(options: { profile: string; limit?: number; include_hidden?: boolean; title?: string }) {
+    const sessions = this.activeSession?.stored_session_id
+      ? [{ id: this.activeSession.stored_session_id, title: options.title ?? 'Recent conversation', preview: 'Fixture conversation', started_at: 1, last_active: 1, message_count: 1, source: 'companion', pinned: false }]
+      : []
+    return { sessions }
+  }
+
+  async setSessionPinned(_profile: string, sessionId: string, pinned: boolean) {
+    return { pinned, session_id: sessionId, changed: true }
+  }
+
+  async listAttention() {
+    return { items: [], scope: 'This gateway runtime only' }
+  }
+
   async submitPrompt(runtimeSessionId: string, text: string) {
     this.assertSession(runtimeSessionId)
     queueMicrotask(() => {

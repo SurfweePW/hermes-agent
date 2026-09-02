@@ -9,15 +9,21 @@ import type {
   ApprovalChoice,
   ApprovalRequestPayload,
   ApprovalRespondResult,
+  AttentionListResult,
   CompanionEvent,
   CompanionEventHandler,
   CreateSessionOptions,
+  GatewayAttentionItem,
+  GatewaySessionSummary,
   MessageCompleteEvent,
   PendingApprovalsResult,
   ProfilesListResult,
   PromptSubmitResult,
   SessionInterruptResult,
-  SessionResult
+  SessionListOptions,
+  SessionListResult,
+  SessionResult,
+  SetPinnedResult
 } from './types'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -79,6 +85,88 @@ function validatedPendingApprovals(value: unknown): PendingApprovalsResult {
   if (!isRecord(value) || !Array.isArray(value.approvals)) {return malformedPendingApprovals()}
 
   return { approvals: value.approvals.map(validatedApproval) }
+}
+
+function requiredString(record: Record<string, unknown>, key: string, error: string): string {
+  const value = record[key]
+  if (typeof value !== 'string') {throw new Error(error)}
+
+  return value
+}
+
+function validatedSessions(value: unknown): SessionListResult {
+  const error = 'Malformed session.list response.'
+  if (!isRecord(value) || !Array.isArray(value.sessions)) {throw new Error(error)}
+
+  const sessions = value.sessions.map((candidate): GatewaySessionSummary => {
+    if (!isRecord(candidate)) {throw new Error(error)}
+    const id = requiredString(candidate, 'id', error)
+    const title = requiredString(candidate, 'title', error)
+    const preview = requiredString(candidate, 'preview', error)
+    const source = requiredString(candidate, 'source', error)
+    const startedAt = typeof candidate.started_at === 'number' ? candidate.started_at : 0
+    const lastActive = typeof candidate.last_active === 'number' ? candidate.last_active : startedAt
+    const messageCount = typeof candidate.message_count === 'number' ? candidate.message_count : 0
+    const pinned = typeof candidate.pinned === 'boolean' ? candidate.pinned : false
+
+    return {
+      id, title, preview, source,
+      started_at: startedAt,
+      last_active: lastActive,
+      message_count: messageCount,
+      pinned,
+      ...(typeof candidate.resolved_id === 'string' ? { resolved_id: candidate.resolved_id } : {})
+    }
+  })
+
+  return { sessions }
+}
+
+function validatedAttention(value: unknown): AttentionListResult {
+  const error = 'Malformed attention.list response.'
+  if (!isRecord(value) || !Array.isArray(value.items)) {throw new Error(error)}
+  const kinds = new Set(['approval', 'question', 'blocker', 'completion', 'error'])
+  const items = value.items.map((candidate): GatewayAttentionItem => {
+    if (!isRecord(candidate) || !kinds.has(candidate.kind as string)) {throw new Error(error)}
+    const profile = requiredString(candidate, 'profile', error)
+    if (!profile || profile.length > 64 || /[\\/]/.test(profile) || profile.includes('://')) {
+      throw new Error(error)
+    }
+    const stored = candidate.stored_session_id
+    if (stored !== null && typeof stored !== 'string') {throw new Error(error)}
+    if (typeof candidate.occurred_at !== 'number') {throw new Error(error)}
+    const item: GatewayAttentionItem = {
+      id: requiredString(candidate, 'id', error),
+      kind: candidate.kind as GatewayAttentionItem['kind'],
+      profile,
+      runtime_session_id: requiredString(candidate, 'runtime_session_id', error),
+      stored_session_id: stored,
+      title: requiredString(candidate, 'title', error).slice(0, 240),
+      detail: requiredString(candidate, 'detail', error).slice(0, 500),
+      occurred_at: candidate.occurred_at,
+      actionable: candidate.actionable === true,
+      resolution: candidate.resolution === 'approval'
+        || candidate.resolution === 'open_session'
+        || candidate.resolution === 'unsupported_here'
+        ? candidate.resolution
+        : (() => {throw new Error(error)})()
+    }
+    if (typeof candidate.request_id === 'string') {item.request_id = candidate.request_id}
+    if (candidate.request !== undefined) {
+      const approval = validatedApproval(candidate.request)
+      item.request = {
+        request_id: approval.request_id,
+        ...(approval.allow_session !== undefined ? { allow_session: approval.allow_session } : {}),
+        ...(approval.allow_permanent !== undefined ? { allow_permanent: approval.allow_permanent } : {}),
+        ...(approval.choices ? { choices: approval.choices } : {})
+      }
+    }
+
+    return item
+  })
+  const scope = typeof value.scope === 'string' ? value.scope : undefined
+
+  return { items, ...(scope ? { scope } : {}) }
 }
 
 function toCompanionEvent(event: GatewayEvent): CompanionEvent | null {
@@ -161,6 +249,9 @@ function toCompanionEvent(event: GatewayEvent): CompanionEvent | null {
       return { type: 'approval.request', session_id, payload: approvalPayload }
     }
 
+    case 'error':
+      return { type: 'error', session_id, payload }
+
     default:
       return null
   }
@@ -223,6 +314,9 @@ export class CompanionClient {
       params.title = options.title
     }
 
+    if (options.hidden !== undefined) {params.hidden = options.hidden}
+    if (options.source !== undefined) {params.source = options.source}
+
     return this.gateway.request('session.create', params)
   }
 
@@ -234,6 +328,24 @@ export class CompanionClient {
     }
 
     return this.gateway.request('session.resume', params)
+  }
+
+  listSessions(options: SessionListOptions): Promise<SessionListResult> {
+    const params: Record<string, unknown> = { profile: options.profile }
+    if (options.limit !== undefined) {params.limit = options.limit}
+    if (options.include_hidden !== undefined) {params.include_hidden = options.include_hidden}
+    if (options.include_archived !== undefined) {params.include_archived = options.include_archived}
+    if (options.title !== undefined) {params.title = options.title}
+
+    return this.gateway.request<unknown>('session.list', params).then(validatedSessions)
+  }
+
+  setSessionPinned(profile: string, sessionId: string, pinned: boolean): Promise<SetPinnedResult> {
+    return this.gateway.request('session.set_pinned', { profile, session_id: sessionId, pinned })
+  }
+
+  listAttention(): Promise<AttentionListResult> {
+    return this.gateway.request<unknown>('attention.list', {}).then(validatedAttention)
   }
 
   submitPrompt(runtimeSessionId: string, text: string): Promise<PromptSubmitResult> {

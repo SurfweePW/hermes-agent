@@ -1,23 +1,36 @@
+import type { GatewayAttentionItem } from '../../gateway/types'
+
 interface NeedsMeProps {
-  approvalTitle?: string
-  disconnected: boolean
-  onOpenApproval: () => void
-  onOpenRecovery: () => void
+  items: readonly GatewayAttentionItem[]
+  scope: string
+  onOpen: (item: GatewayAttentionItem) => void
+  onRefresh: () => void
 }
 
-export function NeedsMe({ approvalTitle, disconnected, onOpenApproval, onOpenRecovery }: NeedsMeProps) {
-  const count = Number(Boolean(approvalTitle)) + Number(disconnected)
-
+export function NeedsMe({ items, scope, onOpen, onRefresh }: NeedsMeProps) {
   return (
     <section aria-labelledby="needs-title" className="needs-screen">
-      <p className="kicker">A short queue, not another inbox</p>
-      <h2 id="needs-title">Needs Me <span className="heading-count">{count}</span></h2>
-      <p className="screen-lede">Only live decisions and connection interruptions that need your judgment.</p>
+      <p className="kicker">Runtime-local attention</p>
+      <h2 id="needs-title">Needs Me <span className="heading-count">{items.length}</span></h2>
+      <p className="screen-lede">Scope: <strong>{scope}</strong>. This is not a global inbox; only items reported by the connected gateway runtime appear here.</p>
+      <button onClick={onRefresh} type="button">Refresh</button>
       <div className="attention-list">
-        {approvalTitle && <button className="attention-item attention-item--amber" onClick={onOpenApproval} type="button"><span className="attention-item__number">!</span><span><span className="label">Approval</span><strong>{approvalTitle}</strong><small>Waiting for your choice</small></span><span aria-hidden="true">→</span></button>}
-        {disconnected && <button className="attention-item attention-item--coral" onClick={onOpenRecovery} type="button"><span className="attention-item__number">!</span><span><span className="label">Connection</span><strong>Companion is disconnected</strong><small>Drafts remain on this device</small></span><span aria-hidden="true">→</span></button>}
+        {items.map((item) => {
+          const actionable = item.actionable
+            && (item.resolution === 'approval' || item.resolution === 'open_session')
+            && Boolean(item.stored_session_id)
+          return actionable ? (
+            <button className="attention-item attention-item--amber" key={item.id} onClick={() => onOpen(item)} type="button">
+              <span className="attention-item__number">!</span><span><span className="label">{item.kind} · {item.profile}</span><strong>{item.title}</strong><small>{item.detail || 'Open the stored session to review.'}</small></span><span aria-hidden="true">→</span>
+            </button>
+          ) : (
+            <article className="attention-item" key={item.id}>
+              <span className="attention-item__number">i</span><span><span className="label">{item.kind} · {item.profile}</span><strong>{item.title}</strong><small>{item.detail}</small><em>unsupported_here — open the originating Hermes runtime to respond.</em></span>
+            </article>
+          )
+        })}
       </div>
-      {count === 0 && <div className="all-clear"><span aria-hidden="true">✓</span><div><strong>Nothing needs you right now</strong><p>Your teammates can continue without a decision.</p></div></div>}
+      {items.length === 0 && <div className="all-clear"><span aria-hidden="true">✓</span><div><strong>Nothing needs you in this runtime</strong><p>No attention items were returned by attention.list.</p></div></div>}
     </section>
   )
 }

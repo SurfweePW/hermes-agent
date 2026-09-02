@@ -525,6 +525,7 @@ def _lock_in_submit_turn(
         session["running"] = True
         session["_turn_cancel_requested"] = False
         session["last_active"] = time.time()
+        _clear_companion_attention_outcome(sid)
         if hosted_task is not None:
             session["_hosted_room_task"] = dict(hosted_task)
         _start_inflight_turn(session, text)
