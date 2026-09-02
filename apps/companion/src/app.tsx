@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
 
-import { ActivityRail } from './features/attention/activity-rail'
 import { NeedsMe } from './features/attention/needs-me'
 import { Conversation } from './features/conversation/conversation'
 import { Recovery } from './features/recovery/recovery'
@@ -72,7 +71,7 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
   })()
 
   return (
-    <div className="app-shell">
+    <div className="app-shell app-shell--two-column">
       <header className="mobile-header"><Wordmark /><span aria-label="Profile: Companion user" className="avatar avatar--user" role="img">CU</span></header>
       <aside className="left-rail">
         <Wordmark />
@@ -91,7 +90,6 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
         {companion.error && <div className="decision-toast" role="alert">{companion.error}</div>}
         {content}
       </main>
-      <ActivityRail messages={companion.messages} teammateName={selected?.name} />
       <nav aria-label="Mobile navigation" className="bottom-nav">
         <NavButton active={screen === 'teammates' || screen === 'details'} icon="⌂" label="Teammates" onClick={() => setScreen('teammates')} />
         <NavButton active={screen === 'conversation'} icon="◌" label="Chat" onClick={() => setScreen('conversation')} />
@@ -123,7 +121,7 @@ function TeammatesHome({ teammates, attentionCount, onSelect, onNeedsMe, onQuick
   const [target, setTarget] = useState(atlasId)
   const [task, setTask] = useState('')
 
-  return <section aria-labelledby="teammates-title" className="teammates-home"><div className="hero-copy"><p className="kicker">Your team at a glance</p><h2 id="teammates-title">Your team is ready.</h2><p className="screen-lede">Send a quick text task or open a teammate.</p></div><form className="quick-task" onSubmit={(event) => { event.preventDefault(); if (task.trim() && target) {onQuickTask(target, task); setTask('')} }}><label>Assign to<select aria-label="Quick task profile" onChange={(event) => setTarget(event.target.value)} value={target}>{teammates.map((teammate) => <option key={teammate.id} value={teammate.id}>{teammate.name}</option>)}</select></label><label>Quick task<textarea aria-label="Quick task" onChange={(event) => setTask(event.target.value)} placeholder="What should Hermes do?" value={task} /></label><button className="primary-button" disabled={!task.trim() || !target} type="submit">Send task</button></form>{attentionCount > 0 && <button className="attention-banner" onClick={onNeedsMe} type="button"><span className="attention-banner__count">{attentionCount}</span><span><strong>Needs your judgment</strong><small>Review runtime-local attention</small></span><span aria-hidden="true">→</span></button>}<div className="section-heading"><div><p className="kicker">Available profiles</p><h3>Teammates</h3></div><span>{teammates.length} total</span></div><Roster onSelect={onSelect} teammates={[...teammates]} /></section>
+  return <section aria-labelledby="teammates-title" className="teammates-home"><div className="hero-copy"><p className="kicker">Your team at a glance</p><h2 id="teammates-title">Your team is ready.</h2><p className="screen-lede">Send a quick text task or open a teammate.</p></div><form aria-label="Quick task" className="quick-task" onSubmit={(event) => { event.preventDefault(); if (task.trim() && target) {onQuickTask(target, task); setTask('')} }}><div className="quick-task__heading"><div><p className="kicker">Quick task</p><h3>Delegate something now</h3></div><span aria-hidden="true">↗</span></div><label htmlFor="quick-task-target">Assign to</label><select id="quick-task-target" onChange={(event) => setTarget(event.target.value)} value={target}>{teammates.map((teammate) => <option key={teammate.id} value={teammate.id}>{teammate.name}</option>)}</select><label htmlFor="quick-task-text">Task</label><textarea id="quick-task-text" onChange={(event) => setTask(event.target.value)} placeholder="What should Hermes do?" rows={3} value={task} /><button className="primary-button" disabled={!task.trim() || !target} type="submit">Send task</button></form>{attentionCount > 0 && <button className="attention-banner" onClick={onNeedsMe} type="button"><span className="attention-banner__count">{attentionCount}</span><span><strong>Needs your judgment</strong><small>Review runtime-local attention</small></span><span aria-hidden="true">→</span></button>}<div className="section-heading"><div><p className="kicker">Available profiles</p><h3>Teammates</h3></div><span>{teammates.length} total</span></div><Roster onSelect={onSelect} teammates={[...teammates]} /></section>
 }
 
 function ChooseTeammate({ onBack }: { onBack: () => void }) { return <section className="search-empty"><h2>Choose a teammate first</h2><p>Select a teammate to create a conversation.</p><button className="primary-button" onClick={onBack} type="button">View teammates</button></section> }

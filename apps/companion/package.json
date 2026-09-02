@@ -2,7 +2,7 @@
   "name": "@hermes/companion",
   "productName": "Hermes Companion",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Secure native companion shell for Hermes Agent.",
   "author": "Nous Research",
   "type": "module",

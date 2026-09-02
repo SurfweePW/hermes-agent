@@ -55,7 +55,7 @@ describe('macOS packaging workflow', () => {
 
     const appPath = resolve(root, 'release/mac-arm64/Hermes Companion.app')
     const executablePath = resolve(appPath, 'Contents/MacOS/Hermes Companion')
-    const zipPath = resolve(root, 'release/Hermes-Companion-0.1.0-mac-arm64.zip')
+    const zipPath = resolve(root, `release/Hermes-Companion-${packageJson.version}-mac-arm64.zip`)
 
     expect(plan).toMatchObject({ appPath, executablePath, zipPath })
     expect(plan.commands).toEqual([

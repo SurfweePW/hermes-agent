@@ -51,4 +51,45 @@ describe('Conversation', () => {
     render(<Conversation {...baseProps} approval={approval} />)
     expect(screen.getByRole('heading', { name: 'Publish?' })).toBeTruthy()
   })
+
+  it('sends on Enter and leaves Shift+Enter for a newline', () => {
+    const onSubmit = vi.fn()
+    render(<Conversation {...baseProps} draft="ready" onSubmit={onSubmit} />)
+    const composer = screen.getByLabelText('Message Atlas')
+
+    fireEvent.keyDown(composer, { key: 'Enter', shiftKey: true })
+    expect(onSubmit).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(composer, { key: 'Enter' })
+    expect(onSubmit).toHaveBeenCalledOnce()
+  })
+
+  it('does not submit while an IME composition is being confirmed', () => {
+    const onSubmit = vi.fn()
+    render(<Conversation {...baseProps} draft="未完" onSubmit={onSubmit} />)
+
+    fireEvent.keyDown(screen.getByLabelText('Message Atlas'), { key: 'Enter', isComposing: true })
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('does not submit by keyboard while working or disconnected', () => {
+    const onSubmit = vi.fn()
+    const { rerender } = render(<Conversation {...baseProps} draft="ready" onSubmit={onSubmit} turnStatus="streaming" />)
+    fireEvent.keyDown(screen.getByLabelText('Message Atlas'), { key: 'Enter' })
+    expect(onSubmit).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Send message' }).hasAttribute('disabled')).toBe(true)
+
+    rerender(<Conversation {...baseProps} connected={false} draft="ready" onSubmit={onSubmit} />)
+    fireEvent.keyDown(screen.getByLabelText('Message Atlas'), { key: 'Enter' })
+    expect(onSubmit).not.toHaveBeenCalled()
+  })
+
+  it('presents compaction payloads as system disclosures even when history labels them as user messages', () => {
+    render(<Conversation {...baseProps} messages={[{ id: 'compact', role: 'user', text: '[CONTEXT COMPACTION — REFERENCE ONLY]\n## Historical Task Snapshot\nInternal details\n--- END OF CONTEXT SUMMARY — respond to the message below ---' }]} />)
+
+    const disclosure = screen.getByLabelText('Earlier context summary')
+    expect(disclosure.closest('article')?.className).toContain('message--system')
+    expect(disclosure.closest('article')?.className).not.toContain('message--mine')
+    expect(screen.queryByText(/Historical Task Snapshot/)).toBeNull()
+  })
 })

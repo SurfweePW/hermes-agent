@@ -39,9 +39,10 @@ describe('Signal House CSS contract', () => {
     expect(tokensCss).not.toMatch(/4px 4px 0/)
   })
 
-  it('reflows tablet layouts without the activity rail or fixed minimum content width', () => {
+  it('uses a two-column shell and reflows tablet layouts without fixed minimum content width', () => {
+    expect(appCss).toMatch(/\.app-shell\s*\{[^}]*grid-template-columns:\s*286px\s+minmax\(0,\s*1fr\)/i)
     expect(appCss).toMatch(/@media\s*\(max-width:\s*1180px\)\s*and\s*\(min-width:\s*781px\)[\s\S]*?\.app-shell\s*\{[^}]*grid-template-columns:\s*225px\s+minmax\(0,\s*1fr\)/i)
-    expect(appCss).toMatch(/@media\s*\(max-width:\s*1180px\)\s*and\s*\(min-width:\s*781px\)[\s\S]*?\.activity-rail\s*\{[^}]*display:\s*none/i)
+    expect(appCss).not.toMatch(/\.activity-rail\s*\{/i)
   })
 
   it('accounts for mobile safe areas in shell, fixed chrome, and conversation height', () => {
@@ -54,7 +55,7 @@ describe('Signal House CSS contract', () => {
   it('uses an accessible small-text alias while preserving the approved muted token', () => {
     expect(tokensCss).toMatch(/--muted-text\s*:\s*#62665e/i)
     expect(appCss).toMatch(/\.kicker,\s*\.label\s*\{[^}]*color:\s*var\(--muted-text\)/i)
-    expect(appCss).toMatch(/\.timeline time\s*\{[^}]*color:\s*var\(--muted-text\)/i)
+    expect(appCss).toMatch(/\.session-row time\s*\{[^}]*color:\s*var\(--muted-text\)/i)
   })
 
   it('uses accessible muted text for sidebar section titles', () => {

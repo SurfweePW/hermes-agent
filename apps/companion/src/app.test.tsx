@@ -87,6 +87,17 @@ describe('App', () => {
     expect(screen.getByRole('main')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Hermes Companion' })).toBeTruthy()
     expect(screen.getAllByText('Atlas').length).toBeGreaterThan(0)
+    expect(document.querySelector('.activity-rail')).toBeNull()
+    expect(document.querySelector('.app-shell')?.classList.contains('app-shell--two-column')).toBe(true)
+  })
+
+  it('renders quick task as a labelled stacked composer', async () => {
+    render(<App store={await readyStore()} />)
+    const form = screen.getByRole('form', { name: 'Quick task' })
+    expect(form.classList.contains('quick-task')).toBe(true)
+    expect(screen.getByLabelText('Assign to').tagName).toBe('SELECT')
+    expect(screen.getByLabelText('Task').tagName).toBe('TEXTAREA')
+    expect(screen.getByRole('button', { name: 'Send task' })).toBeTruthy()
   })
 
   it('marks active navigation and focuses the newly selected screen context', async () => {
