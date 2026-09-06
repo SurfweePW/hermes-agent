@@ -166,6 +166,24 @@ describe('CompanionStore setup and sessions', () => {
     expect(store.getSnapshot()).toMatchObject({ phase: 'ready', baseUrl: 'https://gateway.test', connectionMode: 'owner' })
   })
 
+  it('reuses a valid native owner session without launching another browser sign-in', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(),
+      ownerStatus: vi.fn(async () => ({ signedIn: true })),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket')
+    }
+
+    const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
+
+    await store.configureOwner({ baseUrl: 'https://gateway.test' })
+
+    expect(ownerAuth.ownerStatus).toHaveBeenCalledWith({ baseUrl: 'https://gateway.test' })
+    expect(ownerAuth.ownerSignIn).not.toHaveBeenCalled()
+    expect(gateways[0].calls[0]).toEqual(['connect', 'wss://gateway.test/api/ws?ticket=owner-ticket'])
+    expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner', error: null })
+  })
+
   it('validates owner bootstrap URLs before crossing the native boundary', async () => {
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(),
@@ -278,6 +296,7 @@ describe('CompanionStore setup and sessions', () => {
 
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     const first = store.configureOwner({ baseUrl: 'https://first.gateway.test' })
+    await Promise.resolve()
     const second = store.configureOwner({ baseUrl: 'https://latest.gateway.test' })
 
     firstSignIn.reject(new Error('owner sign-in cancelled by newer attempt'))
@@ -328,6 +347,21 @@ describe('CompanionStore setup and sessions', () => {
     expect(store.getSnapshot()).toMatchObject({
       phase: 'ready', attentionItems: [], attentionScope: 'Unavailable on this gateway version'
     })
+  })
+
+  it('uses the compatibility fallback for the gateway unknown-method error shape', async () => {
+    const { store, gateways } = harness()
+    const configuring = store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
+    const error = Object.assign(new Error('unknown method: attention.list'), { code: -32601 })
+
+    gateways[0].listAttention = async () => {throw error}
+
+    await configuring
+
+    expect(store.getSnapshot()).toMatchObject({
+      phase: 'ready', attentionItems: [], attentionScope: 'Unavailable on this gateway version'
+    })
+    expect(gateways[0].calls).not.toContainEqual(['close'])
   })
 
   it('reuses a saved native token on blank submission without exposing it in the snapshot', async () => {

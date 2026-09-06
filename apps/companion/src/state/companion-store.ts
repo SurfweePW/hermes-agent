@@ -297,7 +297,18 @@ function publicError(error: unknown): string {
 }
 
 function isUnsupportedMethod(error: unknown): boolean {
-  return error instanceof Error && /(?:method not found|-32601)/i.test(error.message)
+  if (!(error instanceof Error)) {return false}
+
+  const code = 'code' in error ? (error as Error & { code?: unknown }).code : undefined
+
+  return code === -32601 || /(?:method not found|unknown method|-32601)/i.test(error.message)
+}
+
+function hasExistingOwnerSession(status: unknown): boolean {
+  return typeof status === 'object'
+    && status !== null
+    && 'signedIn' in status
+    && (status as { signedIn?: unknown }).signedIn === true
 }
 
 export function createCompanionStore(options: CompanionStoreOptions = {}): CompanionStore {
@@ -838,7 +849,13 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
         if (!ownerAuth) {throw new Error('Owner authentication is unavailable.')}
         publish({ phase: 'connecting', baseUrl: configuration.baseUrl, warnings: configuration.warnings, error: null })
-        await ownerAuth.ownerSignIn({ baseUrl: configuration.baseUrl })
+        const ownerStatus = await ownerAuth.ownerStatus({ baseUrl: configuration.baseUrl })
+
+        if (connectionGeneration !== operation || destroyed) {return}
+
+        if (!hasExistingOwnerSession(ownerStatus)) {
+          await ownerAuth.ownerSignIn({ baseUrl: configuration.baseUrl })
+        }
 
         if (connectionGeneration !== operation || destroyed) {return}
         const client = await connect('connecting', operation, 'owner')
