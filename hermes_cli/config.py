@@ -2023,6 +2023,25 @@ def load_config_readonly() -> Dict[str, Any]:
     return _load_config_impl(want_deepcopy=False)
 
 
+def load_config_path_readonly(
+    config_path: Path, *, fail_closed: bool = False,
+) -> Dict[str, Any]:
+    """Load one explicitly resolved profile config without changing process state.
+
+    Callers must authorize and anchor the profile path before calling it. The
+    canonical defaults, normalization, environment expansion, managed overlay,
+    last-known-good behavior, and per-path cache remain identical, while no
+    ``HERMES_HOME`` mutation or profile-directory creation occurs. With
+    ``fail_closed=True``, malformed input raises before warning, fallback, or
+    corrupt-file backup side effects.
+    """
+    return _load_config_impl(
+        want_deepcopy=False,
+        config_path=Path(config_path),
+        fail_closed=fail_closed,
+    )
+
+
 def _ensure_dict(parent: Dict[str, Any], key: str) -> Dict[str, Any]:
     """Return ``parent[key]`` as a dict, replacing a missing or non-dict value with ``{}``."""
     child = parent.get(key)
@@ -2196,10 +2215,18 @@ def _merge_managed_overlay(expanded: Dict[str, Any]) -> Tuple[Dict[str, Any], An
     return _deep_merge(expanded, _expand_env_vars(managed_normalized)), managed_config
 
 
-def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
+def _load_config_impl(
+    *,
+    want_deepcopy: bool,
+    config_path: Optional[Path] = None,
+    fail_closed: bool = False,
+) -> Dict[str, Any]:
     with _CONFIG_LOCK:
-        ensure_hermes_home()
-        config_path = get_config_path()
+        if config_path is None:
+            ensure_hermes_home()
+            config_path = get_config_path()
+        else:
+            config_path = Path(config_path)
         path_key = str(config_path)
 
         user_sig, cache_sig = _load_config_cache_sig(config_path)
@@ -2231,6 +2258,8 @@ def _load_config_impl(*, want_deepcopy: bool) -> Dict[str, Any]:
 
                 config = _deep_merge(config, user_config)
             except Exception as e:
+                if fail_closed:
+                    raise ValueError("configuration is unavailable") from e
                 lkg_copy = _last_known_good_fallback(config_path, path_key, cache_sig, e)
                 if lkg_copy is not None:
                     return copy.deepcopy(lkg_copy) if want_deepcopy else lkg_copy

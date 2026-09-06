@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from hermes_cli.dashboard_auth.cookies import (
+    _MAX_PKCE_FLOW_COOKIES,
     PKCE_COOKIE,
     SESSION_AT_COOKIE,
     SESSION_PROVIDER_COOKIE,
@@ -134,6 +135,27 @@ def test_read_session_cookies_from_request_secure_prefix():
     at, rt = read_session_cookies(req)
     assert at == "at_value"
     assert rt == "rt_value"
+
+
+def test_concurrent_pkce_starts_have_a_hard_bounded_cookie_namespace():
+    """Independent responses may all see the same empty cookie snapshot."""
+    request = Request({"type": "http", "method": "GET", "path": "/", "headers": []})
+    names = set()
+
+    for i in range(_MAX_PKCE_FLOW_COOKIES + 4):
+        response = Response()
+        set_pkce_cookie(
+            response,
+            payload={"state": f"s{i}"},
+            selector=f"s{i}",
+            request=request,
+            use_https=False,
+        )
+        for header, value in response.raw_headers:
+            if header == b"set-cookie" and b"_flow_" in value and b"Max-Age=0" not in value:
+                names.add(value.decode().split("=", 1)[0])
+
+    assert len(names) <= _MAX_PKCE_FLOW_COOKIES
 
 
 # ---------------------------------------------------------------------------
@@ -528,3 +550,34 @@ def test_clear_session_cookies_prefixed_deletions_carry_secure():
         # it still works on plain-HTTP origins.
         assert "; Secure" not in bare
         assert "Max-Age=0" in bare
+
+
+def test_logout_style_pkce_clear_deletes_every_bounded_slot():
+    response = Response()
+    clear_pkce_cookie(response, use_https=False)
+    deleted_names = {
+        value.decode().split("=", 1)[0]
+        for header, value in response.raw_headers
+        if header == b"set-cookie" and b"_flow_" in value and b"Max-Age=0" in value
+    }
+
+    assert len(deleted_names) == _MAX_PKCE_FLOW_COOKIES * 3
+
+
+def test_cookie_deletions_obey_secure_prefix_contracts():
+    response = Response()
+    clear_session_cookies(response, prefix="/hermes")
+    clear_pkce_cookie(response, use_https=False, prefix="/hermes")
+
+    headers = response.headers.getlist("set-cookie")
+    prefixed = [
+        header for header in headers
+        if header.startswith(("__Host-", "__Secure-"))
+    ]
+    assert prefixed
+    assert all("; Secure" in header for header in prefixed)
+    assert all(
+        "; Path=/;" in header
+        for header in prefixed
+        if header.startswith("__Host-")
+    )

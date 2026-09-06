@@ -11,11 +11,25 @@ import threading
 
 import pytest
 
-from hermes_cli.companion_work_store import WorkError, WorkStore
+from hermes_cli.companion_work import resolve_store
+from hermes_cli.companion_work_store import WorkError, WorkStore, anchored_store_path
+from hermes_constants import mark_named_profile_deleted
 
 PAYLOAD = dict(title='Test preparation brief', brief='Synthetic test data, never production.',
                evidence=['fixture:source'], next_action='Prepare an internal draft only',
                owner='hoffeecmo', execution_ref='kanban:hoffee:test-task')
+
+
+def test_store_rejects_symlinked_profile_directory(tmp_path, monkeypatch):
+    home = tmp_path / '.hermes'
+    (home / 'profiles').mkdir(parents=True)
+    outside = tmp_path / 'outside'
+    outside.mkdir()
+    (home / 'profiles' / 'worker').symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv('HERMES_HOME', str(home))
+
+    with pytest.raises(WorkError, match='escape|symlink'):
+        anchored_store_path(home / 'profiles' / 'worker' / 'companion-work.db')
 
 
 def proposed(store, source='test-source'):
@@ -181,6 +195,76 @@ def test_profile_mismatch_and_id_not_visible_in_other_store(tmp_path):
         other.get(card['id'])
     assert exc.value.code == 4404
     assert other.list()['items'] == []
+
+
+def _tombstoned_profile_home(tmp_path, monkeypatch):
+    default_home = tmp_path / '.hermes'
+    profile_home = default_home / 'profiles' / 'worker'
+    profile_home.mkdir(parents=True)
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    monkeypatch.setenv('HERMES_HOME', str(default_home))
+    mark_named_profile_deleted(profile_home)
+    return profile_home
+
+
+def test_resolve_store_rejects_explicit_tombstoned_profile_without_writing(tmp_path, monkeypatch):
+    profile_home = _tombstoned_profile_home(tmp_path, monkeypatch)
+
+    with pytest.raises(WorkError, match='profile unavailable') as exc:
+        resolve_store('worker')
+
+    assert exc.value.code == 4404
+    assert not (profile_home / 'companion-work.db').exists()
+
+
+def test_resolve_store_rejects_active_tombstoned_profile_without_writing(tmp_path, monkeypatch):
+    profile_home = _tombstoned_profile_home(tmp_path, monkeypatch)
+    monkeypatch.setenv('HERMES_HOME', str(profile_home))
+
+    with pytest.raises(WorkError, match='profile unavailable') as exc:
+        resolve_store()
+
+    assert exc.value.code == 4404
+    assert not (profile_home / 'companion-work.db').exists()
+
+
+def test_resolve_store_preserves_custom_active_home(tmp_path, monkeypatch):
+    custom_home = tmp_path / 'custom-home'
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    monkeypatch.setenv('HERMES_HOME', str(custom_home))
+
+    store = resolve_store()
+
+    assert store.profile == 'default'
+    assert store.path == custom_home / 'companion-work.db'
+
+
+def test_work_store_refuses_to_recreate_deleted_profile(tmp_path, monkeypatch):
+    profile_home = _tombstoned_profile_home(tmp_path, monkeypatch)
+    profile_home.rmdir()
+
+    with pytest.raises(WorkError, match='profile unavailable') as exc:
+        WorkStore(profile_home / 'companion-work.db', 'worker')
+
+    assert exc.value.code == 4404
+    assert not profile_home.exists()
+
+
+def test_open_work_store_stops_writing_after_profile_is_tombstoned(tmp_path, monkeypatch):
+    default_home = tmp_path / '.hermes'
+    profile_home = default_home / 'profiles' / 'worker'
+    profile_home.mkdir(parents=True)
+    monkeypatch.setattr(Path, 'home', lambda: tmp_path)
+    monkeypatch.setenv('HERMES_HOME', str(default_home))
+    store = WorkStore(profile_home / 'companion-work.db', 'worker')
+    before = store.path.read_bytes()
+    mark_named_profile_deleted(profile_home)
+
+    with pytest.raises(WorkError, match='profile unavailable') as exc:
+        store.upsert('must-not-write', PAYLOAD)
+
+    assert exc.value.code == 4404
+    assert store.path.read_bytes() == before
 
 
 @pytest.mark.parametrize('until', ['2026-09-06', 'not-a-date', None, '2000-01-01T00:00:00Z'])
@@ -704,6 +788,20 @@ def test_real_two_client_owner_login_rpc_revision_loop(work_transport):
     ticket = a.post('/api/auth/ws-ticket').json()['ticket']
     with a.websocket_connect('wss://work.example.test/api/ws?ticket=' + ticket) as reopened:
         assert len(rpc(reopened, 'get', {'id': c['id']})['decisions']) == 2
+
+
+def test_real_owner_logout_revokes_already_open_rpc_authority(work_transport):
+    _, client, _ = work_transport
+    ticket = login_ticket(client)
+
+    with client.websocket_connect('wss://work.example.test/api/ws?ticket=' + ticket) as ws:
+        assert rpc(ws, 'capabilities')['can_decide'] is True
+
+        logged_out = client.post('/auth/logout', follow_redirects=False)
+
+        assert logged_out.status_code == 302
+        assert rpc(ws, 'capabilities')['can_decide'] is False
+        rpc(ws, 'decide', {}, error=4403)
 
 
 def test_real_shared_and_internal_transports_cannot_decide(work_transport, monkeypatch):

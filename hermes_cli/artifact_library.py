@@ -486,16 +486,15 @@ class ArtifactLibrary:
         cls, profile_home: str | Path, *, profile: str, config: Mapping[str, Any] | None = None
     ) -> "ArtifactLibrary":
         if config is None:
-            path = Path(profile_home) / "config.yaml"
-            if not path.is_file():
+            from hermes_cli.config import load_config_path_readonly
+
+            try:
+                config = load_config_path_readonly(
+                    Path(profile_home) / "config.yaml",
+                    fail_closed=True,
+                )
+            except (OSError, ValueError):
                 config = {}
-            else:
-                import yaml
-                try:
-                    loaded = yaml.safe_load(path.read_text(encoding="utf-8"))
-                    config = loaded if isinstance(loaded, Mapping) else {}
-                except (OSError, ValueError, yaml.YAMLError):
-                    config = {}
         return cls(profile_home, profile=profile, collections=load_collections(config))
 
     def _parse_collections(self, entries: Sequence[Mapping[str, Any]]) -> dict[str, Collection]:

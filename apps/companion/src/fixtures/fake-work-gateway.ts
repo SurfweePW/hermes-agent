@@ -65,7 +65,7 @@ export class FakeWorkGateway extends FakeCompanionGateway {
     if (!project) {throw { code: 4404 }}
     const sessions = id === 'synthetic-project-1' ? (await this.listCompanionSessions({ profile })).sessions.slice(0, 1) : []
 
-    return structuredClone({ project, sessions, topics: [], needs_me: [], work: [], organization_available: false, membership_has_more: false, membership_next_cursor: null, coverage: { complete: true, freshness: '2026-01-04T00:00:00Z', message: null } })
+    return structuredClone({ project, sessions, topics: [], needs_me: [], work: [], organization_available: false, organization_complete: false, organization_message: 'Synthetic organization projection unavailable.', membership_has_more: false, membership_next_cursor: null, coverage: { complete: true, freshness: '2026-01-04T00:00:00Z', message: null } })
   }
   async listWork(profile: string) { return structuredClone({ items: [...this.work.values()].filter(({ item }) => item.profile === profile).map(({ item }) => item) }) }
   async getWork(profile: string, id: string) { return structuredClone(this.lookup(profile, id)) }

@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from './app'
 import { createFakeGateway } from './fixtures/fake-gateway'
@@ -24,6 +24,7 @@ async function readyDirectoryStore() {
 
 describe('App', () => {
   beforeEach(() => window.history.replaceState({}, '', '/'))
+  afterEach(() => vi.restoreAllMocks())
   it('keeps durable work in Needs Me, shows the old-server boundary and preserves runtime attention', async () => {
     const store = await readyStore()
     render(<App store={store} />)
@@ -242,10 +243,16 @@ describe('App', () => {
   })
 
   it('keeps primary navigation locked while Work URLs and filter focus stay stable', async () => {
+    vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(760)
+    const scrollWindow = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    const focusMain = vi.spyOn(HTMLElement.prototype, 'focus')
     render(<App store={await readyDirectoryStore()} />)
     const workButtons = screen.getAllByRole('button', { name: 'Work' })
+    scrollWindow.mockClear()
     fireEvent.click(workButtons[0])
     await waitFor(() => expect(screen.getByRole('main')).toBe(document.activeElement))
+    expect(scrollWindow).toHaveBeenCalledWith({ top: 0 })
+    expect(focusMain).toHaveBeenCalledWith({ preventScroll: true })
     expect(workButtons[0].getAttribute('aria-current')).toBe('page')
     expect(window.location.search).toBe('?view=work')
     expect(screen.queryByRole('button', { name: /Conversation|Chat/ })).toBeNull()

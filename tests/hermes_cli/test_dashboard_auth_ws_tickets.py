@@ -21,6 +21,7 @@ from hermes_cli.dashboard_auth.ws_tickets import (
     issue_owner_authorization_lease,
     leased_human_identity,
     mint_ticket,
+    revoke_owner_authorization,
 )
 
 
@@ -110,6 +111,19 @@ class TestOwnerAuthorizationLease:
         ) is None
         clock["now"] += OWNER_AUTH_LEASE_SECONDS
         assert leased_human_identity(lease) is None
+
+    def test_revocation_invalidates_live_leases_and_unconsumed_tickets(self):
+        live_ticket = mint_ticket(user_id="u1", provider="stub")
+        pending_ticket = mint_ticket(user_id="u1", provider="stub")
+        other_ticket = mint_ticket(user_id="u2", provider="stub")
+        lease = issue_owner_authorization_lease(consume_ticket(live_ticket))
+
+        revoke_owner_authorization(provider="stub", user_id="u1")
+
+        assert leased_human_identity(lease) is None
+        with pytest.raises(TicketInvalid, match="unknown"):
+            consume_ticket(pending_ticket)
+        assert consume_ticket(other_ticket)["user_id"] == "u2"
 
 
 # ---------------------------------------------------------------------------

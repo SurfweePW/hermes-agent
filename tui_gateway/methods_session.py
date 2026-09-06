@@ -368,8 +368,10 @@ def _session_list_by_title(
     rid, db, title_lookup: str, *, include_hidden: bool = False, include_archived: bool = False
 ) -> dict:
     """EXACT-title lookup (title as identity), window-free on purpose (a busy profile's windowed listing can
-    push the row out). Hidden / archived rows resolve only when explicitly requested; deny-listed rows do not.
-    Compression lineages resolve to the live tip (``resolved_id``)."""
+    push the row out). Hidden rows always resolve (canonical chats are born hidden and the desktop's
+    click-open path sends no flags); archived rows resolve only when explicitly requested; deny-listed rows
+    do not. ``include_hidden`` is accepted for caller compatibility. Compression lineages resolve to the
+    live tip (``resolved_id``)."""
     row = db.get_session_by_title(title_lookup)
     if row and row.get("archived") and not include_archived:
         from tools.bot_mode_probe import BOT_CHAT_TITLE
@@ -383,8 +385,7 @@ def _session_list_by_title(
             # still hide. Re-fetch by ID: title has no DB-level UNIQUE, so a title re-query could grab a
             # different (still-archived) duplicate row.
             row = db.get_session(row["id"])
-    if (not row or (row.get("archived") and not include_archived)
-            or (row.get("hidden") and not include_hidden) or _denied_source(row)):
+    if not row or (row.get("archived") and not include_archived) or _denied_source(row):
         return _ok(rid, {"sessions": []})
     tip = row["id"]
     with contextlib.suppress(Exception):

@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, statSync, symlinkSync, writeFileS
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { GatewayTokenStore, SecureStorageError } from './secure-store'
 
@@ -43,7 +43,16 @@ describe('GatewayTokenStore', () => {
     })
 
     expect(() => store.set(TOKEN)).toThrow(SecureStorageError)
+    writeFileSync(store.filePath, 'ciphertext', { mode: 0o600 })
     expect(() => store.get()).toThrow(SecureStorageError)
+  })
+
+  it('does not touch platform encryption on a clean first launch', () => {
+    const isEncryptionAvailable = vi.fn(() => { throw new Error('unexpected Keychain access') })
+    const store = new GatewayTokenStore(directory(), { ...crypto, isEncryptionAvailable })
+
+    expect(store.get()).toBeUndefined()
+    expect(isEncryptionAvailable).not.toHaveBeenCalled()
   })
 
   it('fails closed for corrupt ciphertext', () => {

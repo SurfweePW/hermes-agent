@@ -37,6 +37,7 @@ const history: CompanionSessionHistoryResult = {
 
 const projectDetail: CompanionProjectDetail = {
   project, sessions: [session], topics: [], needs_me: [], work: [], organization_available: false,
+  organization_complete: false, organization_message: 'Not hydrated.',
   membership_has_more: false, membership_next_cursor: null,
   coverage: { complete: true, freshness: '2026-09-06T10:00:00.000Z', message: null }
 }

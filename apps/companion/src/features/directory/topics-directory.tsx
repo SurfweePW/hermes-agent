@@ -61,7 +61,7 @@ export function TopicsDirectory({ snapshot, params, onNavigate, onLoadOlder, onO
       <label className="directory-search">Search topics<input aria-label="Search topics" onChange={(event) => update('q', event.target.value)} type="search" value={query} /></label>
       <Filter active={collections} label="Collection" onChange={(value, checked) => multi('collection', value, checked)} values={choices} />
       <Filter active={lifecycles} label="Lifecycle" onChange={(value, checked) => multi('lifecycle', value, checked)} values={['active', 'completed', 'archived']} />
-      <label><input checked={verified} onChange={(event) => update('verified', event.target.checked ? 'true' : null)} type="checkbox" /> Verified status</label>
+      <label className="directory-checkbox"><input checked={verified} onChange={(event) => update('verified', event.target.checked ? 'true' : null)} type="checkbox" /> Verified status</label>
       <label>Sort<select aria-label="Topic sort" onChange={(event) => update('sort', event.target.value)} value={sort}><option value="updated">Recently updated</option><option value="name">Name</option></select></label>
     </div>
     {chips.length > 0 && <div aria-label="Active topic filters" className="filter-chips">{chips.map((chip) => <span key={chip}>{chip}</span>)}<button onClick={clear} type="button">Clear filters</button></div>}

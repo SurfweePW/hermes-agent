@@ -76,7 +76,12 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
     }
 
     mainRef.current?.scrollTo?.({ top: 0 })
-    mainRef.current?.focus()
+
+    if (window.innerWidth <= 780) {
+      window.scrollTo?.({ top: 0 })
+    }
+
+    mainRef.current?.focus({ preventScroll: true })
   }, [screen])
 
   useEffect(() => {

@@ -32,7 +32,12 @@ FIELDS = {
 
 def resolve_store(profile=None):
     from hermes_constants import get_hermes_home
-    from hermes_cli.profiles import get_active_profile_name, get_profile_dir, validate_profile_name
+    from hermes_cli.profiles import (
+        get_active_profile_name,
+        get_profile_dir,
+        profile_exists,
+        validate_profile_name,
+    )
 
     current = get_active_profile_name() or 'default'
     home = get_hermes_home()
@@ -43,13 +48,16 @@ def resolve_store(profile=None):
         validate_profile_name(selected)
     except ValueError as exc:
         raise WorkError(str(exc), -32602) from exc
+    # A custom deployment root is the current default profile and has no named
+    # profile registry entry. Preserve that current-home path, but require every
+    # named selection to be live according to the canonical tombstone-aware check.
+    if not (selected == current == 'custom') and not profile_exists(selected):
+        raise WorkError('profile unavailable', 4404)
     if selected != current:
         home = get_profile_dir(selected)
-        if not home.is_dir():
-            raise WorkError('profile unavailable', 4404)
-    import yaml
-    config_path = Path(home) / 'config.yaml'
-    config = yaml.safe_load(config_path.read_text()) if config_path.exists() else {}
+    from hermes_cli.config import load_config_path_readonly
+
+    config = load_config_path_readonly(Path(home) / 'config.yaml')
     timezone_name = (config or {}).get('timezone') or 'UTC'
     return WorkStore(Path(home) / 'companion-work.db', selected, timezone_name=timezone_name)
 
@@ -63,18 +71,25 @@ def owner_identity(human_identity):
     """
     if not isinstance(human_identity, str) or not human_identity:
         return None
-    from hermes_constants import get_hermes_home
-    import yaml
-    path = get_hermes_home() / 'config.yaml'
     try:
-        config = yaml.safe_load(path.read_text()) if path.exists() else {}
+        from hermes_constants import get_hermes_home
+
+        from hermes_cli.config import load_config_path_readonly
+
+        # Authorization policy must be read from the file, not a cache: the
+        # last-known-good cache would leave a stale owner authorized after
+        # config.yaml is corrupted, and a malformed write must not create a
+        # corrupt-file backup from an authorization path.
+        config = load_config_path_readonly(
+            Path(get_hermes_home()) / 'config.yaml', fail_closed=True
+        )
         dashboard = (config or {}).get('dashboard', {})
         owners = dashboard.get('work_owner_identities')
         if owners is not None:
             return human_identity if isinstance(owners, list) and human_identity in owners else None
         username = dashboard.get('basic_auth', {}).get('username')
         return human_identity if username and human_identity == f'basic:{username}' else None
-    except (OSError, ValueError, AttributeError, yaml.YAMLError):
+    except (OSError, ValueError, AttributeError):
         return None  # malformed policy must never elevate an authenticated peer
 
 

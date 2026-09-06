@@ -8,7 +8,8 @@ import type {
   CompanionSession,
   CompanionSessionHistoryResult,
   CompanionSessionListOptions,
-  CompanionSessionListResult
+  CompanionSessionListResult,
+  CompanionTopicRef
 } from '../../gateway/types'
 import type { WorkCard, WorkDetail } from '../../gateway/work-types'
 
@@ -53,6 +54,8 @@ export interface EntityProjection {
   work: EntityWorkItem[]
   needsMe: EntityWorkItem[]
   message: string | null
+  relatedTopics?: CompanionTopicRef[]
+  relatedTopicsComplete?: boolean
 }
 export interface TopicSourceDetail {
   source: TopicSourceItem
@@ -286,6 +289,7 @@ export function createDirectoryStore(): DirectoryStore {
   const loadEntityProjection = async (client: DirectoryGateway, kind: 'project' | 'session' | 'topic', profile: string, id: string, source: string, selectedTopic?: TopicDetail): Promise<EntityProjection> => {
     let details: TopicDetail[] = []
     let complete = true
+    let topicRelationshipsComplete = true
 
     if (kind === 'topic' && selectedTopic) {
       details = [selectedTopic]
@@ -293,14 +297,26 @@ export function createDirectoryStore(): DirectoryStore {
     } else {
       let cursor: string | undefined
       let expectedTotal: number | null = null
+      let topicNamespace: string | null = null
       const seen = new Set<string>()
+      const requestedCursors = new Set<string>()
+      let pageCount = 0
 
       do {
+        if (cursor) {
+          if (requestedCursors.has(cursor)) { throw new Error('Topic relationship pagination replayed a cursor.') }
+          requestedCursors.add(cursor)
+        }
+
+        if (++pageCount > 25) { throw new Error('Topic relationship pagination exceeded the 25-page safety limit.') }
+        const previousSize = seen.size
         const page = await client.listCompanionTopics({ profile, limit: 50, ...(cursor ? { cursor } : {}) })
 
-        if (page.backend_namespace !== source || (expectedTotal !== null && page.total !== expectedTotal)) { throw new Error('Topic relationship snapshot changed while loading entity work.') }
+        if ((topicNamespace !== null && page.backend_namespace !== topicNamespace) || (expectedTotal !== null && page.total !== expectedTotal)) { throw new Error('Topic relationship snapshot changed while loading entity work.') }
+        topicNamespace = page.backend_namespace
         expectedTotal = page.total
-        complete = complete && page.coverage.status === 'complete' && page.coverage.authorization_filtered !== true
+        topicRelationshipsComplete = topicRelationshipsComplete && page.coverage.status === 'complete' && page.coverage.authorization_filtered !== true
+        complete = complete && topicRelationshipsComplete
 
         for (const item of page.items) {
           if (seen.has(item.id)) { continue }
@@ -308,24 +324,43 @@ export function createDirectoryStore(): DirectoryStore {
           details.push(await client.getCompanionTopic(profile, item.id))
         }
 
-        cursor = page.has_more && page.next_cursor ? page.next_cursor : undefined
+        const nextCursor = page.has_more && page.next_cursor ? page.next_cursor : undefined
+
+        if (nextCursor && (nextCursor === cursor || requestedCursors.has(nextCursor) || seen.size === previousSize)) {
+          throw new Error('Topic relationship pagination made no progress.')
+        }
+
+        cursor = nextCursor
       } while (cursor)
 
-      complete = complete && expectedTotal === seen.size
+      topicRelationshipsComplete = topicRelationshipsComplete && expectedTotal === seen.size
+      complete = complete && topicRelationshipsComplete
     }
 
     const bindings = new Map<string, TopicWorkItem>()
+    const relatedTopics = new Map<string, CompanionTopicRef>()
 
     for (const detail of details) {
       complete = complete && detail.work.coverage.organization_bindings === 'complete' && detail.work.coverage.authorization_filtered !== true
       const sourceMatches = kind === 'project' && detail.sources.items?.some((item) => item.kind === 'project' && item.namespace.profile === profile && item.namespace.backend_id === source && item.source_id === id)
+      const sessionMatches = kind === 'session' && detail.sources.items?.some((item) => item.kind === 'session' && item.namespace.profile === profile && item.namespace.backend_id === source && (item.session.persisted_session_id === id || item.session.lineage_root_id === id))
+
+      if (sourceMatches || sessionMatches) {
+        relatedTopics.set(detail.topic.canonical_id, {
+          id: detail.topic.id,
+          title: detail.topic.name,
+          status: detail.topic.lifecycle,
+          profile: detail.profile,
+          source: detail.backend_namespace
+        })
+      }
 
       for (const binding of detail.work.items ?? []) {
         const matches = kind === 'topic'
           || kind === 'project' && (sourceMatches || binding.source_projects.some((item) => item.namespace.profile === profile && item.namespace.backend_id === source && item.source_id === id))
           || kind === 'session' && [binding.primary_session, ...binding.related_sessions].some((item) => item?.namespace.profile === profile && item.namespace.backend_id === source && (item.persisted_session_id === id || item.lineage_root_id === id))
 
-        if (matches && profiles.includes(binding.source_namespace.profile) && binding.source_namespace.backend_id === source) { bindings.set(binding.canonical_id, binding) }
+        if (matches && profiles.includes(binding.source_namespace.profile) && binding.source_namespace.backend_id === detail.backend_namespace) { bindings.set(binding.canonical_id, binding) }
       }
     }
 
@@ -353,7 +388,15 @@ export function createDirectoryStore(): DirectoryStore {
 
     work.sort((left, right) => (right.priority !== null ? 1 : 0) - (left.priority !== null ? 1 : 0) || (right.detail?.item.updated_at ?? right.binding.updated_at).localeCompare(left.detail?.item.updated_at ?? left.binding.updated_at))
 
-    return { status: 'ready', complete, work, needsMe: work.filter((item) => item.detail?.item.state === 'needs_me'), message: complete ? null : 'Some authorized relationship or source records could not be verified.' }
+    return {
+      status: 'ready',
+      complete,
+      work,
+      needsMe: work.filter((item) => item.detail?.item.state === 'needs_me'),
+      message: complete ? null : 'Some authorized relationship or source records could not be verified.',
+      relatedTopics: [...relatedTopics.values()],
+      relatedTopicsComplete: topicRelationshipsComplete
+    }
   }
 
   const loadTopicSources = async (client: DirectoryGateway, detail: TopicDetail): Promise<TopicSourceDetail[]> => Promise.all((detail.sources.items ?? []).map(async (source): Promise<TopicSourceDetail> => {
@@ -386,7 +429,19 @@ export function createDirectoryStore(): DirectoryStore {
         detail ? loadTopicSources(client, detail) : Promise.resolve([])
       ])
 
-      if (generation === epoch && gateway === client) { publish({ entityProjection: projection, topicSourceDetails: sourceDetails }) }
+      if (generation === epoch && gateway === client) {
+        const selectedProject = kind === 'project' && snapshot.selectedProject
+          ? {
+              ...snapshot.selectedProject,
+              topics: projection.relatedTopics ?? [],
+              organization_available: true,
+              organization_complete: projection.relatedTopicsComplete === true,
+              organization_message: projection.relatedTopicsComplete === true ? null : 'Some authorized Topic relationships could not be verified.'
+            }
+          : snapshot.selectedProject
+
+        publish({ selectedProject, entityProjection: projection, topicSourceDetails: sourceDetails })
+      }
     } catch (error) {
       if (generation !== epoch || gateway !== client) { return }
 

@@ -357,6 +357,8 @@ export function validateCompanionProjectDetail(value: unknown, profile: string, 
     needs_me: [],
     work: [],
     organization_available: false,
+    organization_complete: false,
+    organization_message: 'Topic relationships require the authorized organization projection.',
     membership_has_more: value.membership.has_more as boolean,
     membership_next_cursor: optionalCursor(value.membership, method),
     coverage: { complete: value.membership.coverage === 'complete', freshness: asOf, message: warningList.join(' ') || null }

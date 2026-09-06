@@ -284,7 +284,7 @@ def test_native_authorize_empty_provider_password_only_brokers_to_login(
         params=_native_authorize_params(challenge),
     )
     assert r.status_code == 302, r.text
-    assert r.headers["location"].endswith("/login")
+    assert r.headers["location"].startswith("/login?flow=")
     set_cookie = r.headers.get("set-cookie", "")
     # The PKCE cookie value is URL-encoded on the wire; decode through
     # the real reader inverse before asserting the broker handle rides
@@ -321,6 +321,38 @@ def test_bearer_authenticates_gated_route_without_cookie(gated_client):
     )
     assert r.status_code == 200, r.text
     assert r.json()["user_id"] == "stub-user-1"
+
+
+def test_native_bearer_logout_revokes_owner_authorization(gated_client, monkeypatch):
+    revoked = []
+    from hermes_cli.dashboard_auth import ws_tickets
+
+    verifier, challenge = _make_pkce()
+    code, _state = _walk_native_login(
+        gated_client,
+        redirect_uri="http://127.0.0.1:53999/cb",
+        challenge=challenge,
+    )
+    token_response = gated_client.post(
+        "/auth/native/token",
+        json={"code": code, "code_verifier": verifier},
+    )
+    assert token_response.status_code == 200
+    access_token = token_response.json()["access_token"]
+
+    monkeypatch.setattr(
+        ws_tickets,
+        "revoke_owner_authorization",
+        lambda **identity: revoked.append(identity),
+    )
+
+    response = gated_client.post(
+        "/auth/logout",
+        headers={"Authorization": f"Bearer {access_token}"},
+    )
+
+    assert response.status_code == 302
+    assert revoked == [{"provider": "stub", "user_id": "stub-user-1"}]
 
 
 
@@ -410,7 +442,7 @@ def test_native_authorize_password_provider_redirects_to_login(
         },
     )
     assert r.status_code == 302, r.text
-    assert r.headers["location"].endswith("/login")
+    assert r.headers["location"].startswith("/login?flow=")
     set_cookie = r.headers.get("set-cookie", "")
     assert "pkce" in set_cookie
     # Wire value is URL-encoded; decode through the reader inverse.

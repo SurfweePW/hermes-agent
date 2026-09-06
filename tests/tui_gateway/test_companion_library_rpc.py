@@ -221,6 +221,7 @@ def test_malformed_config_fails_closed_without_disclosing_parser_or_path(library
     assert denied.value.code == 4403
     assert str(ctx.home) not in str(denied.value)
     assert "companion_library" not in str(denied.value)
+    assert list(ctx.home.glob("config.yaml.corrupt.*.bak")) == []
 
 
 def test_list_search_filter_detail_and_retained_versions_are_profile_namespaced(

@@ -35,8 +35,6 @@ import threading
 import time
 from typing import Any, Mapping
 
-import yaml
-
 from hermes_cli.artifact_library import (
     ArtifactError,
     ArtifactLibrary,
@@ -98,8 +96,10 @@ def _read_config(home: Path) -> Mapping[str, Any] | None:
     if not path.is_file():
         return None
     try:
-        value = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        from hermes_cli.config import load_config_path_readonly
+
+        value = load_config_path_readonly(path, fail_closed=True)
+    except (OSError, UnicodeError, ValueError) as exc:
         raise CompanionLibraryError("library authorization unavailable", 4403) from exc
     if not isinstance(value, Mapping):
         raise CompanionLibraryError("library authorization unavailable", 4403)

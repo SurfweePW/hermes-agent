@@ -105,6 +105,8 @@ const projectDetail = (sessions: CompanionSession[], hasMore = false): Companion
   needs_me: [],
   work: [],
   organization_available: false,
+  organization_complete: false,
+  organization_message: 'Not hydrated.',
   membership_has_more: hasMore,
   membership_next_cursor: hasMore ? 'next-page' : null,
   coverage: { complete: !hasMore, freshness: '2026-09-03T00:00:00.000Z', message: null }
@@ -145,6 +147,32 @@ function deferred<T>() {
 }
 
 describe('createDirectoryStore', () => {
+  it('hydrates a project Topics relationship with the topic namespace intact', async () => {
+    const client = gateway()
+    const detailed = topicDetail()
+    detailed.sources = {
+      items: [{
+        kind: 'project', canonical_id: 'project:desktop-db:atlas:project-1', relationship: 'primary_project',
+        namespace: { backend_id: source, profile }, source_id: project.id, project_kind: 'desktop_project'
+      }],
+      coverage: { status: 'partial', organization_references: 'complete', source_details: 'unavailable', authorization_filtered: false }
+    }
+    vi.mocked(client.listCompanionTopics)
+      .mockResolvedValueOnce(topicPage([]))
+      .mockResolvedValueOnce(topicPage([topic]))
+    vi.mocked(client.getCompanionTopic).mockResolvedValue(detailed)
+    const store = createDirectoryStore()
+    await store.attach(client, [profile])
+
+    await store.openProject(profile, project.id, project.source)
+
+    expect(store.getSnapshot().selectedProject).toMatchObject({
+      organization_available: true,
+      organization_complete: true,
+      topics: [{ id: topic.id, title: topic.name, profile, source: 'organization-db', status: 'active' }]
+    })
+  })
+
   it('hydrates authorized topic bindings with durable Work and Needs Me details', async () => {
     const client = gateway()
 
@@ -187,6 +215,25 @@ describe('createDirectoryStore', () => {
       status: 'ready', complete: true,
       work: [{ status: 'available', detail: { item: { title: 'Approve launch checklist' } } }],
       needsMe: [{ priority: { next_step: 'Approve it' } }]
+    })
+  })
+
+  it('stops all-page relationship hydration when the gateway replays a cursor', async () => {
+    const client = gateway()
+    const repeated = { ...topicPage([topic], true, 2), backend_namespace: project.source, next_cursor: 'replayed-cursor' }
+    vi.mocked(client.listCompanionTopics)
+      .mockResolvedValueOnce(topicPage([]))
+      .mockResolvedValue(repeated)
+    const store = createDirectoryStore()
+    await store.attach(client, [profile])
+
+    await store.openProject(profile, project.id, project.source)
+
+    expect(client.listCompanionTopics).toHaveBeenCalledTimes(3)
+    expect(store.getSnapshot().entityProjection).toMatchObject({
+      status: 'error',
+      complete: false,
+      message: 'Authorized Work and Needs Me could not be verified.'
     })
   })
 

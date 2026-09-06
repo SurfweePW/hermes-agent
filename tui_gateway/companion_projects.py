@@ -123,9 +123,13 @@ def _validated_profile_dir(path: Path, *, anchor: Path) -> Path:
     except ValueError as exc:
         raise CompanionProjectsError("profile path escapes profile root", 4404) from exc
 
-    current = Path(candidate.anchor)
-    paths = []
-    for component in candidate.parts[1:]:
+    # The host may expose trusted ancestors through a platform alias (macOS
+    # commonly maps /var to /private/var).  Reject links at the profile anchor
+    # and below without treating those out-of-scope ancestors as profile-tree
+    # links.
+    current = root
+    paths = [root]
+    for component in relative.parts:
         current /= component
         paths.append(current)
     try:
@@ -140,8 +144,6 @@ def _validated_profile_dir(path: Path, *, anchor: Path) -> Path:
         raise
     except (OSError, RuntimeError, ValueError) as exc:
         raise CompanionProjectsError("profile path escapes profile root", 4404) from exc
-    if resolved_candidate != candidate:
-        raise CompanionProjectsError("profile aliases are unavailable", 4404)
     return candidate
 
 
@@ -372,12 +374,18 @@ class _SourceGuard:
     def __init__(self, home: Path, name: str):
         self.home = home
         self.path = home / name
+        self.home_opened: os.stat_result | None = None
         self.fd: int | None = None
         self.opened: os.stat_result | None = None
 
     def open(self) -> None:
         flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
         try:
+            self.home_opened = os.lstat(self.home)
+            if stat.S_ISLNK(self.home_opened.st_mode) or not stat.S_ISDIR(
+                self.home_opened.st_mode
+            ):
+                raise CompanionProjectsError("profile database source is unsafe", 4404)
             self.fd = os.open(self.path, flags)
         except FileNotFoundError:
             return
@@ -390,21 +398,23 @@ class _SourceGuard:
         # Revalidate the profile and exact directory entry before and after all
         # list/detail/membership reads. A replacement race therefore yields no
         # response assembled from an out-of-scope source.
-        if self.home.resolve(strict=True) != self.home:
-            raise CompanionProjectsError("profile source scope changed", 4404)
         try:
+            current_home = os.lstat(self.home)
             current = os.lstat(self.path)
         except FileNotFoundError:
             if self.opened is None:
                 return
             raise CompanionProjectsError("profile database source changed", 4404)
-        if self.opened is None:
+        if self.opened is None or self.home_opened is None:
             raise CompanionProjectsError("profile database source changed", 4404)
         if (
-            stat.S_ISLNK(current.st_mode)
+            stat.S_ISLNK(current_home.st_mode)
+            or not stat.S_ISDIR(current_home.st_mode)
+            or (current_home.st_dev, current_home.st_ino)
+            != (self.home_opened.st_dev, self.home_opened.st_ino)
+            or stat.S_ISLNK(current.st_mode)
             or not stat.S_ISREG(self.opened.st_mode)
             or (current.st_dev, current.st_ino) != (self.opened.st_dev, self.opened.st_ino)
-            or self.path.resolve(strict=True) != self.path
         ):
             raise CompanionProjectsError("profile database source is unsafe", 4404)
 
@@ -501,7 +511,7 @@ def _build_tree(
         projects,
         sessions,
         discovered,
-        server._resolve_cwd_git,
+        server.git_probe.resolve,
         preview_limit=0,
         hydrate=True,
         is_junk_root=server._is_repo_junk,

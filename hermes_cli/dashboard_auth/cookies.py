@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import base64
 import binascii
+import hashlib
 import json
 import re
 from typing import Literal, Optional, Tuple
@@ -28,6 +29,11 @@ SESSION_AT_COOKIE = "hermes_session_at"
 SESSION_RT_COOKIE = "hermes_session_rt"
 SESSION_PROVIDER_COOKIE = "hermes_session_provider"
 PKCE_COOKIE = "hermes_session_pkce"
+# A deterministic, bounded namespace lets concurrent OAuth transactions keep
+# independent state without allowing unbounded browser-cookie growth. A slot
+# collision safely invalidates the older flow.
+_MAX_PKCE_FLOW_COOKIES = 16
+_PKCE_FLOW_MARKER = f"{PKCE_COOKIE}_flow_"
 SSO_ATTEMPT_COOKIE = "hermes_sso_attempt"
 
 # Name variants a reader may have to try; most strict first.
@@ -128,6 +134,13 @@ def clear_session_cookies(response: Response, *, prefix: str = "") -> None:
             response, name, prefix=prefix, https_samesite="lax", bare_attrs=bare_attrs)
 
 
+def _pkce_flow_cookie(selector: str) -> str:
+    """Map opaque OAuth state deterministically into one of 16 slots."""
+    digest = hashlib.sha256(selector.encode("utf-8")).digest()
+    slot = int.from_bytes(digest[:8], "big") % _MAX_PKCE_FLOW_COOKIES
+    return f"{_PKCE_FLOW_MARKER}{slot:02x}"
+
+
 def encode_pkce_payload(parts: dict[str, str]) -> str:
     """Wire value ``base64url(JSON)``, no padding. The urlsafe alphabet is a strict subset of RFC
     6265 cookie-octets, so http.cookies never quotes it (strict proxies such as Go net/http reject
@@ -138,17 +151,55 @@ def encode_pkce_payload(parts: dict[str, str]) -> str:
 
 
 def set_pkce_cookie(
-    response: Response, *, payload: dict[str, str], use_https: bool, prefix: str = "") -> None:
-    """``payload`` is the segment dict; see module docstring for the SameSite=None rationale."""
-    _set(response, PKCE_COOKIE, encode_pkce_payload(payload), max_age=_PKCE_MAX_AGE,
-         use_https=use_https, prefix=prefix, attrs=_pkce_attrs(use_https=use_https, prefix=prefix))
+    response: Response, *, payload: dict[str, str] | str, use_https: bool, prefix: str = "",
+    selector: str = "", request: Optional[Request] = None) -> None:
+    """Set migration singleton plus a selector-addressed PKCE cookie.
+
+    ``request`` is accepted for call-site compatibility; the fixed namespace
+    enforces the hard cap even when concurrent responses share a stale cookie
+    snapshot, so request-visible pruning is neither needed nor authoritative.
+    """
+    del request
+    if isinstance(payload, str):
+        payload = dict(
+            segment.split("=", 1)
+            for segment in payload.split(";") if "=" in segment
+        )
+    encoded = encode_pkce_payload(payload)
+    attrs = _pkce_attrs(use_https=use_https, prefix=prefix)
+    _set(response, PKCE_COOKIE, encoded, max_age=_PKCE_MAX_AGE,
+         use_https=use_https, prefix=prefix, attrs=attrs)
+    if selector:
+        _set(response, _pkce_flow_cookie(selector), encoded, max_age=_PKCE_MAX_AGE,
+             use_https=use_https, prefix=prefix, attrs=attrs)
 
 
-def clear_pkce_cookie(response: Response, *, use_https: bool, prefix: str = "") -> None:
-    """Delete every PKCE cookie variant (prefixed ones carry ``Secure; SameSite=None``)."""
-    _clear_cookie_variants(
-        response, PKCE_COOKIE, prefix=prefix, https_samesite="none",
-        bare_attrs=_pkce_attrs(use_https=use_https, prefix=prefix))
+def clear_pkce_cookie(
+    response: Response, *, use_https: bool = False, prefix: str = "",
+    selector: str = "") -> None:
+    """Delete PKCE state across name variants and current/legacy paths.
+
+    A selector clears that flow and the migration singleton. Without one
+    (logout/selectorless cleanup), every slot is removed. When proxied, root
+    deletions are emitted too so cookies survive neither proxy-path changes nor
+    a previous direct deployment. Prefixed deletion headers remain browser
+    valid: ``Secure`` is always present and ``__Host-`` always uses ``Path=/``.
+    """
+    prefixes = (prefix, "") if prefix else ("",)
+    bare_names = [PKCE_COOKIE]
+    if selector:
+        bare_names.append(_pkce_flow_cookie(selector))
+    else:
+        bare_names.extend(
+            f"{_PKCE_FLOW_MARKER}{slot:02x}"
+            for slot in range(_MAX_PKCE_FLOW_COOKIES)
+        )
+    for cookie_prefix in prefixes:
+        bare_attrs = _pkce_attrs(use_https=use_https, prefix=cookie_prefix)
+        for bare_name in bare_names:
+            _clear_cookie_variants(
+                response, bare_name, prefix=cookie_prefix,
+                https_samesite="none", bare_attrs=bare_attrs)
 
 
 def _read_with_fallback(request: Request, bare_name: str) -> Optional[str]:
@@ -169,7 +220,11 @@ def read_session_provider(request: Request) -> Optional[str]:
     return _read_with_fallback(request, SESSION_PROVIDER_COOKIE)
 
 
-def read_pkce_cookie(request: Request) -> Optional[str]:
+def read_pkce_cookie(request: Request, *, selector: str = "") -> Optional[str]:
+    if selector:
+        selected = _read_with_fallback(request, _pkce_flow_cookie(selector))
+        if selected is not None:
+            return selected
     return _read_with_fallback(request, PKCE_COOKIE)
 
 

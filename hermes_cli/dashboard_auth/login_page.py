@@ -407,7 +407,8 @@ _PASSWORD_FORM_SCRIPT = """\
         provider: form.getAttribute('data-provider') || '',
         username: (form.querySelector('input[name=username]') || {}).value || '',
         password: (form.querySelector('input[name=password]') || {}).value || '',
-        next: (form.querySelector('input[name=next]') || {}).value || ''
+        next: (form.querySelector('input[name=next]') || {}).value || '',
+        flow: (form.querySelector('input[name=flow]') || {}).value || ''
       };
       fetch('/auth/password-login', {
         method: 'POST',
@@ -439,7 +440,7 @@ _PASSWORD_FORM_SCRIPT = """\
 """
 
 
-def render_login_html(*, next_path: str = "") -> str:
+def render_login_html(*, next_path: str = "", flow_selector: str = "") -> str:
     """Return the full HTML for ``GET /login``.
 
     ``next_path`` is threaded into each provider button/form so the OAuth round
@@ -452,10 +453,15 @@ def render_login_html(*, next_path: str = "") -> str:
     # URL-encode then HTML-escape, matching the gate's ``_safe_next_target``
     # shape so a round-tripped value is byte-identical.
     next_qs = f"&next={html.escape(quote(next_path, safe=''), quote=True)}" if next_path else ""
+    flow_qs = (
+        f"&flow={html.escape(quote(flow_selector, safe=''), quote=True)}"
+        if flow_selector else ""
+    )
     buttons = [
-        _render_password_form(p, next_path) if getattr(p, "supports_password", False) else
+        _render_password_form(p, next_path, flow_selector)
+        if getattr(p, "supports_password", False) else
         f'      <a class="provider-btn" '
-        f'href="/auth/login?provider={html.escape(p.name, quote=True)}{next_qs}">'
+        f'href="/auth/login?provider={html.escape(p.name, quote=True)}{next_qs}{flow_qs}">'
         f'Sign in with {html.escape(p.display_name)}</a>'
         for p in providers
     ]
@@ -466,7 +472,8 @@ def render_login_html(*, next_path: str = "") -> str:
     )
 
 
-def _render_password_form(provider, next_path: str) -> str:
+def _render_password_form(
+    provider, next_path: str, flow_selector: str = "") -> str:
     """Username/password form for a ``supports_password`` provider.
 
     ``next_path`` rides in a hidden field (already validated by the caller,
@@ -476,11 +483,13 @@ def _render_password_form(provider, next_path: str) -> str:
     pname = html.escape(provider.name, quote=True)
     plabel = html.escape(provider.display_name)
     safe_next = html.escape(next_path, quote=True) if next_path else ""
+    safe_flow = html.escape(flow_selector, quote=True) if flow_selector else ""
     return (
         f'      <form class="provider-form" data-provider="{pname}" '
         f'autocomplete="on">\n'
         f'        <div class="form-title">Sign in with {plabel}</div>\n'
         f'        <input type="hidden" name="next" value="{safe_next}">\n'
+        f'        <input type="hidden" name="flow" value="{safe_flow}">\n'
         f'        <label class="field">\n'
         f'          <span class="field-label">Username</span>\n'
         f'          <input class="field-input" type="text" name="username" '

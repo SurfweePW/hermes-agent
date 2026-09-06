@@ -127,10 +127,10 @@ def test_session_list_hidden_exact_lookup_and_fields(monkeypatch, tmp_path):
     monkeypatch.setattr(server, "_get_db", lambda: db)
 
     hidden = server._methods["session.list"]("r1", {"title": "Bot Chat"})
-    assert hidden["result"]["sessions"] == []
-    found = server._methods["session.list"](
-        "r2", {"title": "Bot Chat", "include_hidden": True}
-    )["result"]["sessions"][0]
+    # Hidden canonical rows resolve on exact-title lookup (current-main contract):
+    # the desktop's click-open path sends no flags, so hiding them here would
+    # make the desktop mint replacements forever.
+    found = hidden["result"]["sessions"][0]
     assert found["id"] == "bot"
     assert found["pinned"] is True
     assert found["last_active"] > 0
@@ -145,9 +145,8 @@ def test_session_list_can_resolve_archived_canonical_title(monkeypatch, tmp_path
     db.set_session_archived("bot", True)
     monkeypatch.setattr(server, "_get_db", lambda: db)
 
-    default = server._methods["session.list"](
-        "r1", {"title": "Bot Chat", "include_hidden": True}
-    )
+    default = server._methods["session.list"]("r1", {"title": "Bot Chat"})
+    # Archived rows stay hidden unless explicitly requested.
     assert default["result"]["sessions"] == []
     found = server._methods["session.list"](
         "r2", {

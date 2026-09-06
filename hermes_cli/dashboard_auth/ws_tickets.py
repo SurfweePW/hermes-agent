@@ -30,6 +30,7 @@ OWNER_AUTH_LEASE_SECONDS = 300
 
 _lock = threading.Lock()
 _tickets: Dict[str, Tuple[int, Dict[str, Any]]] = {}  # ticket -> (expires_at, info)
+_owner_generations: Dict[str, int] = {}
 _internal_credential: Optional[str] = None  # lazily minted; guarded by ``_lock``
 
 #: Identity recorded for internal-credential connections (audit logs distinguish them from tickets).
@@ -47,6 +48,7 @@ class OwnerAuthorizationLease:
 
     human_identity: str
     expires_at: float
+    generation: int = 0
 
 
 def issue_owner_authorization_lease(identity: Dict[str, Any]) -> OwnerAuthorizationLease:
@@ -55,9 +57,13 @@ def issue_owner_authorization_lease(identity: Dict[str, Any]) -> OwnerAuthorizat
     user_id = identity.get("user_id") if isinstance(identity, dict) else None
     if not isinstance(provider, str) or not provider or not isinstance(user_id, str) or not user_id:
         raise TicketInvalid("ticket identity invalid")
+    human_identity = f"{provider}:{user_id}"
+    with _lock:
+        generation = _owner_generations.get(human_identity, 0)
     return OwnerAuthorizationLease(
-        human_identity=f"{provider}:{user_id}",
+        human_identity=human_identity,
         expires_at=monotonic() + OWNER_AUTH_LEASE_SECONDS,
+        generation=generation,
     )
 
 
@@ -72,7 +78,25 @@ def leased_human_identity(lease: object) -> Optional[str]:
         return None
     if monotonic() >= lease.expires_at:
         return None
+    with _lock:
+        if lease.generation != _owner_generations.get(lease.human_identity, 0):
+            return None
     return lease.human_identity
+
+
+def revoke_owner_authorization(*, provider: str, user_id: str) -> None:
+    """Revoke live owner leases and unconsumed tickets for one identity."""
+    if not provider or not user_id:
+        return
+    human_identity = f"{provider}:{user_id}"
+    with _lock:
+        _owner_generations[human_identity] = _owner_generations.get(human_identity, 0) + 1
+        revoked = [
+            ticket for ticket, (_, info) in _tickets.items()
+            if info.get("provider") == provider and info.get("user_id") == user_id
+        ]
+        for ticket in revoked:
+            _tickets.pop(ticket, None)
 
 
 def mint_ticket(*, user_id: str, provider: str) -> str:
@@ -136,4 +160,5 @@ def _reset_for_tests() -> None:
     global _internal_credential
     with _lock:
         _tickets.clear()
+        _owner_generations.clear()
         _internal_credential = None

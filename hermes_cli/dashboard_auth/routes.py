@@ -40,7 +40,8 @@ from hermes_cli.dashboard_auth.cookies import (
     set_session_cookies)
 from hermes_cli.dashboard_auth.login_page import render_login_html
 from hermes_cli.dashboard_auth.request_utils import (
-    access_token_max_age, client_ip as _client_ip, is_safe_next_path, scan_session_providers)
+    access_token_max_age, client_ip as _client_ip, extract_bearer,
+    is_safe_next_path, scan_session_providers)
 
 _log = logging.getLogger(__name__)
 
@@ -93,8 +94,11 @@ def _validate_post_login_target(raw: str) -> str:
     return decoded if decoded and is_safe_next_path(decoded) else ""
 
 
-def _set_pkce(resp, request: Request, payload: dict[str, str]) -> None:
-    set_pkce_cookie(resp, payload=payload, use_https=detect_https(request), prefix=_prefix(request))
+def _set_pkce(
+    resp, request: Request, payload: dict[str, str], *, selector: str = "") -> None:
+    set_pkce_cookie(
+        resp, payload=payload, use_https=detect_https(request),
+        prefix=_prefix(request), selector=selector, request=request)
 
 
 def _set_session(resp, request: Request, session: Session) -> None:
@@ -164,7 +168,7 @@ def _start_upstream_login(request: Request, p, *, audit_failure: bool, extra_pkc
     pkce = _provider_pkce_segments(ls.cookie_payload)
     pkce.setdefault("provider", p.name)
     pkce.update(extra_pkce)
-    _set_pkce(resp, request, pkce)
+    _set_pkce(resp, request, pkce, selector=pkce.get("state", ""))
     return resp
 
 
@@ -174,7 +178,15 @@ def _start_upstream_login(request: Request, p, *, audit_failure: bool, extra_pkc
 async def login_page(request: Request) -> HTMLResponse:
     # ``next=`` is set by the gate's redirect but /login is reachable directly.
     next_path = _validate_post_login_target(request.query_params.get("next", ""))
-    return HTMLResponse(render_login_html(next_path=next_path), headers=_NO_STORE)
+    flow_selector = request.query_params.get("flow", "")
+    if flow_selector:
+        try:
+            native_flow.get_pending(flow_selector)
+        except native_flow.NativeFlowError:
+            raise _http(400, _NATIVE_EXPIRED_DETAIL)
+    return HTMLResponse(
+        render_login_html(next_path=next_path, flow_selector=flow_selector),
+        headers=_NO_STORE)
 
 
 @router.get("/api/auth/providers", name="auth_providers")
@@ -192,7 +204,8 @@ async def api_auth_providers() -> Any:
 # --- Public: OAuth round trip ----------------------------------------------
 
 @router.get("/auth/login", name="auth_login")
-async def auth_login(request: Request, provider: str, next: str = ""):
+async def auth_login(
+    request: Request, provider: str, next: str = "", flow: str = ""):
     p = get_provider(provider)
     if p is None:
         raise _http(404, f"Unknown provider: {provider!r}")
@@ -203,9 +216,26 @@ async def auth_login(request: Request, provider: str, next: str = ""):
         login_url = f"{_prefix(request)}/login"
         if safe_next:
             login_url = f"{login_url}?next={quote(safe_next, safe='')}"
+        if flow:
+            try:
+                native_flow.get_pending(flow)
+            except native_flow.NativeFlowError:
+                raise _http(400, _NATIVE_EXPIRED_DETAIL)
+            sep = "&" if "?" in login_url else "?"
+            login_url = f"{login_url}{sep}flow={quote(flow, safe='')}"
         return RedirectResponse(url=login_url, status_code=302)
+    broker_state = ""
+    if flow:
+        try:
+            native_flow.get_pending(flow)
+        except native_flow.NativeFlowError:
+            raise _http(400, _NATIVE_EXPIRED_DETAIL)
+        broker_state = flow
+    extra_pkce = {"next": safe_next} if safe_next else {}
+    if broker_state:
+        extra_pkce["broker"] = broker_state
     resp = _start_upstream_login(
-        request, p, audit_failure=True, extra_pkce={"next": safe_next} if safe_next else {})
+        request, p, audit_failure=True, extra_pkce=extra_pkce)
     _audit(request, AuditEvent.LOGIN_START, provider=provider)
     return resp
 
@@ -265,8 +295,12 @@ async def auth_native_authorize(
         raise _http(503, str(e))
     if getattr(p, "supports_password", False):
         _audit(request, AuditEvent.NATIVE_AUTHORIZE_START, provider=p.name)
-        resp = RedirectResponse(url=f"{_prefix(request)}/login", status_code=302)
-        _set_pkce(resp, request, {"provider": p.name, "broker": broker_state})
+        resp = RedirectResponse(
+            url=f"{_prefix(request)}/login?flow={quote(broker_state, safe='')}",
+            status_code=302)
+        _set_pkce(
+            resp, request, {"provider": p.name, "broker": broker_state},
+            selector=broker_state)
         return resp
     resp = _start_upstream_login(
         request, p, audit_failure=False, extra_pkce={"broker": broker_state})
@@ -278,7 +312,7 @@ async def auth_native_authorize(
 async def auth_callback(
     request: Request, code: str = "", state: str = "", error: str = "",
     error_description: str = ""):
-    pkce_raw = read_pkce_cookie(request)
+    pkce_raw = read_pkce_cookie(request, selector=state)
     if not pkce_raw:
         _audit(request, AuditEvent.LOGIN_FAILURE, reason="missing_pkce_cookie")
         raise _http(400, "Missing PKCE state cookie")
@@ -312,7 +346,8 @@ async def auth_callback(
     if not native:
         _set_session(resp, request, session)
     prefix = _prefix(request)
-    clear_pkce_cookie(resp, use_https=detect_https(request), prefix=prefix)
+    clear_pkce_cookie(
+        resp, use_https=detect_https(request), prefix=prefix, selector=state)
     # Clear the one-shot auto-SSO loop-guard so it never suppresses a future silent attempt.
     clear_sso_attempt_cookie(resp, prefix=prefix)
     return resp
@@ -354,6 +389,7 @@ class _PasswordLoginBody(BaseModel):
     username: str
     password: str
     next: str = ""
+    flow: str = ""
 
 
 @router.post("/auth/password-login", name="auth_password_login")
@@ -376,9 +412,11 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
     # The native broker handle also records WHICH provider the flow was started for. Enforce
     # equality BEFORE verifying credentials so a flow started for provider A cannot be completed
     # with provider B's credentials.
-    pkce_raw = read_pkce_cookie(request)
+    pkce_raw = read_pkce_cookie(request, selector=body.flow)
     pkce_parts = parse_pkce_payload(pkce_raw) if pkce_raw else {}
     broker_state = pkce_parts.get("broker", "")
+    if body.flow and broker_state != body.flow:
+        raise _http(400, "Native login state mismatch; restart sign-in.")
     if broker_state and pkce_parts.get("provider", "") != body.provider:
         _audit(request, AuditEvent.NATIVE_TOKEN_FAILURE, provider=body.provider,
                reason="provider_mismatch")
@@ -399,7 +437,9 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
         request, body.provider, session, broker_state=broker_state, next_raw=body.next)
     resp = JSONResponse({"ok": True, "next": target})
     if native:
-        clear_pkce_cookie(resp, use_https=detect_https(request), prefix=_prefix(request))
+        clear_pkce_cookie(
+            resp, use_https=detect_https(request), prefix=_prefix(request),
+            selector=body.flow)
     else:
         _set_session(resp, request, session)
     return resp
@@ -407,14 +447,39 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
 
 @router.post("/auth/logout", name="auth_logout")
 async def auth_logout(request: Request):
-    _at, rt = read_session_cookies(request)
-    # Best-effort revoke on every provider; failures logged, never raised.
-    for provider in list_providers() if rt else ():
-        try:
-            provider.revoke_session(refresh_token=rt)
-        except Exception as e:  # noqa: BLE001 — best-effort
-            _log.warning("dashboard-auth: revoke on %r failed: %s", provider.name, e)
-    sess = getattr(request.state, "session", None)
+    at, rt = read_session_cookies(request)
+    sess: Any = getattr(request.state, "session", None)
+    if sess is None:
+        # This route is public so stale cookies can always be cleared; the gate
+        # therefore does not attach cookie or native-bearer identity. Resolve it
+        # here before upstream revocation so logout can also revoke live owner
+        # leases and pending WS tickets.
+        from hermes_cli.dashboard_auth.middleware import _verify_access_token
+
+        bearer = extract_bearer(request)
+        candidates = [token for token in (at, bearer) if token]
+        for access_token in dict.fromkeys(candidates):
+            try:
+                sess = _verify_access_token(
+                    request, access_token=access_token, audit=False)
+            except Exception as e:  # noqa: BLE001 — logout remains best-effort
+                _log.warning(
+                    "dashboard-auth: identity lookup during logout failed: %s", e)
+                continue
+            if sess is not None:
+                break
+    if sess is not None:
+        from hermes_cli.dashboard_auth.ws_tickets import revoke_owner_authorization
+        revoke_owner_authorization(provider=sess.provider, user_id=sess.user_id)
+
+    # Best-effort upstream refresh-token revocation; failures never prevent
+    # local authority revocation or browser cleanup.
+    if rt:
+        for provider in list_providers():
+            try:
+                provider.revoke_session(refresh_token=rt)
+            except Exception as e:  # noqa: BLE001 — best-effort
+                _log.warning("dashboard-auth: revoke on %r failed: %s", provider.name, e)
     _audit(request, AuditEvent.LOGOUT, provider=(sess.provider if sess else "unknown"),
            user_id=(sess.user_id if sess else ""))
     prefix = _prefix(request)

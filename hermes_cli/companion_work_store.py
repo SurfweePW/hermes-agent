@@ -9,10 +9,13 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
+import os
 from pathlib import Path
 import sqlite3
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from hermes_constants import mkdir_under_hermes_home
 
 STATES = frozenset({'ideas', 'in_progress', 'needs_me', 'done', 'declined'})
 ACTIONS = frozenset({'approve_preparation', 'request_changes', 'snooze', 'decline'})
@@ -56,6 +59,25 @@ def timestamp(value):
         return parsed.astimezone(timezone.utc).isoformat()
     except (AttributeError, TypeError, ValueError):
         raise WorkError('timestamp must be ISO-8601 with timezone', -32602) from None
+
+
+def anchored_store_path(path: Path) -> Path:
+    """Fail closed when *path* (or its parent) escapes the named profile via symlinks.
+
+    The OS-level trust assumption covers legitimate profile-local state, not a
+    profile directory that has been redirected out of the Hermes home: a
+    symlinked store file or a symlinked profile directory would silently write
+    business decisions to an attacker-chosen location.
+    """
+    resolved = Path(path).resolve(strict=False)
+    home = Path(os.environ.get('HERMES_HOME') or Path.home() / '.hermes')
+    try:
+        resolved.relative_to(home.resolve(strict=False))
+    except ValueError as exc:
+        raise WorkError('work store path escapes the Hermes home', 4404) from exc
+    if Path(path).is_symlink() or Path(path).parent.is_symlink():
+        raise WorkError('work store path must not be a symlink', 4404)
+    return resolved
 
 
 def payload_checked(value):
@@ -114,7 +136,7 @@ class WorkStore:
             self.timezone = ZoneInfo(timezone_name)
         except (ZoneInfoNotFoundError, TypeError, ValueError):
             raise WorkError("invalid reminder timezone", -32602) from None
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._ensure_profile_available()
         with self._tx() as db:
             db.execute('CREATE TABLE IF NOT EXISTS inbox_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)')
             db.execute("INSERT OR IGNORE INTO inbox_meta VALUES ('profile', ?)", (profile,))
@@ -172,8 +194,17 @@ class WorkStore:
                 PRIMARY KEY(consumer, card_id, attention_key))''')
         self.path.chmod(0o600)
 
+    def _ensure_profile_available(self):
+        try:
+            mkdir_under_hermes_home(self.path.parent)
+        except FileNotFoundError as exc:
+            raise WorkError('profile unavailable', 4404) from exc
+
     @contextmanager
     def _tx(self):
+        # Re-check for every operation so an already-open WorkStore cannot
+        # continue writing after its named profile has been tombstoned.
+        self._ensure_profile_available()
         db = sqlite3.connect(self.path, timeout=15, isolation_level=None)
         db.row_factory = sqlite3.Row
         try:

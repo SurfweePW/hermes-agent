@@ -36,9 +36,9 @@ export class GatewayTokenStore {
   }
 
   get(): string | undefined {
-    if (!this.safeStorage.isEncryptionAvailable()) { throw new SecureStorageError() }
-
     if (!existsSync(this.filePath)) { return undefined }
+
+    if (!this.safeStorage.isEncryptionAvailable()) { throw new SecureStorageError() }
 
     try {
       const token = this.safeStorage.decryptString(readFileSync(this.filePath))

@@ -72,6 +72,13 @@ export interface CompanionProjectRef extends CompanionEntityRef {
   profile: string
 }
 
+export interface CompanionTopicRef extends CompanionEntityRef {
+  /** Profile that owns the organization topic. */
+  profile: string
+  /** Authoritative organization backend namespace, not the linked source project's namespace. */
+  source: string
+}
+
 export interface CompanionSession {
   id: string
   title: string
@@ -163,10 +170,12 @@ export interface CompanionSessionHistoryResult {
 export interface CompanionProjectDetail {
   project: CompanionProject
   sessions: CompanionSession[]
-  topics: CompanionEntityRef[]
+  topics: CompanionTopicRef[]
   needs_me: CompanionEntityRef[]
   work: CompanionEntityRef[]
   organization_available: boolean
+  organization_complete: boolean
+  organization_message: string | null
   membership_has_more: boolean
   membership_next_cursor: string | null
   coverage: CompanionCoverage
