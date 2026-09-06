@@ -1,0 +1,159 @@
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
+
+import { downloadOriginal, Library } from './library'
+import type { LibraryChunk, LibraryDetail, LibraryGateway, LibraryItem, LibraryListOptions, LibraryListResult } from './library-types'
+
+const artifactId = `art_${'a'.repeat(64)}`
+const versionId = `ver_${'b'.repeat(64)}`
+const collection = { id: 'docs', name: 'Documents', owner: 'atlas', availability: 'available' }
+const item: LibraryItem = { artifact_id: artifactId, profile: 'atlas', collection, filename: 'report.md', version_id: versionId, size: 8, sha256: 'c'.repeat(64), mime_type: 'text/markdown', availability: 'available', reviewed: true, version_count: 1, date: '2026-01-01T00:00:00Z', preview: { kind: 'markdown', preview_available: true } }
+const complete = (items: LibraryItem[] = [item]): LibraryListResult => ({ items, collections: [collection], has_more: false, next_cursor: null, total: items.length, as_of: '2026-01-02T00:00:00Z', coverage: { configured: true, status: 'complete', collections: { docs: 'available' } }, warnings: [], profile: 'atlas', backend_namespace: 'test' })
+const detail: LibraryDetail = { artifact_id: artifactId, profile: 'atlas', backend_namespace: 'test', collection, filename: item.filename, versions: [{ version_id: versionId, filename: item.filename, size: item.size, sha256: item.sha256, mime_type: item.mime_type, reviewed: true, availability: 'available', preview: item.preview, ingested_at: item.date!, provenance: { decision_id: 'd1' } }], latest: { version_id: versionId, filename: item.filename, size: item.size, sha256: item.sha256, mime_type: item.mime_type, reviewed: true, availability: 'available', preview: item.preview }, as_of: '2026-01-02T00:00:00Z' }
+
+function encoded(value: string): string {return btoa(value)}
+
+const capabilities = (maxChunkSize: number) => ({ version: 1 as const, max_page_size: 2, max_chunk_size: maxChunkSize, download_transport: 'authenticated_json_rpc_base64_chunks' as const, transfer_consistency: 'signed_immutable_descriptor' as const, html_preview: 'sanitized_static_document' as const, relationship_filters: ['collection', 'project', 'topic', 'session', 'status'] as ['collection', 'project', 'topic', 'session', 'status'], evidence_pin: 'explicit_owner_reviewed_latest' as const })
+
+function gateway(overrides: Partial<LibraryGateway> = {}): LibraryGateway {
+  return {
+    libraryCapabilities: vi.fn().mockResolvedValue(capabilities(4)),
+    libraryProfiles: vi.fn().mockResolvedValue({ items: [{ profile: 'atlas', configured: true }], backend_namespace: 'test', as_of: '2026-01-02T00:00:00Z' }),
+    listLibrary: vi.fn().mockResolvedValue(complete()),
+    getLibraryArtifact: vi.fn().mockResolvedValue(detail),
+    previewLibraryArtifact: vi.fn().mockResolvedValue({ artifact_id: artifactId, version_id: versionId, data_base64: encoded('# report'), offset: 0, next_offset: 8, eof: true, size: 8, sha256: item.sha256, filename: item.filename, mime_type: item.mime_type, descriptor: 'signed-transfer', preview: item.preview }),
+    downloadLibraryArtifact: vi.fn(),
+    pinReviewedLibraryArtifact: vi.fn().mockResolvedValue({}),
+    ...overrides
+  }
+}
+
+describe('Library', () => {
+  it('reports an unconfigured backend without claiming the Library is empty', async () => {
+    const fake = gateway({ listLibrary: vi.fn().mockResolvedValue({ ...complete([]), collections: [], coverage: { configured: false, status: 'unconfigured', collections: {} }, warnings: ['No Companion Library collections are configured for this profile; no roots were scanned.'] }) })
+    render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams()} />)
+
+    expect(await screen.findByText('Library is not configured')).toBeTruthy()
+    expect(screen.getByText(/no roots were scanned/i)).toBeTruthy()
+    expect(screen.queryByText('The configured Library is empty.')).toBeNull()
+  })
+
+  it('queries every backend page with server-side search and canonical filters', async () => {
+    const second = { ...item, artifact_id: `art_${'d'.repeat(64)}`, filename: 'report-2.md' }
+
+    const listLibrary = vi.fn(async (options: LibraryListOptions) => options.cursor
+      ? { ...complete([second]), total: 2 }
+      : { ...complete([item]), total: 2, has_more: true, next_cursor: 'page-2' })
+
+    const fake = gateway({ listLibrary })
+    render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams('libraryQ=report&libraryType=markdown&libraryCollection=docs&libraryStatus=reviewed')} />)
+
+    expect(await screen.findByText('2 artifacts across all available pages.')).toBeTruthy()
+    expect(screen.getByText('report-2.md')).toBeTruthy()
+    expect(listLibrary).toHaveBeenNthCalledWith(1, expect.objectContaining({ search: 'report', type: 'markdown', collection: 'docs', reviewed: true, limit: 2 }))
+    expect(listLibrary).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: 'page-2', search: 'report', limit: 2 }))
+    expect((screen.getByLabelText('Project') as HTMLInputElement).disabled).toBe(false)
+    expect((screen.getByLabelText('Topic') as HTMLInputElement).disabled).toBe(false)
+    expect((screen.getByLabelText('Session') as HTMLInputElement).disabled).toBe(false)
+  })
+
+  it('keeps detail routing while selecting a retained version', async () => {
+    const navigate = vi.fn()
+    render(<Library gateway={gateway()} onNavigate={navigate} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas`)} />)
+    await screen.findByText(item.filename)
+    fireEvent.change(screen.getByLabelText('Version'), { target: { value: versionId } })
+    const next = navigate.mock.calls.at(-1)?.[0] as URLSearchParams
+    expect(next.get('libraryArtifact')).toBe(artifactId)
+    expect(next.get('libraryProfile')).toBe('atlas')
+    expect(next.get('libraryVersion')).toBe(versionId)
+  })
+
+  it('pins only the exact descriptor returned by the safe preview', async () => {
+    const pinReviewedLibraryArtifact = vi.fn().mockResolvedValue({})
+    const fake = gateway({ pinReviewedLibraryArtifact })
+    render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas`)} />)
+    await screen.findByText(item.filename)
+    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark previewed version reviewed' }))
+    await waitFor(() => expect(pinReviewedLibraryArtifact).toHaveBeenCalledWith(expect.objectContaining({ profile: 'atlas', artifact_id: artifactId, reviewed_descriptor: 'signed-transfer' })))
+  })
+
+  it('renders sanitized HTML only in an inert sandbox', async () => {
+    const html = "<!doctype html><meta http-equiv='Content-Security-Policy' content=\"default-src 'none'\"><p>safe</p>"
+    const htmlItem = { ...item, filename: 'safe.html', mime_type: 'text/html', preview: { kind: 'html' as const, preview_available: true } }
+    const htmlDetail = { ...detail, filename: htmlItem.filename, latest: { ...detail.latest, filename: htmlItem.filename, mime_type: 'text/html', preview: htmlItem.preview } }
+
+    const fake = gateway({
+      libraryCapabilities: vi.fn().mockResolvedValue(capabilities(1024)),
+      listLibrary: vi.fn().mockResolvedValue(complete([htmlItem])),
+      getLibraryArtifact: vi.fn().mockResolvedValue(htmlDetail),
+      previewLibraryArtifact: vi.fn().mockResolvedValue({ artifact_id: artifactId, version_id: versionId, data_base64: encoded(html), offset: 0, next_offset: html.length, eof: true, size: html.length, sha256: item.sha256, filename: 'safe.html', mime_type: 'text/html', descriptor: 'signed-transfer', preview: htmlItem.preview, sandbox: '', scripts: false, network: false })
+    })
+
+    render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}`)} />)
+    await screen.findByText('safe.html')
+    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+
+    const frame = await screen.findByTitle('Static preview of safe.html')
+    expect(frame.getAttribute('sandbox')).toBe('')
+    expect(frame.getAttribute('srcdoc')).toContain("default-src 'none'")
+    expect(document.body.textContent).not.toContain('safe</p>')
+  })
+
+  it('rejects an HTML preview if the backend sandbox contract is not inert', async () => {
+    const unsafeHtml = '<script>alert(1)</script>'
+    const htmlDetail = { ...detail, filename: 'unsafe.html', latest: { ...detail.latest, filename: 'unsafe.html', mime_type: 'text/html', preview: { kind: 'html' as const, preview_available: true } } }
+    const fake = gateway({ libraryCapabilities: vi.fn().mockResolvedValue(capabilities(1024)), getLibraryArtifact: vi.fn().mockResolvedValue(htmlDetail), previewLibraryArtifact: vi.fn().mockResolvedValue({ artifact_id: artifactId, data_base64: encoded(unsafeHtml), offset: 0, next_offset: unsafeHtml.length, eof: true, size: unsafeHtml.length, sha256: item.sha256, filename: 'unsafe.html', mime_type: 'text/html', descriptor: 'signed-transfer', preview: htmlDetail.latest.preview, sandbox: 'allow-scripts', scripts: true, network: false }) })
+    render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}`)} />)
+    await screen.findByText('unsafe.html')
+    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    expect((await screen.findByRole('alert')).textContent).toContain('did not satisfy the static sandbox contract')
+    expect(screen.queryByTitle(/Static preview/)).toBeNull()
+  })
+
+  it('assembles an authenticated original download from bounded base64 chunks', async () => {
+    const payload = 'abcdefghij'
+    const calls: number[] = []
+
+    const fake = gateway({ downloadLibraryArtifact: vi.fn(async ({ offset = 0, chunk_size = 4 }): Promise<LibraryChunk> => {
+      calls.push(offset)
+      const part = payload.slice(offset, offset + chunk_size)
+
+      return { artifact_id: artifactId, version_id: versionId, data_base64: encoded(part), offset, next_offset: offset + part.length, eof: offset + part.length === payload.length, size: payload.length, sha256: item.sha256, filename: 'original.txt', mime_type: 'text/plain', descriptor: 'signed-transfer' }
+    }) })
+
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:download')
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+
+    await downloadOriginal(fake, artifactId)
+
+    expect(calls).toEqual([0, 4, 8])
+    expect(createObjectURL).toHaveBeenCalledOnce()
+    expect(click).toHaveBeenCalledOnce()
+    expect(revokeObjectURL).toHaveBeenCalledWith('blob:download')
+  })
+
+  it('shows list errors and unsupported preview messages honestly', async () => {
+    const failing = gateway({ listLibrary: vi.fn().mockRejectedValue(new Error('Owner authorization expired.')) })
+    const { unmount } = render(<Library gateway={failing} onNavigate={vi.fn()} params={new URLSearchParams()} />)
+    expect((await screen.findByRole('alert')).textContent).toContain('Owner authorization expired.')
+    unmount()
+
+    const unsupportedDetail = { ...detail, latest: { ...detail.latest, preview: { kind: 'unsupported' as const, preview_available: false, message: 'No browser-safe preview exists.' } } }
+    const unsupported = gateway({ getLibraryArtifact: vi.fn().mockResolvedValue(unsupportedDetail), previewLibraryArtifact: vi.fn().mockResolvedValue({ artifact_id: artifactId, available: false, preview: unsupportedDetail.latest.preview }) })
+    render(<Library gateway={unsupported} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}`)} />)
+    await screen.findByText(item.filename)
+    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    expect(await screen.findByText('No browser-safe preview exists.')).toBeTruthy()
+  })
+
+  it('falls back to canonical select values for untrusted URL enums', async () => {
+    render(<Library gateway={gateway()} onNavigate={vi.fn()} params={new URLSearchParams('libraryType=forged&libraryDate=never&libraryStatus=hacked')} />)
+    await waitFor(() => expect(screen.queryByText('Loading the complete Library…')).toBeNull())
+    expect((screen.getByLabelText('Type') as HTMLSelectElement).value).toBe('all')
+    expect((screen.getByLabelText('Date') as HTMLSelectElement).value).toBe('any')
+    expect((screen.getByLabelText('Status') as HTMLSelectElement).value).toBe('all')
+    expect(screen.queryByText('Filters active')).toBeNull()
+  })
+})

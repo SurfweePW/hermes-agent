@@ -24,9 +24,10 @@ export function TeammateDetails({ teammate, sessions, sessionsLoading, onMessage
       <div className="section-heading session-heading"><div><p className="kicker">Conversation history</p><h3>Recent sessions</h3></div><span>Click a session to open it</span></div>
       {sessionsLoading && <p role="status">Loading sessions…</p>}
       <div className="session-list">
-        {sessions.map((session) => {
+        {sessions.map((session, index) => {
           const title = session.title || 'Untitled session'
-          const titleId = `session-title-${session.id}`
+          const slug = session.id.toLocaleLowerCase().normalize('NFKD').replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'session'
+          const titleId = `session-title-${slug}-${index}`
           const lastActiveDate = safeSessionDate(session.last_active)
 
           return (

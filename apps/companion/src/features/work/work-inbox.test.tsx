@@ -12,17 +12,17 @@ export const card: WorkCardView = {
 }
 
 function props(overrides: Partial<WorkInboxProps> = {}): WorkInboxProps {
-  return { items: [card], selected: card, status: 'verified', pending: false, message: null,
-    onOpen: vi.fn(), onClose: vi.fn(), onRefresh: vi.fn(), onDecision: vi.fn(async () => true), onComment: vi.fn(async () => true), ...overrides }
+  return { items: [card], selected: card, status: 'verified', pending: false, message: null, groupBy: 'topic', sources: [],
+    onOpen: vi.fn(), onClose: vi.fn(), onRefresh: vi.fn(), onGroupBy: vi.fn(), onDecision: vi.fn(async () => true), onComment: vi.fn(async () => true), ...overrides }
 }
 
 describe('durable work inbox', () => {
   it('shows dispatch and revision-scoped decision history without claiming execution', () => {
     render(<WorkInbox {...props({ selected: { ...card, status: 'in_progress', actionable: false,
-      preparationStatus: 'Preparation approved — awaiting execution tracker handoff',
+      preparationStatus: 'Preparation approved — awaiting execution tracker task link',
       decisionHistory: [{ id: 'd1', revision: 1, action: 'request_changes', actor: 'human', reason: 'Narrow earlier scope', createdAt: '2026-01-01T00:00:00Z', scope: 'none', snoozedUntil: null }]
     } })} />)
-    expect(screen.getByText('Preparation approved — awaiting execution tracker handoff')).toBeTruthy()
+    expect(screen.getByText('Preparation approved — awaiting execution tracker task link')).toBeTruthy()
     expect(screen.getByText('request changes · Revision 1')).toBeTruthy()
     expect(screen.getByText('Narrow earlier scope')).toBeTruthy()
     expect(screen.getByText(/shared-token connections comment as an agent/)).toBeTruthy()
@@ -46,6 +46,22 @@ describe('durable work inbox', () => {
     expect(screen.getByRole('link', { name: /Research/ }).getAttribute('rel')).toBe('noopener noreferrer')
     expect(screen.queryByRole('link', { name: /Unsafe preview/ })).toBeNull()
     expect(screen.queryByRole('button', { name: /Always approve/ })).toBeNull()
+  })
+  it('renders tracker blocker, result, completion evidence and observed history', () => {
+    render(<WorkInbox {...props({ selected: { ...card,
+      trackerEvidence: { state: 'prepared', observed_at: '2026-09-06T11:00:00Z', evidence: ['tracker read-back'], result_evidence: ['prepared artifact'] },
+      completionEvidence: ['final artifact'],
+      trackerStatusHistory: [{ state: 'blocked', observed_at: '2026-09-06T10:00:00Z', evidence: ['block event'], blocker: 'Legal review' }]
+    } })} />)
+    expect(screen.getByText(/Observed 2026-09-06T11:00:00Z/)).toBeTruthy()
+    expect(screen.getByText(/Result:/)).toBeTruthy()
+    expect(screen.getByText(/Blocker:/)).toBeTruthy()
+    expect(screen.getByText('final artifact')).toBeTruthy()
+  })
+  it('switches Topic, Session and Project grouping through the control', () => {
+    const p = props({ selected: null }); render(<WorkInbox {...p} />)
+    fireEvent.change(screen.getByLabelText('Group by'), { target: { value: 'session' } })
+    expect(p.onGroupBy).toHaveBeenCalledWith('session')
   })
   it.each(['offline', 'error', 'unsupported', 'loading'] as const)('disables decision and comment on %s', (status) => {
     render(<WorkInbox {...props({ status })} />)

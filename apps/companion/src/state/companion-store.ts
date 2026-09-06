@@ -1,5 +1,7 @@
 import type { ConnectionState } from '@hermes/shared'
 
+import { createDirectoryStore, type DirectoryGateway, type DirectoryStore } from '../features/directory/directory-store'
+import type { LibraryGateway } from '../features/library/library-types'
 import type { Teammate } from '../features/roster/roster'
 import { createWorkStore, type WorkStore } from '../features/work/work-store'
 import { CompanionClient } from '../gateway/companion-client'
@@ -9,6 +11,7 @@ import {
   parseGatewayBaseUrl,
   persistGatewayBaseUrl
 } from '../gateway/connection'
+import type { OrganizationGateway } from '../gateway/organization-types'
 import type {
   ApprovalChoice,
   ApprovalRequestPayload,
@@ -79,7 +82,7 @@ export interface CompanionSnapshot {
   connectionMode: CompanionConnectionMode
 }
 
-export interface CompanionGateway extends Partial<WorkGateway> {
+export interface CompanionGateway extends Partial<WorkGateway>, Partial<OrganizationGateway>, Partial<DirectoryGateway>, Partial<LibraryGateway> {
   readonly connectionState: ConnectionState
   connect(wsUrl: string): Promise<void>
   close(): void
@@ -113,6 +116,8 @@ export interface CompanionStoreOptions {
 
 export interface CompanionStore {
   work: WorkStore
+  directory: DirectoryStore
+  library: LibraryGateway
   getSnapshot(): CompanionSnapshot
   subscribe(listener: () => void): () => void
   configure(input: { baseUrl: string; token: string }): Promise<void>
@@ -313,6 +318,7 @@ function hasExistingOwnerSession(status: unknown): boolean {
 
 export function createCompanionStore(options: CompanionStoreOptions = {}): CompanionStore {
   const work = createWorkStore()
+  const directory = createDirectoryStore()
   const gatewayFactory = options.gatewayFactory ?? (() => new CompanionClient())
   const storage = options.storage ?? browserStorage()
   const secrets = options.secretStore ?? createDefaultSecretStore()
@@ -509,6 +515,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
   const handleState = (state: ConnectionState) => {
     if (state !== 'closed' && state !== 'error') {return}
     work.disconnect()
+    directory.disconnect()
     publish({
       phase: 'disconnected',
       turnStatus: snapshot.turnStatus === 'streaming' || snapshot.turnStatus === 'submitting'
@@ -521,6 +528,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
   const installGateway = (generation: number) => {
     const replaced = gateway
     work.disconnect()
+    directory.disconnect()
     detachGateway()
     replaced?.close()
     const client = gatewayFactory()
@@ -776,6 +784,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
     if (!await loadAttention(client, operation)) {return null}
     await work.attach(client, [...profileIds.values()])
+    await directory.attach(client, [...profileIds.values()])
 
     if (!isCurrentConnection(client, operation)) {return null}
 
@@ -785,8 +794,48 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     return client
   }
 
+  const library: LibraryGateway = {
+    libraryCapabilities: () => {
+      if (!gateway?.libraryCapabilities) {return Promise.reject(new Error('Library is not supported by this gateway.'))}
+
+      return gateway.libraryCapabilities()
+    },
+    libraryProfiles: () => {
+      if (!gateway?.libraryProfiles) {return Promise.reject(new Error('Library profile discovery is not supported by this gateway.'))}
+
+      return gateway.libraryProfiles()
+    },
+    listLibrary: (options) => {
+      if (!gateway?.listLibrary) {return Promise.reject(new Error('Library is not supported by this gateway.'))}
+
+      return gateway.listLibrary(options)
+    },
+    getLibraryArtifact: (artifactId, profile) => {
+      if (!gateway?.getLibraryArtifact) {return Promise.reject(new Error('Library is not supported by this gateway.'))}
+
+      return gateway.getLibraryArtifact(artifactId, profile)
+    },
+    previewLibraryArtifact: (options) => {
+      if (!gateway?.previewLibraryArtifact) {return Promise.reject(new Error('Library previews are not supported by this gateway.'))}
+
+      return gateway.previewLibraryArtifact(options)
+    },
+    downloadLibraryArtifact: (options) => {
+      if (!gateway?.downloadLibraryArtifact) {return Promise.reject(new Error('Library downloads are not supported by this gateway.'))}
+
+      return gateway.downloadLibraryArtifact(options)
+    },
+    pinReviewedLibraryArtifact: (options) => {
+      if (!gateway?.pinReviewedLibraryArtifact) {return Promise.reject(new Error('Library review pinning is not supported by this gateway.'))}
+
+      return gateway.pinReviewedLibraryArtifact(options)
+    }
+  }
+
   return {
     work,
+    directory,
+    library,
     getSnapshot: () => snapshot,
     subscribe(listener) {
       listeners.add(listener)
@@ -796,6 +845,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     async configure(input) {
       const operation = ++connectionGeneration
       work.reset()
+      directory.reset()
 
       try {
         const configuration = parseGatewayBaseUrl(input.baseUrl)
@@ -842,6 +892,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     },
     async configureOwner(input) {
       work.reset()
+      directory.reset()
       const operation = ++connectionGeneration
 
       try {
@@ -903,7 +954,8 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     async signOutOwner() {
       const operation = ++connectionGeneration
       discardGateway(operation)
-      work.disconnect()
+      work.reset()
+      directory.reset()
       connectionMode = 'shared'
       publish({ phase: 'disconnected', connectionMode: 'shared', error: null })
 
@@ -1217,6 +1269,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       if (destroyed) {return}
       destroyed = true
       work.disconnect()
+      directory.disconnect()
       connectionGeneration += 1
       sessionGeneration += 1
       detachGateway()

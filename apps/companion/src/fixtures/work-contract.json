@@ -1,0 +1,11 @@
+{
+  "preparation_statuses": [
+    "not_authorized",
+    "approved_task_linking_pending",
+    "linked_awaiting_triage",
+    "preparing",
+    "prepared",
+    "blocked",
+    "status_unavailable"
+  ]
+}

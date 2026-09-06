@@ -4,6 +4,7 @@ from pathlib import Path
 import json
 import os
 import socket
+import sqlite3
 import subprocess
 import sys
 import threading
@@ -216,9 +217,29 @@ def test_no_network_no_external_writes_and_complete_is_not_execution(tmp_path, m
                                    approved['handoff_key'], 'kanban:hoffee:read-back-task', 'ack')['item']
     with pytest.raises(WorkError, match='completion_evidence'):
         store.complete(card['id'], linked['version'])
-    done = store.complete(card['id'], linked['version'], 'fixture:tracker-read-back:done')['item']
+    with pytest.raises(WorkError, match='structured tracker'):
+        store.complete(card['id'], linked['version'], 'fixture:tracker-read-back:done')
+    prepared = store.preparation_status_update(
+        linked['id'], linked['version'], linked['revision'], linked['handoff_key'], {
+            'state': 'prepared', 'execution_ref': 'kanban:hoffee:read-back-task',
+            'observed_at': '2026-09-06T10:04:00Z',
+            'evidence': ['fixture:tracker-read-back:done'],
+            'result_evidence': ['fixture:prepared-artifact'],
+        }, 'verified-completion')['item']
+    assert prepared['state'] == 'in_progress'
+    assert prepared['preparation_status'] == 'prepared'
+    assert prepared['completion_evidence'] is None
+    assert store.list(preparation=True)['items'] == [prepared]
+    history = store.get(prepared['id'])['tracker_status_history']
+
+    done = store.complete(
+        prepared['id'], prepared['version'], 'fixture:tracker-read-back:done')['item']
     assert done['state'] == 'done'
+    assert done['preparation_status'] == 'prepared'
+    assert done['completion_evidence'] == ['fixture:prepared-artifact']
+    assert done['publication_status'] == 'not_authorized'
     assert store.list(preparation=True)['items'] == []
+    assert store.get(done['id'])['tracker_status_history'] == history
     assert {p.name for p in tmp_path.iterdir() if p.is_file()} == {'inbox.db'}
     with pytest.raises(WorkError):
         store.upsert('test-source', dict(PAYLOAD, brief='reopen'), done['version'])
@@ -278,14 +299,14 @@ def test_digest_local_day_dedupes_revisions_and_reminds_tomorrow(tmp_path):
 def test_execution_reference_is_not_acknowledged_handoff(tmp_path):
     store = WorkStore(tmp_path / 'inbox.db', 'hoffeecmo')
     c = decide(store, proposed(store))['item']
-    assert c['preparation_status'] == 'dispatch_pending'
+    assert c['preparation_status'] == 'approved_task_linking_pending'
     assert c['execution_link'] is None
     with pytest.raises(WorkError, match='linked'):
         store.complete(c['id'], c['version'])
     args = dict(card_id=c['id'], expected_version=c['version'], revision=c['revision'],
                 handoff_key=c['handoff_key'], execution_ref='kanban:hoffee:verified-task', idempotency_key='ack-1')
     linked = store.preparation_ack(**args)
-    assert linked['item']['preparation_status'] == 'linked'
+    assert linked['item']['preparation_status'] == 'linked_awaiting_triage'
     assert store.preparation_ack(**args) == linked
     with pytest.raises(WorkError, match='idempotency'):
         store.preparation_ack(**dict(args, execution_ref='kanban:other'))
@@ -296,6 +317,287 @@ def test_execution_reference_is_not_acknowledged_handoff(tmp_path):
     assert revised['preparation_status'] == 'not_authorized'
     with pytest.raises(WorkError):
         store.preparation_ack(**dict(args, expected_version=revised['version'], idempotency_key='late-ack'))
+
+
+def test_uncertain_handoff_reconciles_without_claiming_or_relinking(tmp_path):
+    store = WorkStore(tmp_path / 'inbox.db', 'hoffeecmo')
+    approved = decide(store, proposed(store))['item']
+    evidence = {
+        'state': 'status_unavailable',
+        'observed_at': '2026-09-06T10:00:00Z',
+        'evidence': ['tracker create timed out before read-back'],
+    }
+    args = dict(card_id=approved['id'], expected_version=approved['version'],
+                revision=approved['revision'], handoff_key=approved['handoff_key'],
+                tracker_evidence=evidence, idempotency_key='uncertain-1')
+    uncertain = store.preparation_status_update(**args)
+    assert store.preparation_status_update(**args) == uncertain
+    item = uncertain['item']
+    assert item['preparation_status'] == 'status_unavailable'
+    assert item['handoff_reconciliation_required'] is True
+    assert item['execution_link'] is None
+
+    linked = store.preparation_ack(item['id'], item['version'], item['revision'],
+                                   item['handoff_key'], 'kanban:hoffee:one-task', 'ack-after-timeout')['item']
+    assert linked['preparation_status'] == 'linked_awaiting_triage'
+    assert linked['handoff_reconciliation_required'] is False
+    assert linked['execution_link']['execution_ref'] == 'kanban:hoffee:one-task'
+    assert [event['state'] for event in store.get(item['id'])['tracker_status_history']] == [
+        'status_unavailable',
+    ]
+
+
+def test_tracker_readback_transitions_require_structured_matching_evidence(tmp_path):
+    store = WorkStore(tmp_path / 'inbox.db', 'hoffeecmo')
+    approved = decide(store, proposed(store))['item']
+    linked = store.preparation_ack(approved['id'], approved['version'], approved['revision'],
+                                   approved['handoff_key'], 'kanban:hoffee:task', 'ack')['item']
+
+    with pytest.raises(WorkError, match='tracker_evidence'):
+        store.preparation_status_update(linked['id'], linked['version'], linked['revision'],
+                                        linked['handoff_key'], 'running', 'bad-shape')
+    with pytest.raises(WorkError, match='execution_ref'):
+        store.preparation_status_update(linked['id'], linked['version'], linked['revision'],
+                                        linked['handoff_key'], {
+                                            'state': 'preparing', 'execution_ref': 'kanban:other',
+                                            'observed_at': '2026-09-06T10:01:00Z', 'evidence': ['read-back'],
+                                        }, 'wrong-task')
+
+    preparing = store.preparation_status_update(
+        linked['id'], linked['version'], linked['revision'], linked['handoff_key'], {
+            'state': 'preparing', 'execution_ref': 'kanban:hoffee:task',
+            'observed_at': '2026-09-06T10:02:00Z', 'evidence': ['tracker status=in_progress'],
+        }, 'preparing')['item']
+    assert preparing['preparation_status'] == 'preparing'
+    blocked = store.preparation_status_update(
+        preparing['id'], preparing['version'], preparing['revision'], preparing['handoff_key'], {
+            'state': 'blocked', 'execution_ref': 'kanban:hoffee:task',
+            'observed_at': '2026-09-06T10:03:00Z', 'evidence': ['tracker status=blocked'],
+            'blocker': 'Waiting for source file',
+        }, 'blocked')['item']
+    assert blocked['preparation_status'] == 'blocked'
+    with pytest.raises(WorkError, match='older tracker evidence'):
+        store.preparation_status_update(
+            blocked['id'], blocked['version'], blocked['revision'], blocked['handoff_key'], {
+                'state': 'preparing', 'execution_ref': 'kanban:hoffee:task',
+                'observed_at': '2026-09-06T10:02:30Z', 'evidence': ['delayed poll result'],
+            }, 'delayed-status')
+    detail = store.get(blocked['id'])
+    assert detail['item']['preparation_status'] == 'blocked'
+    assert [event['state'] for event in detail['tracker_status_history']] == [
+        'preparing', 'blocked',
+    ]
+
+
+def test_prepared_requires_result_evidence_and_never_means_published(tmp_path):
+    store = WorkStore(tmp_path / 'inbox.db', 'hoffeecmo')
+    approved = decide(store, proposed(store))['item']
+    linked = store.preparation_ack(approved['id'], approved['version'], approved['revision'],
+                                   approved['handoff_key'], 'kanban:hoffee:task', 'ack')['item']
+    base = {
+        'state': 'prepared', 'execution_ref': 'kanban:hoffee:task',
+        'observed_at': '2026-09-06T10:04:00Z', 'evidence': ['tracker status=done'],
+    }
+    with pytest.raises(WorkError, match='result_evidence'):
+        store.preparation_status_update(linked['id'], linked['version'], linked['revision'],
+                                        linked['handoff_key'], base, 'missing-result')
+    prepared = store.preparation_status_update(
+        linked['id'], linked['version'], linked['revision'], linked['handoff_key'],
+        dict(base, result_evidence=['artifact:campaign-draft-v1']), 'prepared')['item']
+    assert prepared['state'] == 'in_progress'
+    assert prepared['preparation_status'] == 'prepared'
+    assert prepared['publication_status'] == 'not_authorized'
+    assert prepared['completion_evidence'] is None
+
+
+@pytest.mark.parametrize('overrides', [
+    {'card_id': {}},
+    {'expected_version': float('nan')},
+    {'revision': float('nan')},
+])
+def test_tracker_status_rejects_malformed_scalars_as_parameter_errors(tmp_path, overrides):
+    store = WorkStore(tmp_path / 'inbox.db', 'hoffeecmo')
+    approved = decide(store, proposed(store))['item']
+    linked = store.preparation_ack(approved['id'], approved['version'], approved['revision'],
+                                   approved['handoff_key'], 'kanban:hoffee:task', 'ack')['item']
+    args = dict(
+        card_id=linked['id'], expected_version=linked['version'], revision=linked['revision'],
+        handoff_key=linked['handoff_key'], idempotency_key='malformed-scalar',
+        tracker_evidence={
+            'state': 'preparing', 'execution_ref': 'kanban:hoffee:task',
+            'observed_at': '2026-09-06T10:02:00Z', 'evidence': ['tracker read-back'],
+        },
+    )
+    with pytest.raises(WorkError) as exc:
+        store.preparation_status_update(**dict(args, **overrides))
+    assert exc.value.code == -32602
+    assert store.get(linked['id'])['tracker_status_history'] == []
+
+
+@pytest.mark.parametrize(('mutation', 'field', 'malformed'), [
+    ('upsert', 'expected_version', {}),
+    ('upsert', 'expected_version', True),
+    ('propose', 'card_id', {}),
+    ('propose', 'expected_version', False),
+    ('comment', 'card_id', True),
+    ('decide', 'card_id', {}),
+    ('decide', 'expected_version', True),
+    ('decide', 'revision', {}),
+    ('decide', 'revision', False),
+    ('preparation_ack', 'card_id', True),
+    ('preparation_ack', 'expected_version', {}),
+    ('preparation_ack', 'expected_version', False),
+    ('preparation_ack', 'revision', {}),
+    ('preparation_ack', 'revision', True),
+    ('preparation_status_update', 'card_id', {}),
+    ('preparation_status_update', 'expected_version', True),
+    ('preparation_status_update', 'revision', False),
+    ('complete', 'card_id', {}),
+    ('complete', 'expected_version', True),
+    ('digest_ack', 'card_id', False),
+])
+def test_mutations_reject_malformed_identity_scalars_before_side_effects(
+        tmp_path, monkeypatch, mutation, field, malformed):
+    store = WorkStore(tmp_path / 'inbox.db', 'hoffeecmo')
+    card = proposed(store)
+    defaults = {
+        'card_id': card['id'],
+        'expected_version': card['version'],
+        'revision': card['revision'],
+    }
+    defaults[field] = malformed
+
+    def forbidden_transaction():
+        raise AssertionError('malformed parameters reached a transaction')
+
+    monkeypatch.setattr(store, '_tx', forbidden_transaction)
+    calls = {
+        'upsert': lambda: store.upsert('test-source', PAYLOAD, defaults['expected_version']),
+        'propose': lambda: store.propose(defaults['card_id'], defaults['expected_version']),
+        'comment': lambda: store.comment(defaults['card_id'], 'comment', 'malformed-comment'),
+        # Deliberately omit human_identity: scalar validation precedes authorization.
+        'decide': lambda: store.decide(
+            defaults['card_id'], defaults['expected_version'], defaults['revision'],
+            'approve_preparation', 'malformed-decision'),
+        'preparation_ack': lambda: store.preparation_ack(
+            defaults['card_id'], defaults['expected_version'], defaults['revision'],
+            'handoff', 'tracker:task', 'malformed-ack'),
+        'preparation_status_update': lambda: store.preparation_status_update(
+            defaults['card_id'], defaults['expected_version'], defaults['revision'],
+            'handoff', {
+                'state': 'preparing', 'execution_ref': 'tracker:task',
+                'observed_at': '2026-09-06T10:02:00Z', 'evidence': ['read-back'],
+            }, 'malformed-status'),
+        'complete': lambda: store.complete(
+            defaults['card_id'], defaults['expected_version'], 'completion evidence'),
+        'digest_ack': lambda: store.digest_ack('daily', [{
+            'id': defaults['card_id'], 'attention_key': card['attention_key'],
+        }]),
+    }
+    with pytest.raises(WorkError) as exc:
+        calls[mutation]()
+    assert exc.value.code == -32602
+
+
+def test_revision_invalidates_execution_projection_but_retains_decisions(tmp_path):
+    store = WorkStore(tmp_path / 'inbox.db', 'hoffeecmo')
+    approved = decide(store, proposed(store))['item']
+    linked = store.preparation_ack(approved['id'], approved['version'], approved['revision'],
+                                   approved['handoff_key'], 'kanban:hoffee:task', 'ack')['item']
+    preparing = store.preparation_status_update(
+        linked['id'], linked['version'], linked['revision'], linked['handoff_key'], {
+            'state': 'preparing', 'execution_ref': 'kanban:hoffee:task',
+            'observed_at': '2026-09-06T10:02:00Z', 'evidence': ['tracker status=in_progress'],
+        }, 'preparing')['item']
+    revised = store.upsert(preparing['source_key'], dict(PAYLOAD, brief='Revised scope'),
+                           preparing['version'])['item']
+    assert revised['preparation_status'] == 'not_authorized'
+    assert revised['tracker_evidence'] is None
+    assert revised['completion_evidence'] is None
+    detail = store.get(revised['id'])
+    assert len(detail['decisions']) == 1
+    assert detail['tracker_status_history'] == [{
+        'state': 'preparing', 'execution_ref': 'kanban:hoffee:task',
+        'observed_at': '2026-09-06T10:02:00+00:00',
+        'evidence': ['tracker status=in_progress'],
+        'revision': approved['revision'], 'handoff_key': approved['handoff_key'],
+    }]
+    with pytest.raises(WorkError, match='authorization changed'):
+        store.preparation_status_update(
+            revised['id'], revised['version'], approved['revision'], approved['handoff_key'], {
+                'state': 'preparing', 'execution_ref': 'kanban:hoffee:task',
+                'observed_at': '2026-09-06T10:05:00Z', 'evidence': ['late read-back'],
+            }, 'late-status')
+
+
+def test_existing_rows_migrate_to_truthful_projection(tmp_path):
+    path = tmp_path / 'inbox.db'
+    store = WorkStore(path, 'hoffeecmo')
+    approved = decide(store, proposed(store))['item']
+    linked = store.preparation_ack(approved['id'], approved['version'], approved['revision'],
+                                   approved['handoff_key'], 'kanban:hoffee:legacy', 'ack')['item']
+    with sqlite3.connect(path) as db:
+        db.execute('ALTER TABLE work_cards RENAME TO work_cards_new_schema')
+        db.execute('''CREATE TABLE work_cards (
+            id TEXT PRIMARY KEY, source_key TEXT UNIQUE NOT NULL, payload TEXT NOT NULL,
+            state TEXT NOT NULL, revision INTEGER NOT NULL, version INTEGER NOT NULL,
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL, snoozed_until TEXT,
+            approval TEXT, attention_generation INTEGER NOT NULL DEFAULT 0,
+            changes_revision INTEGER, execution_link TEXT, completion_evidence TEXT)''')
+        columns = ('id,source_key,payload,state,revision,version,created_at,updated_at,'
+                   'snoozed_until,approval,attention_generation,changes_revision,'
+                   'execution_link,completion_evidence')
+        db.execute(f'INSERT INTO work_cards ({columns}) SELECT {columns} FROM work_cards_new_schema')
+        db.execute('DROP TABLE work_cards_new_schema')
+
+    reopened = WorkStore(path, 'hoffeecmo')
+    migrated = reopened.get(linked['id'])['item']
+    assert migrated['preparation_status'] == 'linked_awaiting_triage'
+    assert migrated['tracker_evidence'] is None
+    assert migrated['publication_status'] == 'not_authorized'
+
+
+def test_existing_tracker_evidence_backfills_history_once(tmp_path):
+    path = tmp_path / 'inbox.db'
+    store = WorkStore(path, 'hoffeecmo')
+    approved = decide(store, proposed(store))['item']
+    linked = store.preparation_ack(approved['id'], approved['version'], approved['revision'],
+                                   approved['handoff_key'], 'kanban:hoffee:legacy', 'ack')['item']
+    evidence = {
+        'state': 'preparing', 'execution_ref': 'kanban:hoffee:legacy',
+        'observed_at': '2026-09-06T10:02:00+00:00', 'evidence': ['legacy read-back'],
+        'revision': linked['revision'], 'handoff_key': linked['handoff_key'],
+    }
+    with sqlite3.connect(path) as db:
+        db.execute('UPDATE work_cards SET tracker_evidence=? WHERE id=?',
+                   (json.dumps(evidence), linked['id']))
+        db.execute('DROP TABLE work_tracker_status_events')
+
+    first = WorkStore(path, 'hoffeecmo').get(linked['id'])
+    second = WorkStore(path, 'hoffeecmo').get(linked['id'])
+    assert first['tracker_status_history'] == [evidence]
+    assert second['tracker_status_history'] == [evidence]
+    with sqlite3.connect(path) as db:
+        assert db.execute(
+            'SELECT COUNT(*) FROM work_tracker_status_events WHERE card_id=?',
+            (linked['id'],),
+        ).fetchone()[0] == 1
+
+
+def test_legacy_completed_row_keeps_migration_projection_but_cannot_authorize_new_completion(tmp_path):
+    path = tmp_path / 'inbox.db'
+    store = WorkStore(path, 'hoffeecmo')
+    approved = decide(store, proposed(store))['item']
+    linked = store.preparation_ack(approved['id'], approved['version'], approved['revision'],
+                                   approved['handoff_key'], 'kanban:hoffee:legacy', 'ack')['item']
+    with sqlite3.connect(path) as db:
+        db.execute("UPDATE work_cards SET state='done', completion_evidence=? WHERE id=?",
+                   ('legacy tracker read-back', linked['id']))
+
+    migrated = WorkStore(path, 'hoffeecmo').get(linked['id'])
+    assert migrated['item']['preparation_status'] == 'prepared'
+    assert migrated['item']['completion_evidence'] == 'legacy tracker read-back'
+    assert migrated['tracker_status_history'] == []
 
 
 def test_invalid_json_types_are_parameter_errors(tmp_path):
@@ -389,7 +691,7 @@ def test_real_two_client_owner_login_rpc_revision_loop(work_transport):
         assert rpc(two, 'get', {'id': c['id']})['item'] == c
         approved = rpc(two, 'decide', dict(id=c['id'], expected_version=c['version'], revision=c['revision'], action='approve_preparation', idempotency_key='approve-rpc'))
         assert approved['decision']['actor'] == 'stub:stub-user-1'
-        assert approved['item']['preparation_status'] == 'dispatch_pending'
+        assert approved['item']['preparation_status'] == 'approved_task_linking_pending'
         assert rpc(one, 'get', {'id': c['id']})['item'] == approved['item']
         assert rpc(one, 'digest', {'consumer': 'daily'})['items'] == []
         rpc(two, 'get', {'id': c['id'], 'profile': '../other'}, error=-32602)

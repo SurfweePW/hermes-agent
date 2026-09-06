@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { App } from './app'
 import { createFakeGateway } from './fixtures/fake-gateway'
+import { createFakeWorkGateway, FakeWorkGateway } from './fixtures/fake-work-gateway'
 import type { OwnerAuthBridge } from './security/owner-auth'
 import type { SessionSecretStore } from './security/secret-store'
 import { createCompanionStore } from './state/companion-store'
@@ -14,7 +15,15 @@ async function readyStore() {
   return store
 }
 
+async function readyDirectoryStore() {
+  const store = createCompanionStore({ gatewayFactory: createFakeWorkGateway, storage: { getItem: () => null, setItem: () => undefined } })
+  await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
+
+  return store
+}
+
 describe('App', () => {
+  beforeEach(() => window.history.replaceState({}, '', '/'))
   it('keeps durable work in Needs Me, shows the old-server boundary and preserves runtime attention', async () => {
     const store = await readyStore()
     render(<App store={store} />)
@@ -25,13 +34,31 @@ describe('App', () => {
     expect(screen.queryByRole('button', { name: 'Kanban' })).toBeNull()
   })
 
-  it('refreshes server work on visibility and online events', async () => {
-    const store = await readyStore()
-    const refresh = vi.spyOn(store.work, 'refresh')
+  it('refreshes an open directory on foreground return without duplicating work refreshes', async () => {
+    const store = await readyDirectoryStore()
+    window.history.replaceState({}, '', '/?view=work')
+    const workRefresh = vi.spyOn(store.work, 'refresh')
+    const directoryRefresh = vi.spyOn(store.directory, 'refresh')
     render(<App store={store} />)
     fireEvent(document, new Event('visibilitychange'))
-    fireEvent(window, new Event('online'))
-    expect(refresh).toHaveBeenCalledTimes(2)
+    expect(workRefresh).toHaveBeenCalledOnce()
+    expect(directoryRefresh).toHaveBeenCalledOnce()
+  })
+
+  it('refreshes an open directory within thirty seconds and not while hidden', async () => {
+    vi.useFakeTimers()
+    const store = await readyDirectoryStore()
+    window.history.replaceState({}, '', '/?view=work')
+    const directoryRefresh = vi.spyOn(store.directory, 'refresh')
+    render(<App store={store} />)
+
+    vi.advanceTimersByTime(30_000)
+    expect(directoryRefresh).toHaveBeenCalledOnce()
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+    vi.advanceTimersByTime(30_000)
+    expect(directoryRefresh).toHaveBeenCalledOnce()
+    visibility.mockRestore()
+    vi.useRealTimers()
   })
 
   it('renders first-run gateway setup without exposing a token as text', () => {
@@ -194,6 +221,8 @@ describe('App', () => {
 
   it('renders quick task as a labelled stacked composer', async () => {
     render(<App store={await readyStore()} />)
+    fireEvent.click(screen.getAllByRole('button', { name: /Atlas/ })[0])
+    fireEvent.click(await screen.findByRole('button', { name: '← Back' }))
     const form = screen.getByRole('form', { name: 'Quick task' })
     expect(form.classList.contains('quick-task')).toBe(true)
     expect(screen.getByLabelText('Assign to').tagName).toBe('SELECT')
@@ -203,13 +232,102 @@ describe('App', () => {
 
   it('marks active navigation and focuses the newly selected screen context', async () => {
     render(<App store={await readyStore()} />)
-    const conversationButtons = screen.getAllByRole('button', { name: /Conversation|Chat/ })
-    fireEvent.click(conversationButtons[0])
+    fireEvent.click(screen.getAllByRole('button', { name: /Atlas/ })[0])
+    fireEvent.click(await screen.findByRole('button', { name: 'Open conversation' }))
     await waitFor(() => expect(screen.getByRole('main')).toBe(document.activeElement))
     expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Conversation')
     expect(screen.getByRole('main').classList.contains('main-content--conversation')).toBe(true)
     expect(document.querySelector('.desktop-topbar')).toBeNull()
-    expect(conversationButtons[0].getAttribute('aria-current')).toBe('page')
+    expect(screen.queryByRole('button', { name: /Conversation|Chat/ })).toBeNull()
+  })
+
+  it('keeps primary navigation locked while Work URLs and filter focus stay stable', async () => {
+    render(<App store={await readyDirectoryStore()} />)
+    const workButtons = screen.getAllByRole('button', { name: 'Work' })
+    fireEvent.click(workButtons[0])
+    await waitFor(() => expect(screen.getByRole('main')).toBe(document.activeElement))
+    expect(workButtons[0].getAttribute('aria-current')).toBe('page')
+    expect(window.location.search).toBe('?view=work')
+    expect(screen.queryByRole('button', { name: /Conversation|Chat/ })).toBeNull()
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Projects' }))
+    const searchInput = screen.getByLabelText('Search titles')
+    searchInput.focus()
+    fireEvent.change(searchInput, { target: { value: 'Companion' } })
+    expect(document.activeElement).toBe(searchInput)
+    expect(new URLSearchParams(window.location.search).get('q')).toBe('Companion')
+    expect(screen.getByRole('button', { name: /Companion project/ })).toBeTruthy()
+  })
+
+  it('restores a direct read-only session history URL without activating chat', async () => {
+    window.history.replaceState({}, '', '/?view=work&section=sessions&focus=synthetic-session-1&focusProfile=atlas&focusSource=fixture-mac-mini&tab=history')
+    const store = await readyDirectoryStore()
+    const setBrowseQuery = vi.spyOn(store.directory, 'setBrowseQuery')
+    render(<App store={store} />)
+
+    expect(await screen.findByRole('heading', { name: '[SYNTHETIC QA] Desktop research session' })).toBeTruthy()
+    expect(setBrowseQuery).toHaveBeenCalledWith(expect.objectContaining({ archive: 'all' }))
+    expect(screen.getByText('Synthetic request for read-only QA.')).toBeTruthy()
+    expect(screen.getByText(/Viewing history does not resume or activate this session/)).toBeTruthy()
+    expect(screen.queryByLabelText('Message Atlas')).toBeNull()
+  })
+
+  it('restores topic filters and a source-bound topic deep link', async () => {
+    window.history.replaceState({}, '', '/?view=work&section=topics&focus=topic-1&focusProfile=atlas&focusSource=organization-db&q=launch&collection=operations&lifecycle=active&verified=true&sort=name')
+    const store = await readyDirectoryStore()
+    const setBrowseQuery = vi.spyOn(store.directory, 'setBrowseQuery')
+    const openTopic = vi.spyOn(store.directory, 'openTopic')
+    render(<App store={store} />)
+
+    await waitFor(() => expect(openTopic).toHaveBeenCalledWith('atlas', 'topic-1', 'organization-db'))
+    expect(setBrowseQuery).toHaveBeenCalledWith({
+      search: 'launch',
+      archive: 'current',
+      sources: [],
+      origins: [],
+      collections: ['operations'],
+      lifecycles: ['active'],
+      verified: true,
+      topicSort: 'name'
+    })
+  })
+
+  it('retries a cold-start directory deep link after the gateway attaches', async () => {
+    window.history.replaceState({}, '', '/?view=work&section=sessions&focus=synthetic-session-1&focusProfile=atlas&focusSource=fixture-mac-mini&tab=history')
+    const store = createCompanionStore({ gatewayFactory: createFakeWorkGateway, storage: { getItem: () => null, setItem: () => undefined } })
+    const openSession = vi.spyOn(store.directory, 'openSession')
+    render(<App store={store} />)
+
+    expect(openSession).not.toHaveBeenCalled()
+    await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
+
+    expect(await screen.findByRole('heading', { name: '[SYNTHETIC QA] Desktop research session' })).toBeTruthy()
+    expect(openSession).toHaveBeenCalledOnce()
+  })
+
+  it('restores the same directory deep link again after reconnect', async () => {
+    window.history.replaceState({}, '', '/?view=work&section=sessions&focus=synthetic-session-1&focusProfile=atlas&focusSource=fixture-mac-mini&tab=history')
+    const gateways: FakeWorkGateway[] = []
+
+    const store = createCompanionStore({ gatewayFactory: () => {
+      const gateway = new FakeWorkGateway()
+
+      gateways.push(gateway)
+
+      return gateway
+    }, storage: { getItem: () => null, setItem: () => undefined } })
+
+    const openSession = vi.spyOn(store.directory, 'openSession')
+    render(<App store={store} />)
+    await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
+    await waitFor(() => expect(openSession).toHaveBeenCalledTimes(1))
+
+    gateways[0].close()
+    await waitFor(() => expect(store.getSnapshot().phase).toBe('disconnected'))
+    await store.recover()
+
+    await waitFor(() => expect(openSession).toHaveBeenCalledTimes(2))
+    expect(store.directory.getSnapshot().history?.session_id).toBe('synthetic-session-1')
   })
 
   it('creates a selected teammate session and operates the fixture conversation', async () => {

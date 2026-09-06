@@ -2,6 +2,8 @@ import { type FormEvent, useEffect, useRef, useState, useSyncExternalStore } fro
 
 import { NeedsMe } from './features/attention/needs-me'
 import { Conversation } from './features/conversation/conversation'
+import { WorkDirectory } from './features/directory/work-directory'
+import { Library } from './features/library/library'
 import { Recovery } from './features/recovery/recovery'
 import { Roster, type Teammate } from './features/roster/roster'
 import { TeammateDetails } from './features/roster/teammate-details'
@@ -11,33 +13,52 @@ import { createFakeWorkGateway } from './fixtures/fake-work-gateway'
 import { type CompanionStore, createCompanionStore } from './state/companion-store'
 import { useCompanion } from './state/use-companion'
 
-type Screen = 'teammates' | 'conversation' | 'attention' | 'details' | 'recovery'
+type Screen = 'needs' | 'work' | 'library' | 'teammates' | 'conversation' | 'details' | 'recovery'
+const primaryScreens = new Set<Screen>(['needs', 'work', 'library'])
 
 const fixtureMode = import.meta.env.VITE_COMPANION_FIXTURE === 'true'
 const defaultStore = createCompanionStore(fixtureMode ? { gatewayFactory: createFakeWorkGateway } : {})
 
 const screenTitles: Record<Screen, string> = {
-  teammates: 'Teammates', conversation: 'Conversation', attention: 'Needs Me', details: 'Teammate Details', recovery: 'Recovery'
+  needs: 'Needs Me', work: 'Work', library: 'Library', teammates: 'Teammates', conversation: 'Conversation', details: 'Teammate Details', recovery: 'Recovery'
+}
+
+function initialScreen(): Screen {
+  const view = new URLSearchParams(window.location.search).get('view') as Screen | null
+
+  return view && primaryScreens.has(view) ? view : 'needs'
 }
 
 export function App({ store = defaultStore }: { store?: CompanionStore }) {
   const companion = useCompanion(store)
   const work = useSyncExternalStore(store.work.subscribe, store.work.getSnapshot, store.work.getSnapshot)
-  const [screen, setScreen] = useState<Screen>('teammates')
+  const directory = useSyncExternalStore(store.directory.subscribe, store.directory.getSnapshot, store.directory.getSnapshot)
+  const [screen, setScreen] = useState<Screen>(initialScreen)
+  const [locationSearch, setLocationSearch] = useState(window.location.search)
   const mainRef = useRef<HTMLElement>(null)
-  const initialScreen = useRef(true)
+  const initialFocus = useRef(true)
   const fixtureStarted = useRef(false)
+  const restoredDirectoryFocus = useRef('')
   const selected = companion.teammates.find((teammate) => teammate.id === companion.selectedTeammateId)
   const attentionCount = companion.attentionItems.length + work.items.filter((item) => item.bucket === 'needs_me').length + Number(companion.phase === 'disconnected')
 
   useEffect(() => {
-    const refresh = () => {if (document.visibilityState !== 'hidden' && store.getSnapshot().phase === 'ready') {void store.work.refresh()}}
+    let refreshing = false
+    const refresh = () => {
+      if (refreshing || document.visibilityState === 'hidden' || store.getSnapshot().phase !== 'ready') {return}
+      refreshing = true
+      const requests = [store.work.refresh()]
+
+      if (screen === 'work') {requests.push(store.directory.refresh())}
+      void Promise.allSettled(requests).finally(() => {refreshing = false})
+    }
     document.addEventListener('visibilitychange', refresh)
     window.addEventListener('online', refresh)
+    window.addEventListener('focus', refresh)
     const interval = window.setInterval(refresh, 30_000)
 
-    return () => {document.removeEventListener('visibilitychange', refresh); window.removeEventListener('online', refresh); window.clearInterval(interval)}
-  }, [store])
+    return () => {document.removeEventListener('visibilitychange', refresh); window.removeEventListener('online', refresh); window.removeEventListener('focus', refresh); window.clearInterval(interval)}
+  }, [screen, store])
 
   useEffect(() => {
     if (!fixtureMode || store !== defaultStore || fixtureStarted.current) {return}
@@ -46,12 +67,91 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
   }, [store])
 
   useEffect(() => {
-    if (initialScreen.current) { initialScreen.current = false;
+    if (initialFocus.current) { initialFocus.current = false;
 
  return }
 
+    mainRef.current?.scrollTo?.({ top: 0 })
     mainRef.current?.focus()
   }, [screen])
+
+  useEffect(() => {
+    const restore = () => {
+      const params = new URLSearchParams(window.location.search)
+      const view = params.get('view') as Screen | null
+      setLocationSearch(window.location.search)
+      setScreen(view && primaryScreens.has(view) ? view : 'needs')
+    }
+
+    window.addEventListener('popstate', restore)
+
+    return () => window.removeEventListener('popstate', restore)
+  }, [])
+
+  const navigate = (nextScreen: Screen, params = new URLSearchParams(locationSearch)) => {
+    if (primaryScreens.has(nextScreen)) {params.set('view', nextScreen)}
+    window.history.pushState({}, '', `${window.location.pathname}?${params.toString()}`)
+    setLocationSearch(window.location.search)
+    setScreen(nextScreen)
+  }
+
+  const navigateParams = (params: URLSearchParams) => {
+    const requested = params.get('view') as Screen | null
+    navigate(requested && primaryScreens.has(requested) ? requested : screen, params)
+  }
+
+  useEffect(() => {
+    if (screen !== 'work' || companion.phase !== 'ready') {
+      restoredDirectoryFocus.current = ''
+
+      return
+    }
+
+    const params = new URLSearchParams(locationSearch)
+    const focus = params.get('focus')
+    const profile = params.get('focusProfile')
+    const source = params.get('focusSource') ?? undefined
+    const section = params.get('section')
+    const requestedVisibility = params.get('visibility') ?? params.get('archive')
+
+    const archive = (['current', 'all', 'hidden', 'archived'].includes(requestedVisibility ?? '')
+      ? requestedVisibility
+      : section === 'sessions' ? 'all' : 'current') as 'current' | 'all' | 'hidden' | 'archived'
+
+    const collections = params.getAll('collection').filter(Boolean)
+    const lifecycles = params.getAll('lifecycle').filter((value): value is 'active' | 'completed' | 'archived' => ['active', 'completed', 'archived'].includes(value))
+    const verified = params.get('verified') === 'true' ? true : undefined
+    const topicSort = params.get('sort') === 'name' ? 'name' : 'updated'
+    const sources = params.getAll('source').filter(Boolean).sort()
+    const origins = params.getAll('origin').filter(Boolean).sort()
+    const key = JSON.stringify([params.get('q') ?? '', archive, section, source, profile, focus, sources, origins, collections, lifecycles, verified, topicSort])
+
+    if (restoredDirectoryFocus.current === key) {return}
+    restoredDirectoryFocus.current = key
+    let active = true
+
+    void (async () => {
+      await store.directory.setBrowseQuery({ search: params.get('q') ?? '', archive, sources, origins, collections, lifecycles, verified, topicSort })
+
+      if (!active || restoredDirectoryFocus.current !== key) {return}
+
+      if (!focus || !profile) {
+        store.directory.clearDetail()
+
+        return
+      }
+
+      mainRef.current?.scrollTo?.({ top: 0 })
+
+      if (section === 'projects') {await store.directory.openProject(profile, focus, source)}
+
+      if (section === 'sessions') {await store.directory.openSession(profile, focus, source)}
+
+      if (section === 'topics') {await store.directory.openTopic(profile, focus, source)}
+    })()
+
+    return () => {active = false}
+  }, [companion.phase, locationSearch, screen, store])
 
   if (companion.phase === 'setup' || companion.phase === 'connecting') {
     return <SetupScreen canForgetSavedToken={companion.canForgetSavedToken} connecting={companion.phase === 'connecting'} error={companion.error} hasSavedToken={companion.hasSavedToken} initialBaseUrl={companion.baseUrl} onConnect={(baseUrl, token) => store.configure({ baseUrl, token })} onForgetSavedToken={store.forgetSavedToken} onOwnerConnect={(baseUrl) => store.configureOwner({ baseUrl })} ownerAuthAvailable={companion.ownerAuthAvailable} storesTokenEncrypted={companion.storesTokenEncrypted} warnings={companion.warnings} />
@@ -63,8 +163,8 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
   }
 
   const content = (() => {
-    if (((companion.phase === 'disconnected' || companion.phase === 'recovering') && screen !== 'attention') || screen === 'recovery') {
-      return <><Recovery error={companion.error} hasDraft={Boolean(companion.draft)} onBack={companion.phase === 'disconnected' ? undefined : () => setScreen('attention')} onRetry={() => void store.recover()} recovering={companion.phase === 'recovering'} teammateName={selected?.name} turnUncertain={companion.turnStatus === 'uncertain'} />
+    if (((companion.phase === 'disconnected' || companion.phase === 'recovering') && screen !== 'needs') || screen === 'recovery') {
+      return <><Recovery error={companion.error} hasDraft={Boolean(companion.draft)} onBack={companion.phase === 'disconnected' ? undefined : () => navigate('needs')} onRetry={() => void store.recover()} recovering={companion.phase === 'recovering'} teammateName={selected?.name} turnUncertain={companion.turnStatus === 'uncertain'} />
         <OwnerSignIn baseUrl={companion.baseUrl} onOwnerConnect={store.connectOwner} onOwnerSignOut={store.signOutOwner} ownerConnected={false} /></>
     }
 
@@ -76,16 +176,20 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
         : <ChooseTeammate onBack={() => setScreen('teammates')} />
     }
 
-    if (screen === 'attention') {return <>
+    if (screen === 'needs') {return <>
       {companion.phase !== 'ready' && <button disabled={companion.phase === 'recovering'} onClick={() => void store.recover()} type="button">Reconnect to verify work</button>}
       <OwnerSignIn baseUrl={companion.baseUrl} onOwnerConnect={store.connectOwner} onOwnerSignOut={store.signOutOwner} ownerConnected={companion.connectionMode === 'owner' && companion.phase === 'ready'} />
-      <WorkInbox {...work} onClose={store.work.close} onComment={store.work.comment} onDecision={store.work.decide} onOpen={(profile, id) => void store.work.open(profile, id)} onRefresh={() => void store.work.refresh()} />
+      <WorkInbox {...work} onClose={store.work.close} onComment={store.work.comment} onDecision={store.work.decide} onGroupBy={(groupBy) => void store.work.setGroupBy(groupBy)} onOpen={(profile, id) => void store.work.open(profile, id)} onRefresh={() => void store.work.refresh()} />
       <NeedsMe items={companion.attentionItems} onOpen={(item) => { if (companion.phase === 'ready') {void store.openAttention(item).then(() => setScreen('conversation'))} }} onRefresh={() => void store.refreshAttention()} scope={companion.attentionScope} />
     </>}
 
+    if (screen === 'work') {return <WorkDirectory onBack={store.directory.clearDetail} onLoadOlder={(kind, profile) => void store.directory.loadOlder(kind, profile)} onLoadOlderHistory={() => void store.directory.loadOlderHistory()} onLoadOlderProjectSessions={() => void store.directory.loadOlderProjectSessions()} onNavigate={navigateParams} onRefresh={() => void store.directory.refresh()} params={new URLSearchParams(locationSearch)} snapshot={directory} />}
+
+    if (screen === 'library') {return <Library gateway={store.library} onNavigate={navigateParams} params={new URLSearchParams(locationSearch)} />}
+
     if (screen === 'details' && selected) {return <TeammateDetails onBack={() => setScreen('teammates')} onMessage={() => setScreen('conversation')} onOpenSession={(id) => { void store.selectTeammate(selected.id, id).then(() => setScreen('conversation')) }} onPin={(id, pinned) => void store.setSessionPinned(id, pinned)} sessions={companion.recentSessions} sessionsLoading={companion.sessionsLoading} teammate={selected} />}
 
-    return <TeammatesHome attentionCount={attentionCount} onNeedsMe={() => setScreen('attention')} onQuickTask={(teammateId, text) => { void store.submitQuickTask(teammateId, text).then(() => setScreen('conversation')) }} onSelect={openTeammate} teammates={companion.teammates} />
+    return <TeammatesHome attentionCount={attentionCount} onNeedsMe={() => navigate('needs')} onQuickTask={(teammateId, text) => { void store.submitQuickTask(teammateId, text).then(() => setScreen('conversation')) }} onSelect={openTeammate} teammates={companion.teammates} />
   })()
 
   return (
@@ -94,9 +198,9 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
       <aside className="left-rail">
         <Wordmark />
         <nav aria-label="Main navigation" className="primary-nav">
-          <NavButton active={screen === 'teammates' || screen === 'details'} icon="⌂" label="Teammates" onClick={() => setScreen('teammates')} />
-          <NavButton active={screen === 'conversation'} icon="◌" label="Conversation" onClick={() => setScreen('conversation')} />
-          <NavButton active={screen === 'attention' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Needs Me" onClick={() => setScreen('attention')} />
+          <NavButton active={screen === 'needs' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Needs Me" onClick={() => navigate('needs')} />
+          <NavButton active={screen === 'work'} icon="◇" label="Work" onClick={() => navigate('work')} />
+          <NavButton active={screen === 'library'} icon="▤" label="Library" onClick={() => navigate('library')} />
         </nav>
         <div className="rail-roster"><div className="rail-section-title"><span>Teammates</span><span>{companion.teammates.length}</span></div><Roster compact onSelect={openTeammate} teammates={companion.teammates} /></div>
         <div className="connection"><span aria-hidden="true" /><div><strong>Companion is ready</strong><small>{companion.teammates.length} teammates available</small></div></div>
@@ -108,9 +212,9 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
         {content}
       </main>
       <nav aria-label="Mobile navigation" className="bottom-nav">
-        <NavButton active={screen === 'teammates' || screen === 'details'} icon="⌂" label="Teammates" onClick={() => setScreen('teammates')} />
-        <NavButton active={screen === 'conversation'} icon="◌" label="Chat" onClick={() => setScreen('conversation')} />
-        <NavButton active={screen === 'attention' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Needs Me" onClick={() => setScreen('attention')} />
+        <NavButton active={screen === 'needs' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Needs Me" onClick={() => navigate('needs')} />
+        <NavButton active={screen === 'work'} icon="◇" label="Work" onClick={() => navigate('work')} />
+        <NavButton active={screen === 'library'} icon="▤" label="Library" onClick={() => navigate('library')} />
       </nav>
     </div>
   )

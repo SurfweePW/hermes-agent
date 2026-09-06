@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 
 import pytest
 
@@ -18,7 +19,70 @@ def conn(tmp_path):
         c.close()
 
 
+def test_connect_readonly_missing_db_does_not_create_source(tmp_path):
+    path = tmp_path / "missing-profile" / "projects.db"
 
+    with pdb.connect_readonly(path) as read_conn:
+        assert read_conn is None
+
+    assert not path.exists()
+    assert not path.parent.exists()
+
+
+def test_connect_readonly_preserves_existing_source(tmp_path):
+    path = tmp_path / "projects.db"
+    write_conn = pdb.connect(path)
+    project_id = pdb.create_project(write_conn, name="Existing")
+    write_conn.close()
+    before_bytes = path.read_bytes()
+    before_mtime = path.stat().st_mtime_ns
+
+    with pdb.connect_readonly(path) as read_conn:
+        assert read_conn is not None
+        project = pdb.get_project(read_conn, project_id)
+        assert project is not None
+        assert project.name == "Existing"
+        with pytest.raises(sqlite3.OperationalError, match="readonly"):
+            pdb.create_project(read_conn, name="Must not persist")
+
+    assert path.read_bytes() == before_bytes
+    assert path.stat().st_mtime_ns == before_mtime
+
+
+def test_connect_readonly_rejects_database_symlink(tmp_path):
+    outside = tmp_path / "outside.db"
+    conn = pdb.connect(outside)
+    pdb.create_project(conn, name="Outside secret")
+    conn.close()
+    source = tmp_path / "profile" / "projects.db"
+    source.parent.mkdir()
+    source.symlink_to(outside)
+
+    with pytest.raises(ValueError, match="safe regular file"):
+        with pdb.connect_readonly(source):
+            pass
+
+
+def test_connect_readonly_detects_source_replacement_race(tmp_path, monkeypatch):
+    source = tmp_path / "projects.db"
+    conn = pdb.connect(source)
+    pdb.create_project(conn, name="Original")
+    conn.close()
+    outside = tmp_path / "outside.db"
+    conn = pdb.connect(outside)
+    pdb.create_project(conn, name="Outside secret")
+    conn.close()
+    real_connect = pdb.sqlite3.connect
+
+    def replace_then_connect(*args, **kwargs):
+        source.unlink()
+        source.symlink_to(outside)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(pdb.sqlite3, "connect", replace_then_connect)
+    with pytest.raises(ValueError, match="changed while it was opened|opened safely"):
+        with pdb.connect_readonly(source):
+            pass
 
 
 

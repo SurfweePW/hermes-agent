@@ -1,3 +1,4 @@
+import type { OrganizationGateway } from '../../gateway/organization-types'
 import type { WorkCapability, WorkCard, WorkDetail, WorkGateway } from '../../gateway/work-types'
 
 import type { WorkCardView, WorkDecisionInput, WorkInboxProps } from './work-inbox'
@@ -8,14 +9,18 @@ export interface WorkSnapshot {
   status: WorkInboxProps['status']
   pending: boolean
   message: string | null
+  groupBy: 'topic' | 'session' | 'project'
+  sources: readonly WorkSourceState[]
 }
+export interface WorkSourceState { profile: string; incomplete: boolean; status: 'verified' | 'unsupported' | 'error'; lastSuccess: string | null; message: string | null }
 export interface WorkStore {
   getSnapshot(): WorkSnapshot
   subscribe(listener: () => void): () => void
-  attach(gateway: Partial<WorkGateway>, profiles: string[]): Promise<void>
+  attach(gateway: Partial<WorkGateway & OrganizationGateway>, profiles: string[]): Promise<void>
   disconnect(): void
   reset(): void
   refresh(): Promise<void>
+  setGroupBy(groupBy: 'topic' | 'session' | 'project'): Promise<void>
   open(profile: string, id: string): Promise<void>
   close(): void
   decide(input: WorkDecisionInput): Promise<boolean>
@@ -27,7 +32,7 @@ function errorCode(error: unknown): number | undefined {
   return typeof error === 'object' && error !== null && 'code' in error ? Number(error.code) : undefined
 }
 
-function view(card: WorkCard, capability: WorkCapability | undefined, detail?: WorkDetail): WorkCardView {
+function view(card: WorkCard, capability: WorkCapability | undefined, detail?: WorkDetail, priority?: WorkCardView['priority']): WorkCardView {
   const snoozed = Boolean(card.snoozed_until && !card.attention_due)
   const decision = detail?.decisions.at(-1)
 
@@ -42,31 +47,40 @@ function view(card: WorkCard, capability: WorkCapability | undefined, detail?: W
     ...(card.snoozed_until ? { snoozedUntil: card.snoozed_until } : {}),
     preparationStatus: {
       not_authorized: 'Preparation not authorized',
-      dispatch_pending: 'Preparation approved — awaiting execution tracker handoff',
-      linked: 'Linked to execution tracker — not proof of running or completion',
-      completed: 'Preparation completed — publication still not authorized'
+      approved_task_linking_pending: 'Preparation approved — awaiting execution tracker task link',
+      linked_awaiting_triage: 'Linked to execution tracker — awaiting triage',
+      preparing: 'Preparation in progress — verified from the execution tracker',
+      prepared: 'Preparation completed — publication still not authorized',
+      blocked: 'Preparation blocked — review tracker evidence',
+      status_unavailable: 'Execution tracker status unavailable — handoff reconciliation required'
     }[card.preparation_status],
     ...(card.execution_link ? { executionAcknowledgedAt: card.execution_link.acknowledged_at } : {}),
+    ...(card.tracker_evidence ? { trackerEvidence: card.tracker_evidence } : {}),
+    ...(card.completion_evidence ? { completionEvidence: Array.isArray(card.completion_evidence) ? card.completion_evidence : [card.completion_evidence] } : {}),
     previews: card.execution_link ? [{ label: card.execution_link.execution_ref, url: card.execution_link.execution_ref }]
       : card.execution_ref ? [{ label: `Proposed tracker reference: ${card.execution_ref}`, url: card.execution_ref }] : [],
     decisionHistory: detail?.decisions.map((entry) => ({ id: entry.id, action: entry.action, revision: entry.revision, actor: entry.actor, reason: entry.reason, createdAt: entry.created_at, scope: entry.scope, snoozedUntil: entry.snoozed_until })) ?? [],
     discussion: detail?.comments.map((comment) => ({ id: comment.id, author: `${comment.actor} · Revision ${comment.revision} · ${comment.created_at}`, body: comment.text })) ?? [],
+    trackerStatusHistory: detail?.tracker_status_history ?? [],
     ...(!capability?.can_decide ? { readOnlyReason: capability?.reason || 'Human-authenticated dashboard login is required for business decisions.' } : {}),
+    ...(priority ? { priority } : {}),
     actionable: capability?.can_decide === true && card.state === 'needs_me' && card.attention_due && !snoozed
   }
 }
 
 /** In-memory verified projection only. Server owns all business state. */
 export function createWorkStore(): WorkStore {
-  let snapshot: WorkSnapshot = { items: [], selected: null, status: 'loading', pending: false, message: null }
+  let snapshot: WorkSnapshot = { items: [], selected: null, status: 'loading', pending: false, message: null, groupBy: 'topic', sources: [] }
   const listeners = new Set<() => void>()
-  let gateway: WorkGateway | null = null
+  let gateway: (WorkGateway & Partial<OrganizationGateway>) | null = null
   let profiles: string[] = []
   let epoch = 0
   let cards = new Map<string, WorkCard>()
+  let priorities = new Map<string, WorkCardView['priority']>()
   let capabilities = new Map<string, WorkCapability>()
   let detail: WorkDetail | null = null
   let selection: { profile: string; id: string } | null = null
+  let sourceStates = new Map<string, WorkSourceState>()
 
   const publish = (change: Partial<WorkSnapshot>) => {
     snapshot = { ...snapshot, ...change }
@@ -75,9 +89,16 @@ export function createWorkStore(): WorkStore {
   }
 
   const projection = () => ({
-    items: [...cards.values()].map((card) => view(card, capabilities.get(card.profile))),
-    selected: detail ? view(detail.item, capabilities.get(detail.item.profile), detail) : null
+    items: [...cards.values()].map((card) => view(card, capabilities.get(card.profile), undefined, priorities.get(key(card.profile, card.id)))),
+    selected: detail ? view(detail.item, capabilities.get(detail.item.profile), detail, priorities.get(key(detail.item.profile, detail.item.id))) : null
   })
+
+  const purgeUnauthorized = () => {
+    ++epoch; gateway = null; profiles = []
+    cards.clear(); priorities.clear(); capabilities.clear(); sourceStates.clear()
+    detail = null; selection = null
+    publish({ items: [], selected: null, status: 'error', pending: false, sources: [], message: 'This connection is not authorized to access work. Reconnect with a human-authenticated dashboard login.' })
+  }
 
   const refresh = async (afterMutation = false): Promise<void> => {
     if (!gateway || (snapshot.pending && !afterMutation)) {return}
@@ -85,22 +106,67 @@ export function createWorkStore(): WorkStore {
     const generation = ++epoch
     publish({ status: 'loading' })
 
-    try {
-      const responses = await Promise.all(profiles.map(async (profile) => ({ profile, capability: await client.workCapabilities(profile), list: await client.listWork(profile) })))
-      const nextDetail = selection ? await client.getWork(selection.profile, selection.id) : null
+    const responses = await Promise.all(profiles.map(async (profile) => {
+      try {
+        // Capability is the compatibility gate: do not issue newer Work or
+        // organization calls to a gateway that does not support durable Work.
+        const capability = await client.workCapabilities(profile)
 
-      if (generation !== epoch || gateway !== client) {return}
-      cards = new Map(responses.flatMap(({ list }) => list.items.map((card) => [key(card.profile, card.id), card] as const)))
-      capabilities = new Map(responses.map(({ profile, capability }) => [profile, capability]))
-      detail = nextDetail
+        const [list, recommended] = await Promise.all([
+          client.listWork(profile),
+          client.listNeedsMePriorities?.(profile, undefined, snapshot.groupBy).catch((error) => {
+            if (errorCode(error) === -32601) {return null}
+            throw error
+          }) ?? Promise.resolve(null)
+        ])
 
-      if (nextDetail) {cards.set(key(nextDetail.item.profile, nextDetail.item.id), nextDetail.item)}
-      const reasons = [...new Set(responses.filter(({ capability }) => !capability.can_decide).map(({ capability }) => capability.reason || 'Human-authenticated dashboard login is required for business decisions.'))]
-      publish({ ...projection(), status: 'verified', message: reasons.join(' ') || null })
-    } catch (error) {
-      if (generation !== epoch || gateway !== client) {return}
-      publish({ status: errorCode(error) === -32601 ? 'unsupported' : 'error', message: errorCode(error) === 4403 ? 'This connection is not authorized to access work. Reconnect with an authorized login.' : 'Unable to refresh persisted work. No decision was enabled.' })
+        return { ok: true as const, profile, capability, list, recommended }
+      } catch (error) {
+        return { ok: false as const, profile, error }
+      }
+    }))
+
+    if (generation !== epoch || gateway !== client) {return}
+    const successful = responses.filter((response): response is Extract<(typeof responses)[number], { ok: true }> => response.ok)
+    const failed = responses.filter((response): response is Extract<(typeof responses)[number], { ok: false }> => !response.ok)
+    const refreshedAt = new Date().toISOString()
+
+    if (failed.some(({ error }) => errorCode(error) === 4403)) {purgeUnauthorized(); return}
+
+    for (const response of successful) {
+      for (const existingKey of [...cards.keys()]) {
+        if (JSON.parse(existingKey)[0] === response.profile) {cards.delete(existingKey)}
+      }
+
+      for (const existingKey of [...priorities.keys()]) {
+        if (JSON.parse(existingKey)[0] === response.profile) {priorities.delete(existingKey)}
+      }
+
+      for (const card of response.list.items) {cards.set(key(card.profile, card.id), card)}
+      response.recommended?.groups.forEach((group, groupOrder) => group.items.forEach((item, itemOrder) => priorities.set(key(item.profile, item.work_id), { ...item, topicName: group.group.name, ...(group.group.collection ? { topicCollection: group.group.collection } : {}), groupOrder, itemOrder })))
+      capabilities.set(response.profile, response.capability)
+      sourceStates.set(response.profile, { profile: response.profile, incomplete: false, status: 'verified', lastSuccess: refreshedAt, message: null })
     }
+
+    for (const response of failed) {
+      const unsupported = errorCode(response.error) === -32601
+      sourceStates.set(response.profile, { profile: response.profile, incomplete: true, status: unsupported ? 'unsupported' : 'error', lastSuccess: sourceStates.get(response.profile)?.lastSuccess ?? null, message: unsupported ? 'Durable Work is unsupported by this source.' : errorCode(response.error) === 4403 ? 'This source is not authorized.' : 'Refresh failed; the last verified view is retained.' })
+    }
+
+    try {
+      detail = selection && successful.some(({ profile }) => profile === selection?.profile) ? await client.getWork(selection.profile, selection.id) : detail
+    } catch (error) {
+      if (errorCode(error) === 4403) {purgeUnauthorized(); return}
+      // Keep the last verified detail; source coverage already communicates an incomplete refresh.
+    }
+
+    if (generation !== epoch || gateway !== client) {return}
+
+    if (detail) {cards.set(key(detail.item.profile, detail.item.id), detail.item)}
+    const reasons = [...new Set(successful.filter(({ capability }) => !capability.can_decide).map(({ capability }) => capability.reason || 'Human-authenticated dashboard login is required for business decisions.'))]
+    const incomplete = failed.length ? `${failed.length} of ${responses.length} work sources incomplete.` : ''
+    const status = successful.length ? 'verified' : failed.every(({ error }) => errorCode(error) === -32601) ? 'unsupported' : 'error'
+    publish({ ...projection(), status, sources: profiles.map((profile) => sourceStates.get(profile)!).filter(Boolean), message: [incomplete, ...reasons].filter(Boolean).join(' ') || null })
   }
 
   const mutate = async (input: WorkDecisionInput | { text: string }): Promise<boolean> => {
@@ -143,8 +209,10 @@ export function createWorkStore(): WorkStore {
       if (errorCode(error) === 4409) {
         await refresh()
         publish({ message: 'This card changed or the decision is no longer valid. The latest revision was requested; review it before deciding again. Nothing was automatically retried.' })
+      } else if (errorCode(error) === 4403) {
+        purgeUnauthorized()
       } else {
-        publish({ message: errorCode(error) === 4403 ? 'This login cannot make business decisions. Reconnect with a human-authenticated dashboard login and refresh.' : 'Save could not be verified. Refresh before trying again; it may already have reached the server.' })
+        publish({ message: 'Save could not be verified. Refresh before trying again; it may already have reached the server.' })
       }
 
       return false
@@ -167,13 +235,21 @@ export function createWorkStore(): WorkStore {
         return
       }
 
-      gateway = candidate as WorkGateway
+      gateway = candidate as WorkGateway & Partial<OrganizationGateway>
       publish({ pending: false })
       await refresh()
     },
     disconnect() {++epoch; gateway = null; publish({ status: 'offline', pending: false })},
-    reset() {++epoch; gateway = null; cards.clear(); capabilities.clear(); detail = null; selection = null; publish({ items: [], selected: null, status: 'loading', pending: false, message: null })},
+    reset() {++epoch; gateway = null; cards.clear(); priorities.clear(); capabilities.clear(); sourceStates.clear(); detail = null; selection = null; publish({ items: [], selected: null, status: 'loading', pending: false, message: null, groupBy: 'topic', sources: [] })},
     refresh,
+    async setGroupBy(groupBy) {
+      if (snapshot.groupBy === groupBy || snapshot.pending) {return}
+      priorities.clear()
+      publish({ groupBy, selected: null })
+      selection = null
+      detail = null
+      await refresh()
+    },
     async open(profile, id) {
       if (snapshot.pending || !profiles.includes(profile)) {return}
       selection = { profile, id }

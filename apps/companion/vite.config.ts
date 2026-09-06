@@ -5,7 +5,8 @@ export default defineConfig({
   base: './',
   plugins: [react()],
   build: {
-    outDir: 'dist/web'
+    outDir: 'dist/web',
+    target: 'chrome69'
   },
   test: {
     environment: 'jsdom',

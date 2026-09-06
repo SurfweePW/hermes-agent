@@ -11,6 +11,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -150,6 +151,65 @@ def connect_closing(db_path: Optional[Path] = None):
     finally:
         with contextlib.suppress(Exception):
             conn.close()
+
+
+@contextlib.contextmanager
+def connect_readonly(db_path: Optional[Path] = None):
+    """Open an existing projects DB without schema, journal, or data writes.
+
+    Companion source browsing must not initialize or migrate the Desktop-owned
+    store merely because a client opened a directory.  A missing database is
+    represented by ``None`` (an exact empty named-project population).
+    """
+    path = Path(db_path if db_path is not None else projects_db_path())
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        fd = os.open(absolute, flags)
+    except FileNotFoundError:
+        yield None
+        return
+    except OSError as exc:
+        raise ValueError("projects database is not a safe regular file") from exc
+
+    conn = None
+    try:
+        opened = os.fstat(fd)
+        current = os.lstat(absolute)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or stat.S_ISLNK(current.st_mode)
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            or absolute.resolve(strict=True) != absolute
+        ):
+            raise ValueError("projects database is not a safe canonical regular file")
+
+        # SQLite's nofollow VFS flag closes the validation/open race.  The held
+        # descriptor and inode checks additionally detect replacement while a
+        # read is in flight, without creating or migrating the source DB.
+        uri = f"{absolute.as_uri()}?mode=ro&nofollow=1"
+        conn = sqlite3.connect(uri, uri=True)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        current = os.lstat(absolute)
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise ValueError("projects database changed while it was opened")
+        yield conn
+        current = os.lstat(absolute)
+        if (
+            stat.S_ISLNK(current.st_mode)
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise ValueError("projects database changed during read")
+    except sqlite3.Error as exc:
+        raise ValueError("projects database could not be opened safely") from exc
+    finally:
+        if conn is not None:
+            conn.close()
+        os.close(fd)
 
 
 @dataclass

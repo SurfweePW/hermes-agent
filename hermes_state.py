@@ -556,11 +556,35 @@ class SessionDB(
                 time.sleep(_READ_ONLY_IOERR_RETRY_BACKOFF_S)
 
     def _connect_read_only(self, timeout: float) -> sqlite3.Connection:
-        """``mode=ro`` tracked connection with Row factory. check_same_thread=False: pooled connections
-        are borrowed by whichever thread reads next; exclusive ownership is enforced by pool checkout."""
+        """Open a canonical regular DB through SQLite's read-only no-follow VFS.
+
+        ``check_same_thread=False`` is safe because pooled connections are exclusively
+        owned by one borrower at a time.  Canonical-path validation rejects both file
+        and parent-directory symlinks before SQLite opens the source.
+        """
+        if sqlite3.sqlite_version_info < (3, 31, 0):
+            raise sqlite3.NotSupportedError("read-only database no-follow opens are unsupported")
+        absolute_db_path = Path(os.path.abspath(os.fspath(self.db_path)))
+        try:
+            if (
+                absolute_db_path.is_symlink()
+                or not absolute_db_path.is_file()
+                or absolute_db_path.resolve(strict=True) != absolute_db_path
+            ):
+                raise sqlite3.OperationalError(
+                    "read-only database path is not a canonical regular file"
+                )
+        except (OSError, RuntimeError) as exc:
+            raise sqlite3.OperationalError(
+                "read-only database path is not a canonical regular file"
+            ) from exc
         conn = _connect_tracked_db(
-            f"file:{self.db_path}?mode=ro", tracking_path=self.db_path, uri=True,
-            check_same_thread=False, timeout=timeout, isolation_level=None,
+            f"{absolute_db_path.as_uri()}?mode=ro&nofollow=1",
+            tracking_path=self.db_path,
+            uri=True,
+            check_same_thread=False,
+            timeout=timeout,
+            isolation_level=None,
         )
         conn.row_factory = sqlite3.Row
         return conn

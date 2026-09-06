@@ -5,6 +5,20 @@ import {
   JsonRpcGatewayClient
 } from '@hermes/shared'
 
+import {
+  type LibraryChunkOptions,
+  type LibraryListOptions,
+  type LibraryPinOptions,
+  validateLibraryCapabilities,
+  validateLibraryChunk,
+  validateLibraryDetail,
+  validateLibraryList,
+  validateLibraryProfiles
+} from '../features/library/library-types'
+
+import { validateNeedsMePriorities } from './organization-types'
+import type { TopicDetail, TopicListOptions, TopicListResult } from './topic-types'
+import { validateTopicDetail, validateTopicList } from './topic-validation'
 import type {
   ApprovalChoice,
   ApprovalRequestPayload,
@@ -12,6 +26,15 @@ import type {
   AttentionListResult,
   CompanionEvent,
   CompanionEventHandler,
+  CompanionHistoryEntry,
+  CompanionProject,
+  CompanionProjectDetail,
+  CompanionProjectListOptions,
+  CompanionProjectListResult,
+  CompanionSession,
+  CompanionSessionHistoryResult,
+  CompanionSessionListOptions,
+  CompanionSessionListResult,
   CreateSessionOptions,
   GatewayAttentionItem,
   GatewaySessionSummary,
@@ -123,6 +146,221 @@ function validatedSessions(value: unknown): SessionListResult {
   })
 
   return { sessions }
+}
+
+const directoryError = (method: string): never => {throw new Error(`Malformed ${method} response.`)}
+
+const optionalCursor = (record: Record<string, unknown>, method: string): string | null => {
+  if (record.next_cursor !== null && typeof record.next_cursor !== 'string') {return directoryError(method)}
+
+  if (typeof record.has_more !== 'boolean' || (record.has_more && !record.next_cursor)) {return directoryError(method)}
+
+  return record.next_cursor
+}
+
+const nonNegativeInteger = (value: unknown, method: string): number => {
+  if (!Number.isInteger(value) || (value as number) < 0) {return directoryError(method)}
+
+  return value as number
+}
+
+const timestamp = (value: unknown, method: string): string | null => {
+  if (value === null || value === undefined || value === 0 || value === '') {return null}
+  const date = typeof value === 'number' && Number.isFinite(value) ? new Date(value * 1000) : typeof value === 'string' ? new Date(value) : null
+
+  if (!date || !Number.isFinite(date.valueOf())) {return directoryError(method)}
+
+  return date.toISOString()
+}
+
+const warnings = (value: unknown, method: string): string[] => {
+  if (!Array.isArray(value) || !value.every((item): item is string => typeof item === 'string')) {return directoryError(method)}
+
+  return [...value]
+}
+
+const backendProfile = (record: Record<string, unknown>, method: string, expectedProfile?: string) => {
+  const profile = requiredString(record, 'profile', `Malformed ${method} response.`)
+  const source = requiredString(record, 'backend_namespace', `Malformed ${method} response.`)
+
+  if (!profile || !source || (expectedProfile !== undefined && profile !== expectedProfile)) {return directoryError(method)}
+
+  return { profile, source }
+}
+
+const projectTypes = new Set(['desktop_project', 'business_project', 'discovered_repository', 'unknown'])
+
+const projectFromRaw = (value: unknown, method: string, freshness: string, expectedProfile?: string, expectedSource?: string): CompanionProject => {
+  if (!isRecord(value) || typeof value.archived !== 'boolean') {return directoryError(method)}
+  const type = value.kind
+
+  if (typeof type !== 'string' || !projectTypes.has(type)) {return directoryError(method)}
+  const { profile, source } = backendProfile(value, method, expectedProfile)
+
+  if (expectedSource !== undefined && source !== expectedSource) {return directoryError(method)}
+  const sessionCount = value.session_count === null || value.session_count === undefined ? null : nonNegativeInteger(value.session_count, method)
+
+  return {
+    id: requiredString(value, 'id', `Malformed ${method} response.`),
+    title: requiredString(value, 'name', `Malformed ${method} response.`),
+    profile,
+    source,
+    type: type as CompanionProject['type'],
+    archived: value.archived,
+    last_active: timestamp(value.last_active, method),
+    session_count: sessionCount,
+    linked_work_count: null,
+    freshness
+  }
+}
+
+const sessionFromListRaw = (value: unknown, method: string, profile: string, source: string): CompanionSession => {
+  if (!isRecord(value) || typeof value.archived !== 'boolean' || typeof value.hidden !== 'boolean') {return directoryError(method)}
+  const identity = value.identity
+
+  if (!isRecord(identity) || identity.profile !== profile || identity.backend_namespace !== source) {return directoryError(method)}
+  const id = requiredString(value, 'root_id', `Malformed ${method} response.`)
+
+  if (identity.root_id !== id) {return directoryError(method)}
+  const origin = requiredString(value, 'origin', `Malformed ${method} response.`)
+
+  return {
+    id,
+    title: requiredString(value, 'title', `Malformed ${method} response.`),
+    profile,
+    source,
+    origin: origin || null,
+    opened_in: [],
+    archived: value.archived,
+    hidden: value.hidden,
+    started_at: timestamp(value.started_at, method),
+    last_active: timestamp(value.last_active, method),
+    status: null,
+    project: null,
+    linked_work_count: null,
+    message_count: nonNegativeInteger(value.message_count, method)
+  }
+}
+
+const sessionFromProjectRaw = (value: unknown, method: string, profile: string, source: string): CompanionSession => {
+  if (!isRecord(value)) {return directoryError(method)}
+  const id = requiredString(value, 'id', `Malformed ${method} response.`)
+  const origin = typeof value.source === 'string' ? value.source : ''
+
+  return {
+    id,
+    title: typeof value.title === 'string' ? value.title : '',
+    profile,
+    source,
+    origin: origin || null,
+    opened_in: [],
+    archived: value.archived === true,
+    hidden: false,
+    started_at: timestamp(value.started_at, method),
+    last_active: timestamp(value.last_active, method),
+    status: null,
+    project: null,
+    linked_work_count: null,
+    message_count: value.message_count === undefined ? null : nonNegativeInteger(value.message_count, method)
+  }
+}
+
+export function validateCompanionSessionList(value: unknown, expectedProfile?: string): CompanionSessionListResult {
+  const method = 'companion.sessions.list'
+
+  if (!isRecord(value) || !Array.isArray(value.items) || typeof value.coverage !== 'string') {return directoryError(method)}
+  const { profile, source } = backendProfile(value, method, expectedProfile)
+  const warningList = warnings(value.warnings, method)
+
+  return {
+    sessions: value.items.map((item) => sessionFromListRaw(item, method, profile, source)),
+    has_more: value.has_more as boolean,
+    next_cursor: optionalCursor(value, method),
+    coverage: { complete: value.coverage === 'complete', freshness: timestamp(value.as_of, method), message: warningList.join(' ') || null }
+  }
+}
+
+export function validateCompanionProjectList(value: unknown, expectedProfile?: string): CompanionProjectListResult {
+  const method = 'companion.projects.list'
+
+  if (!isRecord(value) || !Array.isArray(value.items) || !isRecord(value.coverage)) {return directoryError(method)}
+  const { profile, source } = backendProfile(value, method, expectedProfile)
+  const asOf = timestamp(value.as_of, method)
+
+  if (!asOf) {return directoryError(method)}
+  const warningList = warnings(value.warnings, method)
+
+  return {
+    projects: value.items.map((item) => projectFromRaw(item, method, asOf, profile, source)),
+    has_more: value.has_more as boolean,
+    next_cursor: optionalCursor(value, method),
+    coverage: { complete: value.coverage.named_projects === 'complete' && value.coverage.membership === 'complete', freshness: asOf, message: warningList.join(' ') || null }
+  }
+}
+
+export function validateCompanionSessionHistory(value: unknown, profile: string, id: string, expectedSource?: string): CompanionSessionHistoryResult {
+  const method = 'companion.sessions.history'
+
+  if (!isRecord(value) || !Array.isArray(value.items) || !isRecord(value.identity) || value.identity.profile !== profile || value.identity.root_id !== id) {return directoryError(method)}
+  const source = requiredString(value.identity, 'backend_namespace', `Malformed ${method} response.`)
+
+  if (!source || (expectedSource !== undefined && source !== expectedSource)) {return directoryError(method)}
+
+  const entries = value.items.map((entry): CompanionHistoryEntry => {
+    if (!isRecord(entry) || !Number.isInteger(entry.row_id) || typeof entry.timestamp !== 'number' || !Number.isFinite(entry.timestamp)) {return directoryError(method)}
+
+    if (entry.kind === 'message') {
+      if ((entry.role !== 'user' && entry.role !== 'assistant' && entry.role !== 'system') || typeof entry.text !== 'string') {return directoryError(method)}
+
+      const compression = (entry.role === 'user' || entry.role === 'assistant') && (entry.text.startsWith('[CONTEXT SUMMARY]:') || entry.text.includes('[END OF PRIOR CONTEXT — COMPACTION SUMMARY BELOW]') || entry.text.trimEnd().endsWith('--- END OF CONTEXT SUMMARY — respond to the message below, not the summary above ---'))
+
+      return { id: String(entry.row_id), kind: compression ? 'compression' : 'message', role: entry.role, content: entry.text, label: compression ? 'Compression summary' : null, occurred_at: timestamp(entry.timestamp, method) }
+    }
+
+    if (entry.kind !== 'internal_event' || typeof entry.label !== 'string' || entry.collapsed !== true) {return directoryError(method)}
+
+    return { id: String(entry.row_id), kind: 'internal', role: null, content: '', label: entry.label, occurred_at: timestamp(entry.timestamp, method) }
+  })
+
+  const warningList = warnings(value.warnings, method)
+
+  return {
+    session_id: id,
+    profile,
+    source,
+    entries,
+    linked_work: [],
+    linked_work_available: false,
+    has_more: value.has_more as boolean,
+    next_cursor: optionalCursor(value, method),
+    coverage: { complete: value.coverage === 'complete', freshness: timestamp(value.as_of, method), message: warningList.join(' ') || null }
+  }
+}
+
+export function validateCompanionProjectDetail(value: unknown, profile: string, id: string): CompanionProjectDetail {
+  const method = 'companion.projects.get'
+
+  if (!isRecord(value) || !isRecord(value.item) || !isRecord(value.membership) || !Array.isArray(value.membership.items) || typeof value.membership.coverage !== 'string') {return directoryError(method)}
+  const asOf = timestamp(value.as_of, method)
+
+  if (!asOf) {return directoryError(method)}
+  const envelope = backendProfile(value, method, profile)
+  const project = projectFromRaw(value.item, method, asOf, profile, envelope.source)
+
+  if (project.id !== id) {return directoryError(method)}
+  const warningList = warnings(value.warnings, method)
+
+  return {
+    project,
+    sessions: value.membership.items.map((item) => sessionFromProjectRaw(item, method, profile, project.source)),
+    topics: [],
+    needs_me: [],
+    work: [],
+    organization_available: false,
+    membership_has_more: value.membership.has_more as boolean,
+    membership_next_cursor: optionalCursor(value.membership, method),
+    coverage: { complete: value.membership.coverage === 'complete', freshness: asOf, message: warningList.join(' ') || null }
+  }
 }
 
 function validatedAttention(value: unknown): AttentionListResult {
@@ -358,12 +596,92 @@ export class CompanionClient {
     return this.gateway.request<unknown>('session.list', params).then(validatedSessions)
   }
 
+  listCompanionSessions(options: CompanionSessionListOptions): Promise<CompanionSessionListResult> {
+    const params: Record<string, unknown> = { profile: options.profile }
+
+    if (options.limit !== undefined) {params.limit = options.limit}
+
+    if (options.cursor !== undefined) {params.cursor = options.cursor}
+
+    if (options.view !== undefined) {params.view = options.view}
+
+    if (options.origins !== undefined) {params.origin = options.origins}
+
+    if (options.sources !== undefined) {params.backend_namespace = options.sources}
+
+    if (options.search !== undefined) {params.search = options.search}
+
+    return this.gateway.request<unknown>('companion.sessions.list', params).then((value) => validateCompanionSessionList(value, options.profile))
+  }
+
+  getCompanionSessionHistory(profile: string, id: string, cursor?: string, expectedSource?: string): Promise<CompanionSessionHistoryResult> {
+    return this.gateway.request<unknown>('companion.sessions.history', { profile, session_id: id, ...(cursor ? { cursor } : {}) }).then((value) => validateCompanionSessionHistory(value, profile, id, expectedSource))
+  }
+
+  listCompanionProjects(options: CompanionProjectListOptions): Promise<CompanionProjectListResult> {
+    const params: Record<string, unknown> = { profile: options.profile }
+
+    if (options.limit !== undefined) {params.limit = options.limit}
+
+    if (options.cursor !== undefined) {params.cursor = options.cursor}
+
+    if (options.archived !== undefined) {params.archived = options.archived}
+
+    return this.gateway.request<unknown>('companion.projects.list', params).then((value) => validateCompanionProjectList(value, options.profile))
+  }
+
+  getCompanionProject(profile: string, id: string, cursor?: string): Promise<CompanionProjectDetail> {
+    return this.gateway.request<unknown>('companion.projects.get', { profile, id, ...(cursor ? { cursor } : {}) }).then((value) => validateCompanionProjectDetail(value, profile, id))
+  }
+
+  listCompanionTopics(options: TopicListOptions): Promise<TopicListResult> {
+    const { profile, ...filters } = options
+
+    return this.gateway.request<unknown>('companion.topics.list', { profile, ...filters }).then((value) => validateTopicList(value, profile))
+  }
+
+  getCompanionTopic(profile: string, id: string): Promise<TopicDetail> {
+    return this.gateway.request<unknown>('companion.topics.get', { profile, id }).then((value) => validateTopicDetail(value, profile, id))
+  }
+
+  libraryCapabilities() {
+    return this.gateway.request<unknown>('companion.library.capabilities', {}).then(validateLibraryCapabilities)
+  }
+
+  libraryProfiles() {
+    return this.gateway.request<unknown>('companion.library.profiles', {}).then(validateLibraryProfiles)
+  }
+
+  listLibrary(options: LibraryListOptions = {}) {
+    return this.gateway.request<unknown>('companion.library.list', { ...options }).then(validateLibraryList)
+  }
+
+  getLibraryArtifact(artifactId: string, profile?: string) {
+    return this.gateway.request<unknown>('companion.library.get', { artifact_id: artifactId, ...(profile ? { profile } : {}) }).then(validateLibraryDetail)
+  }
+
+  previewLibraryArtifact(options: LibraryChunkOptions) {
+    return this.gateway.request<unknown>('companion.library.preview', { ...options }).then((value) => validateLibraryChunk(value, 'companion.library.preview'))
+  }
+
+  downloadLibraryArtifact(options: LibraryChunkOptions) {
+    return this.gateway.request<unknown>('companion.library.download', { ...options }).then((value) => validateLibraryChunk(value, 'companion.library.download'))
+  }
+
+  pinReviewedLibraryArtifact(options: LibraryPinOptions) {
+    return this.gateway.request<unknown>('companion.library.pin_reviewed', { ...options })
+  }
+
   setSessionPinned(profile: string, sessionId: string, pinned: boolean): Promise<SetPinnedResult> {
     return this.gateway.request('session.set_pinned', { profile, session_id: sessionId, pinned })
   }
 
   workCapabilities(profile: string) {
     return this.gateway.request<unknown>('work.capabilities', { profile }).then(validateWorkCapability)
+  }
+
+  listNeedsMePriorities(profile: string, reviewId?: string, groupBy: 'topic' | 'session' | 'project' = 'topic') {
+    return this.gateway.request<unknown>('companion.organization.needs_me', { profile, group_by: groupBy, ...(reviewId ? { review_id: reviewId } : {}) }).then((value) => validateNeedsMePriorities(value, profile))
   }
 
   listWork(profile: string) {

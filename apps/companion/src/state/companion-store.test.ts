@@ -775,6 +775,29 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     expect(store.getSnapshot()).toMatchObject({ phase: 'disconnected', connectionMode: 'shared' })
   })
 
+  it('purges owner-only Work and directory caches before sign-out completes', async () => {
+    const signOut = deferred<void>()
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(), ownerStatus: vi.fn(async () => ({ signedIn: true })),
+      ownerSignOut: vi.fn(() => signOut.promise),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket')
+    }
+    const { createFakeWorkGateway } = await import('../fixtures/fake-work-gateway')
+    const store = createCompanionStore({ gatewayFactory: createFakeWorkGateway, ownerAuthBridge: ownerAuth, storage: { getItem: () => null, setItem: () => undefined } })
+    await store.configureOwner({ baseUrl: 'https://gateway.test' })
+    await store.work.open('atlas', 'fixture-review')
+    await store.directory.openSession('atlas', 'synthetic-session-1', 'fixture-mac-mini')
+    expect(store.work.getSnapshot().selected?.discussion?.[0]?.body).toContain('Synthetic discussion')
+    expect(store.directory.getSnapshot().history?.entries[0]?.content).toContain('Synthetic request')
+
+    const signingOut = store.signOutOwner()
+    expect(store.work.getSnapshot()).toMatchObject({ items: [], selected: null, sources: [] })
+    expect(store.directory.getSnapshot()).toMatchObject({ sessions: [], projects: [], topics: [], history: null })
+    expect(JSON.stringify(store.work.getSnapshot())).not.toContain('Synthetic discussion')
+    expect(JSON.stringify(store.directory.getSnapshot())).not.toContain('Synthetic request')
+    signOut.resolve(); await signingOut
+  })
+
   it('recovers owner mode with a fresh one-use ticket instead of the saved shared token', async () => {
     const ownerUrls = [
       'wss://gateway.test/api/ws?ticket=owner-ticket-one',

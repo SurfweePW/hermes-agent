@@ -203,6 +203,60 @@ class TestConnectionLifecycle:
 
         assert not any("wal_checkpoint" in sql.lower() for sql in executed)
 
+    def test_read_only_open_uses_canonical_nofollow_uri(self, tmp_path, monkeypatch):
+        db_path = tmp_path / "state db?#.sqlite"
+        writable = SessionDB(db_path=db_path)
+        writable.close()
+        opened = []
+        real_connect = hermes_state._connect_tracked_db
+
+        def capture_connect(database, **kwargs):
+            opened.append((database, kwargs))
+            return real_connect(database, **kwargs)
+
+        monkeypatch.setattr(hermes_state, "_connect_tracked_db", capture_connect)
+        read_only = SessionDB(db_path=db_path, read_only=True)
+        read_only.close()
+
+        assert len(opened) == 1
+        uri, kwargs = opened[0]
+        assert uri == f"{db_path.as_uri()}?mode=ro&nofollow=1"
+        assert kwargs["uri"] is True
+
+    def test_read_only_open_rejects_database_and_parent_symlinks(self, tmp_path):
+        real_dir = tmp_path / "real"
+        real_dir.mkdir()
+        db_path = real_dir / "state.db"
+        writable = SessionDB(db_path=db_path)
+        writable.close()
+
+        file_alias = tmp_path / "linked.db"
+        file_alias.symlink_to(db_path)
+        directory_alias = tmp_path / "linked-dir"
+        directory_alias.symlink_to(real_dir, target_is_directory=True)
+
+        for alias in (file_alias, directory_alias / "state.db"):
+            with pytest.raises(sqlite3.OperationalError, match="canonical regular file"):
+                SessionDB(db_path=alias, read_only=True)
+
+    def test_read_only_open_fails_closed_without_sqlite_nofollow(
+        self, tmp_path, monkeypatch
+    ):
+        db_path = tmp_path / "state.db"
+        writable = SessionDB(db_path=db_path)
+        writable.close()
+        opened = []
+        monkeypatch.setattr(hermes_state.sqlite3, "sqlite_version_info", (3, 30, 1))
+        monkeypatch.setattr(
+            hermes_state,
+            "_connect_tracked_db",
+            lambda *_args, **_kwargs: opened.append(True),
+        )
+
+        with pytest.raises(sqlite3.NotSupportedError, match="no-follow"):
+            SessionDB(db_path=db_path, read_only=True)
+        assert opened == []
+
     def test_writable_close_uses_passive_checkpoint(self, tmp_path):
         db_path = tmp_path / "state.db"
         writable = SessionDB(db_path=db_path)

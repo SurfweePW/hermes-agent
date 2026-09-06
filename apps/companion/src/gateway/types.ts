@@ -56,6 +56,122 @@ export interface SessionListOptions {
 
 export interface SessionListResult { sessions: GatewaySessionSummary[] }
 
+export interface CompanionCoverage {
+  complete: boolean
+  freshness: string | null
+  message: string | null
+}
+
+export interface CompanionEntityRef {
+  id: string
+  title: string
+  status?: string
+}
+
+export interface CompanionProjectRef extends CompanionEntityRef {
+  profile: string
+}
+
+export interface CompanionSession {
+  id: string
+  title: string
+  profile: string
+  source: string
+  origin: string | null
+  opened_in: string[]
+  archived: boolean
+  hidden: boolean
+  started_at: string | null
+  last_active: string | null
+  status: string | null
+  /** Authoritative persisted conversation kind when the source reports it. */
+  type?: string | null
+  project: CompanionProjectRef | null
+  /** Authoritative organization topic references when the source reports them. */
+  topics?: CompanionEntityRef[]
+  linked_work_count: number | null
+  message_count: number | null
+}
+
+export interface CompanionProject {
+  id: string
+  title: string
+  profile: string
+  source: string
+  type: 'desktop_project' | 'business_project' | 'discovered_repository' | 'unknown'
+  archived: boolean
+  last_active: string | null
+  session_count: number | null
+  linked_work_count: number | null
+  freshness: string | null
+}
+
+export interface CompanionSessionListOptions {
+  profile: string
+  limit?: number
+  cursor?: string
+  view?: 'active' | 'hidden' | 'archived' | 'all'
+  origins?: string[]
+  /** Exact persisted-session backend namespaces selected by the directory. */
+  sources?: string[]
+  search?: string
+}
+
+export interface CompanionProjectListOptions {
+  profile: string
+  limit?: number
+  cursor?: string
+  archived?: boolean
+}
+
+export interface CompanionSessionListResult {
+  sessions: CompanionSession[]
+  has_more: boolean
+  next_cursor: string | null
+  coverage: CompanionCoverage
+}
+
+export interface CompanionProjectListResult {
+  projects: CompanionProject[]
+  has_more: boolean
+  next_cursor: string | null
+  coverage: CompanionCoverage
+}
+
+export interface CompanionHistoryEntry {
+  id: string
+  kind: 'message' | 'internal' | 'compression'
+  role: 'user' | 'assistant' | 'system' | null
+  content: string
+  label: string | null
+  occurred_at: string | null
+}
+
+export interface CompanionSessionHistoryResult {
+  session_id: string
+  profile: string
+  /** Authoritative persisted-session backend namespace. */
+  source: string
+  entries: CompanionHistoryEntry[]
+  linked_work: CompanionEntityRef[]
+  linked_work_available: boolean
+  has_more: boolean
+  next_cursor: string | null
+  coverage: CompanionCoverage
+}
+
+export interface CompanionProjectDetail {
+  project: CompanionProject
+  sessions: CompanionSession[]
+  topics: CompanionEntityRef[]
+  needs_me: CompanionEntityRef[]
+  work: CompanionEntityRef[]
+  organization_available: boolean
+  membership_has_more: boolean
+  membership_next_cursor: string | null
+  coverage: CompanionCoverage
+}
+
 export type AttentionKind = 'approval' | 'question' | 'blocker' | 'completion' | 'error'
 export type AttentionResolution = 'approval' | 'open_session' | 'unsupported_here'
 export interface GatewayAttentionItem {

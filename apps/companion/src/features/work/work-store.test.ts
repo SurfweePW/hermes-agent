@@ -5,7 +5,7 @@ import type { WorkCard, WorkGateway } from '../../gateway/work-types'
 import { createWorkStore } from './work-store'
 
 const card: WorkCard = {
-  id: 'stable-id', profile: 'cmo', source_key: 'campaign:1', state: 'needs_me', title: 'Campaign', brief: 'Prepare', evidence: ['https://example.org'], next_action: 'Review', owner: 'Pawel', revision: 2, version: 4, created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z', snoozed_until: null, attention_due: true, attention_key: 'key', approval: null, preparation_status: 'not_authorized', handoff_key: null, execution_link: null
+  id: 'stable-id', profile: 'cmo', source_key: 'campaign:1', state: 'needs_me', title: 'Campaign', brief: 'Prepare', evidence: ['https://example.org'], next_action: 'Review', owner: 'Pawel', revision: 2, version: 4, created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z', snoozed_until: null, attention_due: true, attention_key: 'key', approval: null, preparation_status: 'not_authorized', handoff_key: null, execution_link: null, tracker_evidence: null, completion_evidence: null
 }
 
 function setup(canDecide = true) {
@@ -14,7 +14,7 @@ function setup(canDecide = true) {
   const gateway: WorkGateway = {
     workCapabilities: vi.fn(async () => ({ can_decide: canDecide, reason: canDecide ? null : 'Human dashboard login required' })),
     listWork: vi.fn(async () => ({ items: [current] })),
-    getWork: vi.fn(async () => ({ item: current, comments: [], decisions: [] })),
+    getWork: vi.fn(async () => ({ item: current, comments: [], decisions: [], tracker_status_history: [] })),
     decideWork: vi.fn(async () => {current = { ...current, state: 'in_progress', version: 5 };
 
  return { item: current } }),
@@ -33,7 +33,7 @@ describe('verified work store', () => {
     await store.open('atlas', 'fixture-review')
     expect(store.getSnapshot().selected?.decisionHistory?.[0]).toMatchObject({ revision: 1, action: 'request_changes' })
     await store.decide({ action: 'approve_preparation' })
-    expect(store.getSnapshot().selected).toMatchObject({ id: 'fixture-review', bucket: 'in_progress', preparationStatus: 'Preparation approved — awaiting execution tracker handoff', actionable: false })
+    expect(store.getSnapshot().selected).toMatchObject({ id: 'fixture-review', bucket: 'in_progress', preparationStatus: 'Preparation approved — awaiting execution tracker task link', actionable: false })
     expect(store.getSnapshot().selected?.decisionHistory).toHaveLength(2)
     expect(store.getSnapshot().selected?.executionAcknowledgedAt).toBeUndefined()
     await store.refresh()
@@ -44,9 +44,22 @@ describe('verified work store', () => {
     vi.mocked(gateway.decideWork).mockRejectedValue({ code: 4403 })
     expect(await store.decide({ action: 'approve_preparation' })).toBe(false)
     expect(store.getSnapshot().status).toBe('error')
+    expect(store.getSnapshot()).toMatchObject({ items: [], selected: null, sources: [] })
+    expect(JSON.stringify(store.getSnapshot())).not.toContain('Campaign')
+    expect(JSON.stringify(store.getSnapshot())).not.toContain('https://example.org')
     expect(store.getSnapshot().message).toMatch(/human-authenticated/)
     expect(await store.comment('blocked')).toBe(false)
     expect(gateway.commentWork).not.toHaveBeenCalled()
+  })
+
+  it('purges retained work and detail when refresh reports owner revocation', async () => {
+    const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
+    vi.mocked(gateway.workCapabilities).mockRejectedValue({ code: 4403 })
+    await store.refresh()
+
+    expect(store.getSnapshot()).toMatchObject({ items: [], selected: null, status: 'error', sources: [] })
+    expect(JSON.stringify(store.getSnapshot())).not.toContain('Campaign')
+    expect(JSON.stringify(store.getSnapshot())).not.toContain('https://example.org')
   })
 
   it('uses authoritative profile/id/version/revision and reads back mutations', async () => {
@@ -76,7 +89,7 @@ describe('verified work store', () => {
   it('keeps the exact mutation target locked until readback finishes', async () => {
     const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
     let finish!: () => void
-    vi.mocked(gateway.getWork).mockImplementation(() => new Promise((resolve) => {finish = () => resolve({ item: { ...card, state: 'in_progress' }, comments: [], decisions: [] })}))
+    vi.mocked(gateway.getWork).mockImplementation(() => new Promise((resolve) => {finish = () => resolve({ item: { ...card, state: 'in_progress' }, comments: [], decisions: [], tracker_status_history: [] })}))
     const result = store.decide({ action: 'approve_preparation' })
     await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
     expect(store.getSnapshot().pending).toBe(true)
@@ -118,6 +131,33 @@ describe('verified work store', () => {
     await store.attach(gateway, ['cmo'])
     expect(store.getSnapshot().status).toBe('unsupported')
     expect(gateway.listWork).not.toHaveBeenCalled()
+  })
+  it('joins recommended priority metadata to the authoritative work identity', async () => {
+    const { gateway, store } = setup()
+
+    const listNeedsMePriorities = vi.fn(async () => ({
+      profile: 'cmo', backend_namespace: 'test', sort: 'recommended' as const,
+      policy_version: 'v1', review_id: null, group_by: 'topic' as const, as_of: '2026-09-01T00:00:00Z',
+      coverage: { work: 'complete', organization: 'complete', authorization_filtered: true },
+      groups: [{
+        id: 'topic-1', eligibility: 'assessed' as const, eligible_action_count: 1,
+        why_here: 'Highest expected value',
+        group: { kind: 'topic' as const, id: 'topic-1', name: 'Launch', collection: 'Growth', objective: 'Ship' },
+        items: [{
+          profile: 'cmo', work_id: 'stable-id', candidate_id: 'candidate-1',
+          eligibility: 'assessed' as const, why_here: 'Unblocks launch', next_step: 'Review',
+          trade_off: 'Defers polish', assessed_at: null, evidence: [], assessment: null, override: null
+        }]
+      }]
+    }))
+
+    await store.attach(Object.assign(gateway, { listNeedsMePriorities }), ['cmo'])
+
+    expect(listNeedsMePriorities).toHaveBeenCalledWith('cmo', undefined, 'topic')
+    expect(store.getSnapshot().items[0]?.priority).toMatchObject({
+      work_id: 'stable-id', topicName: 'Launch', topicCollection: 'Growth',
+      groupOrder: 0, itemOrder: 0, why_here: 'Unblocks launch'
+    })
   })
   it('reconnect refreshes selection by stable profile and id', async () => {
     const { gateway, store, revise } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id'); store.disconnect(); revise()

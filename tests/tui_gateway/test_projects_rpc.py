@@ -10,8 +10,40 @@ from pathlib import Path
 
 import pytest
 
+from hermes_cli.dashboard_auth.ws_tickets import OwnerAuthorizationLease
 from hermes_constants import reset_hermes_home_override, set_hermes_home_override
 import tui_gateway.server as server
+from tui_gateway.transport import Transport, bind_transport, reset_transport
+
+
+class OwnerTransport(Transport):
+    def __init__(self, authorization):
+        self.companion_owner_authorization = authorization
+
+    def write(self, obj: dict) -> bool:
+        del obj
+        return True
+
+    def close(self) -> None:
+        pass
+
+
+@pytest.fixture(autouse=True)
+def _owner_transport(monkeypatch):
+    from tui_gateway import companion_library
+
+    monkeypatch.setattr(
+        companion_library,
+        "_owner_identity",
+        lambda identity: identity if identity == "basic:owner" else None,
+    )
+    token = bind_transport(
+        OwnerTransport(OwnerAuthorizationLease("basic:owner", float("inf")))
+    )
+    try:
+        yield
+    finally:
+        reset_transport(token)
 
 
 def _call(method, params=None):
@@ -59,13 +91,615 @@ def test_methods_registered():
         "projects.archive",
         "projects.set_active",
         "projects.for_cwd",
+        "companion.projects.list",
+        "companion.projects.get",
     ):
         assert m in server._methods
 
 
-def test_for_cwd_is_a_long_handler():
-    # git-probe handler must run off the dispatch thread.
-    assert "projects.for_cwd" in server._LONG_HANDLERS
+def test_companion_project_rpcs_reject_agent_shared_and_revoked_authority():
+    cases = (
+        OwnerTransport("agent:internal"),
+        OwnerTransport(None),
+        OwnerTransport(OwnerAuthorizationLease("basic:owner", 0.0)),
+    )
+    for transport in cases:
+        token = bind_transport(transport)
+        try:
+            for method, params in (
+                ("companion.projects.list", {}),
+                ("companion.projects.get", {"id": "private"}),
+            ):
+                response = server._methods[method]("denied", params)
+                assert response["error"]["code"] == 4403
+        finally:
+            reset_transport(token)
+
+
+def test_companion_project_rpc_sanitizes_unexpected_failures(monkeypatch):
+    from tui_gateway import methods_companion_projects
+
+    secret = "/private/profile/projects.db"
+    monkeypatch.setattr(
+        methods_companion_projects,
+        "execute",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError(secret)),
+    )
+
+    response = server._methods["companion.projects.list"]("failed", {})
+
+    assert response["error"] == {
+        "code": 5061,
+        "message": "project operation unavailable",
+    }
+    assert secret not in str(response)
+
+
+def test_companion_projects_lists_and_opens_empty_named_project(tmp_path):
+    created = _call("projects.create", {"name": "Empty desk"})["project"]
+
+    listing = _call("companion.projects.list", {"include_discovered": False})
+
+    assert listing["items"] == [
+        {
+            **created,
+            "kind": "desktop_project",
+            "profile": listing["profile"],
+            "backend_namespace": listing["backend_namespace"],
+            "source_namespace": {
+                "backend": listing["backend_namespace"],
+                "profile": listing["profile"],
+            },
+            "session_count": 0,
+            "last_active": 0.0,
+        }
+    ]
+    assert listing["next_cursor"] is None
+    assert listing["has_more"] is False
+    assert listing["total"] == 1
+    assert listing["coverage"]["named_projects"] == "complete"
+    assert listing["coverage"]["membership"] == "complete"
+    assert listing["warnings"] == []
+    assert listing["as_of"].endswith("Z")
+
+    detail = _call(
+        "companion.projects.get",
+        {"id": created["id"], "kind": "desktop_project"},
+    )
+    assert detail["item"]["id"] == created["id"]
+    assert detail["item"]["kind"] == "desktop_project"
+    assert detail["membership"]["project"]["id"] == created["id"]
+    assert detail["membership"]["project"]["sessionCount"] == 0
+    assert detail["membership"]["items"] == []
+    assert detail["membership"]["coverage"] == "complete"
+
+
+def test_companion_projects_archived_filter_preserves_source_state(tmp_path):
+    active = _call("projects.create", {"name": "Active"})["project"]
+    archived = _call("projects.create", {"name": "Archived"})["project"]
+    _call("projects.archive", {"id": archived["id"]})
+
+    all_items = _call("companion.projects.list", {"include_discovered": False})
+    active_items = _call(
+        "companion.projects.list",
+        {"include_discovered": False, "archived": False},
+    )
+    archived_items = _call(
+        "companion.projects.list",
+        {"include_discovered": False, "archived": True},
+    )
+
+    assert {item["id"] for item in all_items["items"]} == {active["id"], archived["id"]}
+    assert [item["id"] for item in active_items["items"]] == [active["id"]]
+    assert [item["id"] for item in archived_items["items"]] == [archived["id"]]
+    assert archived_items["items"][0]["archived"] is True
+    assert archived_items["total"] == 1
+
+
+def test_companion_projects_labels_discovered_repository_without_promoting_it(tmp_path):
+    repo = tmp_path / "discovered-only"
+    (repo / ".git").mkdir(parents=True)
+    _call("projects.record_repos", {"repos": [{"root": str(repo), "label": "Found"}]})
+
+    listing = _call("companion.projects.list")
+    discovered = next(item for item in listing["items"] if item["id"] == str(repo))
+
+    assert discovered["kind"] == "discovered_repository"
+    assert discovered["name"] == "Found"
+    assert discovered["archived"] is False
+    detail = _call(
+        "companion.projects.get",
+        {"id": str(repo), "kind": "discovered_repository"},
+    )
+    assert detail["item"]["kind"] == "discovered_repository"
+    assert detail["membership"]["project"]["isAuto"] is True
+
+
+def test_companion_project_membership_matches_authoritative_project_sessions(tmp_path):
+    folder = tmp_path / "owned"
+    folder.mkdir()
+    project = _call("projects.create", {"name": "Owned", "folders": [str(folder)]})[
+        "project"
+    ]
+    server._get_db().create_session("owned-session", "cli", cwd=str(folder))
+    server._get_db().append_message("owned-session", "user", "hello")
+
+    legacy = _call("projects.project_sessions", {"project_id": project["id"]})["project"]
+    detail = _call("companion.projects.get", {"id": project["id"]})
+
+    legacy_ids = {
+        session["id"]
+        for repo in legacy["repos"]
+        for group in repo["groups"]
+        for session in group["sessions"]
+    }
+    assert {item["id"] for item in detail["membership"]["items"]} == legacy_ids
+    assert detail["membership"]["project"]["sessionCount"] == legacy["sessionCount"]
+
+
+def test_companion_project_membership_reports_bounded_coverage_and_cursor(tmp_path):
+    from tui_gateway.companion_projects import _cursor
+
+    folder = tmp_path / "bounded"
+    folder.mkdir()
+    project = _call("projects.create", {"name": "Bounded", "folders": [str(folder)]})[
+        "project"
+    ]
+    db = server._get_db()
+    for index in range(2):
+        session_id = f"bounded-{index}"
+        db.create_session(session_id, "cli", cwd=str(folder))
+        db.append_message(session_id, "user", "hello")
+
+    detail = _call(
+        "companion.projects.get",
+        {"id": project["id"], "cursor": _cursor(0, 1)},
+    )
+
+    assert detail["membership"]["coverage"] == "bounded"
+    assert detail["membership"]["has_more"] is True
+    assert detail["membership"]["next_cursor"]
+    assert "total" not in detail["membership"]
+    assert detail["warnings"]
+
+
+def test_companion_membership_cursor_is_stable_when_sessions_are_inserted(tmp_path):
+    from tui_gateway.companion_projects import _cursor
+
+    folder = tmp_path / "stable-membership"
+    folder.mkdir()
+    project = _call("projects.create", {"name": "Stable", "folders": [str(folder)]})[
+        "project"
+    ]
+    db = server._get_db()
+    assert db is not None
+    original_ids = {f"stable-{index}" for index in range(3)}
+    for session_id in original_ids:
+        db.create_session(session_id, "cli", cwd=str(folder))
+        db.append_message(session_id, "user", "hello")
+
+    page = _call(
+        "companion.projects.get",
+        {"id": project["id"], "cursor": _cursor(0, 1)},
+    )
+    collected = [item["id"] for item in page["membership"]["items"]]
+    db.create_session("inserted-after-snapshot", "cli", cwd=str(folder))
+    db.append_message("inserted-after-snapshot", "user", "hello")
+
+    while page["next_cursor"] is not None:
+        page = _call(
+            "companion.projects.get",
+            {"id": project["id"], "cursor": page["next_cursor"]},
+        )
+        collected.extend(item["id"] for item in page["membership"]["items"])
+
+    assert len(collected) == len(set(collected))
+    assert set(collected) == original_ids
+    assert "inserted-after-snapshot" not in collected
+
+
+def test_companion_membership_traverses_every_fetch_batch(monkeypatch, tmp_path):
+    from tui_gateway import companion_projects as companion
+
+    folder = tmp_path / "multi-batch-membership"
+    folder.mkdir()
+    project = _call(
+        "projects.create", {"name": "Multi batch", "folders": [str(folder)]}
+    )["project"]
+    db = server._get_db()
+    assert db is not None
+    expected = {f"multi-batch-{index}" for index in range(7)}
+    for session_id in expected:
+        db.create_session(session_id, "cli", cwd=str(folder))
+        db.append_message(session_id, "user", "hello")
+    monkeypatch.setattr(companion, "_SESSION_FETCH_BATCH", 2)
+    monkeypatch.setattr(companion, "_SNAPSHOT_MEMORY_LIMIT", 1)
+
+    page = _call(
+        "companion.projects.get",
+        {"id": project["id"], "cursor": companion._cursor(0, 2)},
+    )
+    collected = list(page["membership"]["items"])
+    while page["next_cursor"]:
+        page = _call(
+            "companion.projects.get",
+            {"id": project["id"], "cursor": page["next_cursor"]},
+        )
+        collected.extend(page["membership"]["items"])
+
+    assert {item["id"] for item in collected} == expected
+    assert len(collected) == len(expected)
+    assert page["membership"]["coverage"] == "complete"
+    assert page["membership"]["total"] == len(expected)
+    assert page["has_more"] is False
+
+
+def test_companion_project_reads_do_not_call_source_mutators(monkeypatch, tmp_path):
+    from hermes_cli import projects_db as pdb
+
+    project = _call("projects.create", {"name": "Read only"})["project"]
+
+    def mutated(*_args, **_kwargs):
+        raise AssertionError("read RPC called a project mutator")
+
+    for name in (
+        "set_active",
+        "update_project",
+        "create_project",
+        "archive_project",
+        "restore_project",
+        "delete_project",
+        "record_discovered_repos",
+        "reconcile_discovered_repos_policy",
+    ):
+        monkeypatch.setattr(pdb, name, mutated)
+
+    assert _call("companion.projects.list")["items"]
+    assert _call("companion.projects.get", {"id": project["id"]})["item"]["id"] == project["id"]
+
+
+@pytest.mark.parametrize("profile", ["../atlas", "not-a-profile"])
+def test_companion_project_reads_fail_closed_for_unsafe_or_unknown_profile(profile):
+    for method, params in (
+        ("companion.projects.list", {"profile": profile}),
+        ("companion.projects.get", {"profile": profile, "id": "anything"}),
+    ):
+        response = server._methods[method](1, params)
+        assert response["error"]["code"] in {-32602, 4403, 4404}
+
+
+def test_companion_profile_allowlist_precedes_installed_profile_resolution(monkeypatch):
+    from tui_gateway import companion_projects as companion
+
+    probed = []
+    monkeypatch.setattr(
+        companion, "_owner_authorized_profiles", lambda _server: frozenset({"default"})
+    )
+    monkeypatch.setattr(
+        "hermes_cli.profiles.get_profile_dir",
+        lambda _name: probed.append(True),
+    )
+
+    with pytest.raises(companion.CompanionProjectsError, match="profile unavailable") as exc:
+        companion._resolve_profile(server, "coder")
+
+    assert exc.value.code == 4403
+    assert probed == []
+
+
+def test_companion_backend_namespace_is_stable_unique_and_non_secret(monkeypatch, tmp_path):
+    from tui_gateway import companion_projects as companion
+
+    monkeypatch.delenv("GATEWAY_RELAY_ID", raising=False)
+    monkeypatch.setenv("HERMES_MACHINE_ID", "public-test-machine")
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+
+    first = companion._backend_namespace(server)
+    second = companion._backend_namespace(server)
+
+    assert first == second
+    assert first.startswith("derived:")
+    assert first != "local"
+    assert "public-test-machine" not in first
+
+
+def test_companion_backend_namespace_fails_closed_without_stable_material(monkeypatch):
+    from tui_gateway import companion_projects as companion
+
+    monkeypatch.delenv("GATEWAY_RELAY_ID", raising=False)
+    monkeypatch.delenv("HERMES_MACHINE_ID", raising=False)
+    monkeypatch.setattr(server, "_load_cfg", lambda: {})
+    monkeypatch.setattr(companion, "_machine_identity", lambda: "")
+
+    with pytest.raises(companion.CompanionProjectsError, match="identity unavailable"):
+        companion._backend_namespace(server)
+
+
+def test_companion_profile_rejects_symlinked_directory(monkeypatch, tmp_path):
+    from tui_gateway import companion_projects as companion
+
+    profiles_root = tmp_path / "profiles"
+    real = tmp_path / "real-profile"
+    profiles_root.mkdir()
+    real.mkdir()
+    (profiles_root / "coder").symlink_to(real, target_is_directory=True)
+    monkeypatch.setattr("hermes_cli.profiles._get_profiles_root", lambda: profiles_root)
+    monkeypatch.setattr("hermes_cli.profiles.get_profile_dir", lambda _name: profiles_root / "coder")
+    monkeypatch.setattr(
+        companion, "_owner_authorized_profiles", lambda _server: frozenset({"coder"})
+    )
+
+    with pytest.raises(companion.CompanionProjectsError, match="symlinked"):
+        companion._resolve_profile(server, "coder")
+
+
+def test_companion_profile_rejects_root_escape_alias(monkeypatch, tmp_path):
+    from tui_gateway import companion_projects as companion
+
+    profiles_root = tmp_path / "profiles"
+    escaped = tmp_path / "elsewhere" / "coder"
+    profiles_root.mkdir()
+    escaped.mkdir(parents=True)
+    monkeypatch.setattr("hermes_cli.profiles._get_profiles_root", lambda: profiles_root)
+    monkeypatch.setattr("hermes_cli.profiles.get_profile_dir", lambda _name: escaped)
+    monkeypatch.setattr(
+        companion, "_owner_authorized_profiles", lambda _server: frozenset({"coder"})
+    )
+
+    with pytest.raises(companion.CompanionProjectsError, match="alias"):
+        companion._resolve_profile(server, "coder")
+
+
+@pytest.mark.parametrize("filename", ["projects.db", "state.db"])
+def test_companion_profile_rejects_symlinked_database_source(monkeypatch, tmp_path, filename):
+    from hermes_cli import projects_db as pdb
+    from hermes_state import SessionDB
+    from tui_gateway import companion_projects as companion
+
+    launch_home = _profile_dir(tmp_path, "launch")
+    coder_home = _profile_dir(tmp_path, "coder")
+    outside = tmp_path / "outside" / filename
+    outside.parent.mkdir()
+    if filename == "projects.db":
+        conn = pdb.connect(outside)
+        pdb.create_project(conn, name="Outside secret")
+        conn.close()
+    else:
+        db = SessionDB(db_path=outside)
+        db.create_session("outside-secret", "cli", cwd=str(tmp_path))
+        db.close()
+    (coder_home / filename).symlink_to(outside)
+    _bind_profiles(monkeypatch, tmp_path, {"default": launch_home, "coder": coder_home})
+    monkeypatch.setattr(
+        companion, "_owner_authorized_profiles", lambda _server: frozenset({"coder"})
+    )
+
+    with _serving_launch_profile(launch_home):
+        response = server._methods["companion.projects.list"](1, {"profile": "coder"})
+
+    assert response["error"]["code"] == 4404
+    assert "Outside secret" not in str(response)
+
+
+@pytest.mark.parametrize("filename", ["projects.db", "state.db"])
+def test_companion_revalidates_database_scope_after_read_race(
+    monkeypatch, tmp_path, filename
+):
+    from hermes_cli import projects_db as pdb
+    from hermes_state import SessionDB
+    from tui_gateway import companion_projects as companion
+
+    launch_home = _profile_dir(tmp_path, "launch")
+    coder_home = _profile_dir(tmp_path, "coder")
+    outside = tmp_path / "outside" / filename
+    outside.parent.mkdir()
+    original_folder = tmp_path / "original"
+    original_folder.mkdir()
+    _bind_profiles(monkeypatch, tmp_path, {"default": launch_home, "coder": coder_home})
+    monkeypatch.setattr(
+        companion, "_owner_authorized_profiles", lambda _server: frozenset({"coder"})
+    )
+    _create_project(coder_home, "Original", original_folder)
+    _create_session(coder_home, "original-session", original_folder)
+    if filename == "projects.db":
+        conn = pdb.connect(outside)
+        pdb.create_project(conn, name="Outside secret")
+        conn.close()
+    else:
+        db = SessionDB(db_path=outside)
+        db.create_session("outside-secret", "cli", cwd=str(tmp_path))
+        db.close()
+    real_build = companion._build_tree
+
+    def replace_during_read(*args, **kwargs):
+        result = real_build(*args, **kwargs)
+        source = coder_home / filename
+        source.unlink()
+        source.symlink_to(outside)
+        return result
+
+    monkeypatch.setattr(companion, "_build_tree", replace_during_read)
+    with _serving_launch_profile(launch_home):
+        response = server._methods["companion.projects.list"](
+            1, {"profile": "coder", "include_discovered": False}
+        )
+
+    assert response["error"]["code"] == 4404
+    assert "Outside secret" not in str(response)
+
+
+def test_companion_list_cursor_is_stable_across_insert_delete_and_bound_to_filters(tmp_path):
+    first_project = _call("projects.create", {"name": "First"})["project"]
+    second_project = _call("projects.create", {"name": "Second"})["project"]
+    _call("projects.create", {"name": "Third"})
+
+    first = _call(
+        "companion.projects.list",
+        {"include_discovered": False, "archived": False, "limit": 1},
+    )
+    assert first["items"][0]["id"] == first_project["id"]
+    _call("projects.delete", {"id": second_project["id"]})
+    _call("projects.create", {"name": "Inserted later"})
+
+    second = _call(
+        "companion.projects.list",
+        {
+            "include_discovered": False,
+            "archived": False,
+            "limit": 1,
+            "cursor": first["next_cursor"],
+        },
+    )
+    assert second["items"][0]["id"] == second_project["id"]
+
+    mismatched = server._methods["companion.projects.list"](
+        1,
+        {
+            "include_discovered": False,
+            "archived": True,
+            "limit": 1,
+            "cursor": first["next_cursor"],
+        },
+    )
+    assert mismatched["error"]["code"] == -32602
+
+
+def test_companion_rejects_tampered_and_structurally_malformed_cursors():
+    from tui_gateway import companion_projects as companion
+
+    valid = companion._cursor(0, 1)
+    midpoint = len(valid) // 2
+    tampered = valid[:midpoint] + ("A" if valid[midpoint] != "A" else "B") + valid[midpoint + 1 :]
+    malformed = companion._encode_cursor_payload(
+        {"v": 1, "offset": True, "session_limit": 1}
+    )
+    for cursor in (tampered, "%%%", malformed):
+        response = server._methods["companion.projects.list"](1, {"cursor": cursor})
+        assert response["error"]["code"] == -32602
+
+
+def test_companion_detail_honors_strict_requested_kind(monkeypatch):
+    from tui_gateway import companion_projects as companion
+
+    node = {
+        "id": "/repo",
+        "label": "repo",
+        "path": "/repo",
+        "isAuto": True,
+        "isNoProject": False,
+        "sessionCount": 0,
+        "lastActive": 0.0,
+        "repos": [],
+    }
+    monkeypatch.setattr(
+        companion,
+        "_build_tree",
+        lambda *_args, **_kwargs: ({"projects": [node]}, False, True, "complete", None),
+    )
+    response = server._methods["companion.projects.get"](
+        1, {"id": "/repo", "kind": "desktop_project"}
+    )
+    assert response["error"]["code"] == 4404
+
+
+def test_companion_suppresses_cache_from_stale_discovery_policy(monkeypatch, tmp_path):
+    from hermes_cli import projects_db as pdb
+    from hermes_constants import get_hermes_home
+
+    repo = tmp_path / "stale-cache"
+    (repo / ".git").mkdir(parents=True)
+    current_policy = {"enabled": True, "roots": [str(tmp_path)], "exclude_paths": []}
+    monkeypatch.setattr(server, "_repo_discovery_policy", lambda: current_policy)
+    current_key = server._repo_discovery_policy_key(current_policy)
+    with pdb.connect_closing(Path(get_hermes_home()) / "projects.db") as conn:
+        pdb.record_discovered_repos(conn, [(str(repo), "stale")], policy_key=current_key + "-old")
+
+    listing = _call("companion.projects.list")
+
+    assert str(repo) not in {item["id"] for item in listing["items"]}
+    assert listing["coverage"]["discovered_repositories"] == "stale_suppressed"
+    assert any("stale cached repositories were suppressed" in item for item in listing["warnings"])
+
+
+def test_companion_terminal_source_truncation_keeps_cursor_invariant(monkeypatch):
+    from tui_gateway import companion_projects as companion
+
+    nodes = [
+        {
+            "id": f"/repo-{index}",
+            "label": f"repo-{index}",
+            "path": f"/repo-{index}",
+            "isAuto": True,
+            "isNoProject": False,
+            "sessionCount": 1,
+            "lastActive": float(index),
+            "repos": [],
+        }
+        for index in range(2)
+    ]
+    monkeypatch.setattr(
+        companion,
+        "_build_tree",
+        lambda *_a, **_kw: ({"projects": nodes}, True, True, "complete", None),
+    )
+    first = _call(
+        "companion.projects.list",
+        {"limit": 1, "cursor": companion._cursor(0, 500)},
+    )
+    second = _call(
+        "companion.projects.list",
+        {"limit": 1, "cursor": first["next_cursor"]},
+    )
+
+    assert first["has_more"] is True
+    assert first["next_cursor"] is not None
+    assert second["items"][0]["id"] == "/repo-1"
+    assert second["has_more"] is False
+    assert second["next_cursor"] is None
+    assert second["coverage"]["membership"] == "truncated"
+    assert any("terminal truncation" in item for item in second["warnings"])
+
+
+def test_companion_detail_terminal_source_truncation_keeps_cursor_invariant(monkeypatch):
+    from tui_gateway import companion_projects as companion
+
+    project = _call("projects.create", {"name": "Terminal detail"})["project"]
+    node = {
+        "id": project["id"],
+        "label": project["name"],
+        "path": None,
+        "isAuto": False,
+        "isNoProject": False,
+        "sessionCount": 1,
+        "lastActive": 1.0,
+        "repos": [],
+    }
+    monkeypatch.setattr(
+        companion,
+        "_build_tree",
+        lambda *_a, **_kw: ({"projects": [node]}, True, True, "complete", None),
+    )
+
+    detail = _call(
+        "companion.projects.get",
+        {"id": project["id"], "cursor": companion._cursor(0, 500)},
+    )
+
+    assert detail["has_more"] is False
+    assert detail["next_cursor"] is None
+    assert detail["membership"]["has_more"] is False
+    assert detail["membership"]["next_cursor"] is None
+    assert detail["membership"]["coverage"] == "truncated"
+
+
+def test_git_probe_project_reads_are_long_handlers():
+    # Git-probe handlers must run off the dispatch thread.
+    for method in (
+        "projects.for_cwd",
+        "companion.projects.list",
+        "companion.projects.get",
+    ):
+        assert method in server._LONG_HANDLERS
 
 
 def test_repo_root_cache_does_not_freeze_a_not_yet_repo(monkeypatch):
@@ -673,6 +1307,7 @@ def _bind_profiles(monkeypatch, tmp_path: Path, homes: dict[str, Path]) -> None:
         "hermes_cli.profiles.get_profile_dir",
         lambda name: homes.get(name, tmp_path / "homes" / "missing" / name),
     )
+    monkeypatch.setattr("hermes_cli.profiles._get_profiles_root", lambda: tmp_path / "homes")
 
 
 def _create_project(home: Path, name: str, folder: Path, *, use: bool = False) -> dict:
@@ -723,8 +1358,10 @@ def _cached_repo_labels(home: Path) -> list[str]:
         return sorted(str(entry.get("label") or "") for entry in pdb.list_discovered_repos(conn))
 
 
-def test_projects_reads_are_scoped_to_the_requested_profile(monkeypatch, tmp_path):
-    """A ``profile`` param reads that profile's projects.db AND its state.db."""
+def test_project_reads_scope_regular_rpc_but_deny_unserved_companion_profile(
+    monkeypatch, tmp_path
+):
+    """Installed profiles remain private unless this gateway serves them."""
     launch_home = _profile_dir(tmp_path, "launch")
     coder_home = _profile_dir(tmp_path, "coder")
     launch_repo = tmp_path / "repos" / "launch-repo"
@@ -741,6 +1378,13 @@ def test_projects_reads_are_scoped_to_the_requested_profile(monkeypatch, tmp_pat
     with _serving_launch_profile(launch_home):
         launch_listing = _call("projects.list")
         coder_listing = _call("projects.list", {"profile": "coder"})
+        launch_companion = _call(
+            "companion.projects.list", {"include_discovered": False}
+        )
+        coder_companion = server._methods["companion.projects.list"](
+            "unserved",
+            {"profile": "coder", "include_discovered": False},
+        )
         launch_tree = _call("projects.tree")
         coder_tree = _call("projects.tree", {"profile": "coder"})
         coder_sessions = _call(
@@ -752,6 +1396,14 @@ def test_projects_reads_are_scoped_to_the_requested_profile(monkeypatch, tmp_pat
 
     assert [p["name"] for p in launch_listing["projects"]] == ["Launch"]
     assert [p["name"] for p in coder_listing["projects"]] == ["Coder"]
+    assert [(p["name"], p["profile"]) for p in launch_companion["items"]] == [
+        ("Launch", launch_companion["profile"])
+    ]
+    assert coder_companion["error"] == {
+        "code": 4403,
+        "message": "project profile unavailable",
+    }
+    assert "Coder" not in str(coder_companion)
     assert launch_listing["active_id"] == launch_project["id"]
     assert coder_listing["active_id"] == coder_project["id"]
     assert launch_again == launch_listing

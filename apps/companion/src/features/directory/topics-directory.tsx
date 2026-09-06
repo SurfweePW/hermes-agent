@@ -1,0 +1,142 @@
+import { type KeyboardEvent } from 'react'
+
+import type { TopicCollection, TopicDetail, TopicItem, TopicSourceItem, TopicWorkItem } from '../../gateway/topic-types'
+
+import type { DirectorySnapshot } from './directory-store'
+
+interface Props {
+  snapshot: DirectorySnapshot
+  params: URLSearchParams
+  onNavigate(params: URLSearchParams): void
+  onLoadOlder(kind: 'topics', profile: string): void
+  onOpen(profile: string, source: string, id: string): void
+}
+
+const selected = (params: URLSearchParams, key: string) => new Set(params.getAll(key).filter(Boolean))
+const displayDate = (value: string) => new Date(value).toLocaleString()
+
+export function TopicsDirectory({ snapshot, params, onNavigate, onLoadOlder, onOpen }: Props) {
+  const query = params.get('q') ?? ''
+  const collections = selected(params, 'collection')
+  const lifecycles = selected(params, 'lifecycle')
+  const sort = params.get('sort') === 'name' ? 'name' : 'updated'
+  const verified = params.get('verified') === 'true'
+  const choices = [...new Set([...snapshot.topics.map((item) => item.collection), ...collections])].sort()
+
+  const update = (key: string, value: string | null) => {
+    const next = new URLSearchParams(params)
+
+    if (value) {next.set(key, value)} else {next.delete(key)}
+    onNavigate(next)
+  }
+
+  const multi = (key: string, value: string, checked: boolean) => {
+    const values = selected(params, key)
+
+    if (checked) {values.add(value)} else {values.delete(value)}
+    const next = new URLSearchParams(params)
+
+    next.delete(key)
+
+    for (const item of [...values].sort()) {next.append(key, item)}
+    onNavigate(next)
+  }
+
+  const ready = snapshot.topicCoverage.filter((item) => item.status === 'ready')
+  const loaded = ready.reduce((sum, item) => sum + item.loaded, 0)
+  const total = ready.length === snapshot.topicCoverage.length && ready.every((item) => item.total !== null) ? ready.reduce((sum, item) => sum + item.total!, 0) : null
+  const completeEmpty = snapshot.topicCoverage.length > 0 && snapshot.topicCoverage.every((item) => item.status === 'ready' && item.coverage?.status === 'complete' && item.total === 0)
+  const filtered = Boolean(query.trim() || collections.size || lifecycles.size || verified)
+  const chips = [query.trim() && `Topic: ${query.trim()}`, ...[...collections].map((value) => `Collection: ${value}`), ...[...lifecycles].map((value) => `Lifecycle: ${value}`), verified && 'Verified lifecycle only'].filter(Boolean) as string[]
+
+  const clear = () => {
+    const next = new URLSearchParams(params)
+
+    for (const key of ['q', 'collection', 'lifecycle', 'verified']) { next.delete(key) }
+    onNavigate(next)
+  }
+
+  return <>
+    <div className="directory-filters">
+      <label className="directory-search">Search topics<input aria-label="Search topics" onChange={(event) => update('q', event.target.value)} type="search" value={query} /></label>
+      <Filter active={collections} label="Collection" onChange={(value, checked) => multi('collection', value, checked)} values={choices} />
+      <Filter active={lifecycles} label="Lifecycle" onChange={(value, checked) => multi('lifecycle', value, checked)} values={['active', 'completed', 'archived']} />
+      <label><input checked={verified} onChange={(event) => update('verified', event.target.checked ? 'true' : null)} type="checkbox" /> Verified status</label>
+      <label>Sort<select aria-label="Topic sort" onChange={(event) => update('sort', event.target.value)} value={sort}><option value="updated">Recently updated</option><option value="name">Name</option></select></label>
+    </div>
+    {chips.length > 0 && <div aria-label="Active topic filters" className="filter-chips">{chips.map((chip) => <span key={chip}>{chip}</span>)}<button onClick={clear} type="button">Clear filters</button></div>}
+    <div className="coverage-panel" role="status"><strong>{total === null ? `${loaded} topics loaded · total unknown` : `${loaded} of ${total} topics loaded`}</strong><span>{snapshot.topicCoverage.map((item) => `${item.profile}: ${item.coverage?.status ?? item.status}`).join(' · ') || 'No authorized topic profiles configured.'}</span><span>{snapshot.topicCoverage.map((item) => item.message).filter(Boolean).join(' ')}</span></div>
+    {snapshot.topics.length ? <div className="directory-list">{snapshot.topics.map((item) => <TopicRow item={item} key={`${item.source}:${item.profile}:${item.id}`} onOpen={() => onOpen(item.profile, item.source, item.id)} />)}</div> : <Empty copy={completeEmpty ? filtered ? 'The complete filtered result contains no matching topics.' : 'The organization registry returned a complete empty topic population.' : 'Companion cannot claim this directory is empty because at least one authorized source is unavailable, partial, or still loading.'} title={completeEmpty ? filtered ? 'No matching topics' : 'No topics yet' : snapshot.topicCoverage.some((item) => item.status === 'loading') ? 'Loading verified topics…' : snapshot.topicCoverage.some((item) => item.status === 'unsupported') ? 'Backend update required' : 'Topic coverage unavailable'} />}
+    <div className="load-older">{snapshot.topicCoverage.filter((item) => item.hasMore).map((item) => <button className="button" key={item.profile} onClick={() => onLoadOlder('topics', item.profile)} type="button">Load more topics from {item.profile}</button>)}</div>
+  </>
+}
+
+function Filter({ label, values, active, onChange }: { label: string; values: string[]; active: Set<string>; onChange(value: string, checked: boolean): void }) {
+  return <details className="filter-menu"><summary>{label}{active.size ? ` (${active.size})` : ''}</summary><div>{values.map((value) => <label key={value}><input checked={active.has(value)} onChange={(event) => onChange(value, event.target.checked)} type="checkbox" />{value}</label>)}</div></details>
+}
+
+function TopicRow({ item, onOpen }: { item: TopicItem & { profile: string; source: string }; onOpen(): void }) {
+  const action = item.next_useful_action.availability === 'available' ? item.next_useful_action.references?.join(', ') : 'Next useful action unknown'
+
+  return <button className="directory-row directory-row--topic" onClick={onOpen} type="button"><span><strong>{item.name}</strong><small>{item.objective}</small><small>{item.collection} · Backend: {item.source} · Profile: {item.profile} · {item.lifecycle}</small></span><span><small>{action}</small><small>Linked work count unavailable · {item.linked_work.coverage} coverage</small></span><b aria-hidden="true">→</b></button>
+}
+
+export function TopicDetailView({ snapshot, params, onNavigate, tab, onTab }: { snapshot: DirectorySnapshot; params: URLSearchParams; onNavigate(params: URLSearchParams): void; tab: string; onTab(tab: string): void }) {
+  const detail = snapshot.selectedTopic
+
+  const back = () => {
+    const next = new URLSearchParams(params)
+
+    for (const key of ['focus', 'focusProfile', 'focusSource', 'tab']) {next.delete(key)}
+    onNavigate(next)
+  }
+
+  const tabs = [['overview', 'Overview'], ['needs_me', 'Needs Me'], ['work', 'Work'], ['files', 'Files'], ['sources', 'Sources']] as const
+
+  const onKeyDown = (event: KeyboardEvent<HTMLButtonElement>, index: number) => {
+    let nextIndex: number | null = null
+
+    if (event.key === 'ArrowRight' || event.key === 'ArrowDown') { nextIndex = (index + 1) % tabs.length }
+
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowUp') { nextIndex = (index - 1 + tabs.length) % tabs.length }
+
+    if (event.key === 'Home') { nextIndex = 0 }
+
+    if (event.key === 'End') { nextIndex = tabs.length - 1 }
+
+    if (nextIndex === null) { return }
+    event.preventDefault()
+    onTab(tabs[nextIndex][0])
+    const list = event.currentTarget.parentElement
+    requestAnimationFrame(() => list?.querySelectorAll<HTMLElement>('[role="tab"]')[nextIndex!]?.focus())
+  }
+
+  return <section className="directory-detail"><button className="back-button" onClick={back} type="button">← Back to topics</button>{detail ? <><p className="kicker">Topic · {detail.topic.collection} · Backend: {detail.backend_namespace} · Profile: {detail.profile}</p><h2>{detail.topic.name}</h2><p className="read-only-note">Read-only organization detail</p><div aria-label="Topic detail" className="detail-tabs" role="tablist">{tabs.map(([value, label], index) => <button aria-controls={`topic-detail-panel-${value}`} aria-selected={tab === value} id={`topic-detail-tab-${value}`} key={value} onClick={() => onTab(value)} onKeyDown={(event) => onKeyDown(event, index)} role="tab" tabIndex={tab === value ? 0 : -1} type="button">{label}</button>)}</div>{tabs.map(([value]) => <div aria-labelledby={`topic-detail-tab-${value}`} hidden={tab !== value} id={`topic-detail-panel-${value}`} key={value} role="tabpanel">{tab === value && <Panel detail={detail} onNavigate={onNavigate} tab={tab} />}</div>)}</> : <Empty copy={snapshot.detailMessage ?? 'Waiting for the read-only organization projection.'} title={snapshot.detailStatus === 'loading' ? 'Loading verified topic…' : 'Topic unavailable'} />}</section>
+}
+
+function Panel({ detail, tab, onNavigate }: { detail: TopicDetail; tab: string; onNavigate(params: URLSearchParams): void }) {
+  if (tab === 'overview') { return <><p>{detail.overview.objective}</p><dl className="detail-facts"><div><dt>Verified lifecycle</dt><dd>{detail.overview.verified_status.value} · observed {displayDate(detail.overview.verified_status.observed_at)}</dd></div><div><dt>Status authority</dt><dd>{detail.overview.verified_status.authority}</dd></div><div><dt>Next useful action</dt><dd>{detail.overview.next_useful_action.availability === 'available' ? detail.overview.next_useful_action.references?.join(', ') : detail.overview.next_useful_action.reason ?? 'Not available from this source'}</dd></div><div><dt>Updated</dt><dd>{displayDate(detail.topic.updated_at)}</dd></div></dl></> }
+
+  if (tab === 'needs_me') { return <CollectionEmpty collection={detail.needs_me} empty="No Needs Me items" unavailable="Needs Me unavailable" /> }
+
+  if (tab === 'files') { return <div className="directory-empty" role="status"><strong>Linked Library files</strong><p>Open the authorized Library relationship filter for this topic.</p><button onClick={() => onNavigate(new URLSearchParams({ view: 'library', libraryProfile: detail.profile, libraryTopic: detail.topic.id }))} type="button">View files in Library</button></div> }
+
+  if (tab === 'work') { return detail.work.items?.length ? <WorkItems items={detail.work.items} /> : <CollectionEmpty collection={detail.work} empty="No organization work bindings" unavailable="Work unavailable" /> }
+
+  return detail.sources.items?.length ? <SourceItems items={detail.sources.items} /> : <CollectionEmpty collection={detail.sources} empty="No organization source references" unavailable="Sources unavailable" />
+}
+
+function WorkItems({ items }: { items: TopicWorkItem[] }) { return <ul className="reference-list">{items.map((item) => <li key={item.canonical_id}><strong>{item.work_kind}: {item.source_work_id}</strong><span>{item.relationship} binding · source record status unavailable</span></li>)}</ul> }
+
+function SourceItems({ items }: { items: TopicSourceItem[] }) { return <ul className="reference-list">{items.map((item) => <li key={`${item.kind}:${item.canonical_id}`}><strong>{item.kind}</strong><span>{item.relationship} · live source details unavailable</span></li>)}</ul> }
+
+function CollectionEmpty({ collection, empty, unavailable }: { collection: TopicCollection<unknown>; empty: string; unavailable: string }) {
+  const status = collection.coverage.status
+
+  if (status === 'complete') { return <Empty copy="The organization registry returned a complete empty collection." title={empty} /> }
+  const reason = typeof collection.coverage.reason === 'string' ? collection.coverage.reason : status === 'partial' ? 'Only a partial authorized projection is available; no empty result is being claimed.' : 'No read-only query contract exists; no empty result is being claimed.'
+
+  return <Empty copy={reason} title={unavailable} />
+}
+
+function Empty({ title, copy }: { title: string; copy: string }) { return <div className="directory-empty" role="status"><strong>{title}</strong><p>{copy}</p></div> }

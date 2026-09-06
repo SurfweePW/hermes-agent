@@ -2,6 +2,9 @@ import './work.css'
 
 import { useState } from 'react'
 
+import type { NeedsMePriorityItem } from '../../gateway/organization-types'
+import type { TrackerEvidence } from '../../gateway/work-types'
+
 /** Presentation model, deliberately independent of the gateway wire contract. */
 export interface WorkCardView {
   id: string
@@ -24,6 +27,10 @@ export interface WorkCardView {
   readOnlyReason?: string
   preparationStatus?: string
   executionAcknowledgedAt?: string
+  trackerEvidence?: TrackerEvidence
+  completionEvidence?: readonly string[]
+  trackerStatusHistory?: readonly TrackerEvidence[]
+  priority?: NeedsMePriorityItem & { topicName: string; topicCollection?: string; groupOrder: number; itemOrder: number }
   decisionHistory?: readonly { id: string; action: string; revision: number; actor: string; reason: string; createdAt: string; scope: string; snoozedUntil: string | null }[]
 }
 export type WorkDecision = 'approve_preparation' | 'request_changes' | 'snooze' | 'decline'
@@ -34,7 +41,10 @@ export interface WorkInboxProps {
   status: 'loading' | 'verified' | 'unsupported' | 'offline' | 'error'
   pending: boolean
   message: string | null
+  groupBy: 'topic' | 'session' | 'project'
+  sources: readonly { profile: string; incomplete: boolean; status: 'verified' | 'unsupported' | 'error'; lastSuccess: string | null; message: string | null }[]
   onRefresh: () => void
+  onGroupBy: (groupBy: 'topic' | 'session' | 'project') => void
   onOpen: (profile: string, id: string) => void
   onClose: () => void
   onDecision: (input: WorkDecisionInput) => Promise<boolean>
@@ -59,10 +69,26 @@ function WorkLinks({ links }: { links: WorkCardView['evidence'] }) {
   })}</ul>
 }
 
+function TrackerStatus({ evidence, heading }: { evidence: TrackerEvidence; heading?: string }) {
+  return <section className="work-tracker-status">{heading && <h4>{heading}</h4>}<p><strong>{evidence.state.replaceAll('_', ' ')}</strong> · Observed {evidence.observed_at}</p>{evidence.blocker && <p><strong>Blocker:</strong> {evidence.blocker}</p>}{evidence.result_evidence?.length ? <p><strong>Result:</strong> {evidence.result_evidence.join(' · ')}</p> : null}<WorkLinks links={evidence.evidence.map((label) => ({ label, url: label }))} /></section>
+}
+
 export function WorkInbox(props: WorkInboxProps) {
   const [filter, setFilter] = useState<WorkCardView['bucket']>('needs_me')
   const [history, setHistory] = useState(false)
-  const visible = props.items.filter((item) => item.bucket === (history ? 'history' : filter))
+
+  const visible = props.items.filter((item) => item.bucket === (history ? 'history' : filter)).sort((left, right) => {
+    if (!history && filter === 'needs_me') {
+      const priority = (left.priority?.groupOrder ?? Number.MAX_SAFE_INTEGER) - (right.priority?.groupOrder ?? Number.MAX_SAFE_INTEGER)
+
+      if (priority) {return priority}
+      const item = (left.priority?.itemOrder ?? Number.MAX_SAFE_INTEGER) - (right.priority?.itemOrder ?? Number.MAX_SAFE_INTEGER)
+
+      if (item) {return item}
+    }
+
+    return `${left.profile}:${left.id}`.localeCompare(`${right.profile}:${right.id}`)
+  })
 
   return <section aria-labelledby="work-title" className="work-inbox">
     <div className="section-heading"><div><p className="kicker">Persisted business work</p><h2 id="work-title">Decision inbox</h2></div><button disabled={props.status === 'loading' || props.pending} onClick={props.onRefresh} type="button">Refresh work</button></div>
@@ -71,6 +97,8 @@ export function WorkInbox(props: WorkInboxProps) {
     {props.status === 'loading' && <p role="status">Verifying persisted work… Decisions are disabled until refreshed.</p>}
     {(props.status === 'offline' || props.status === 'error') && <p role="alert">Work could not be verified. The last view is retained; reconnect and refresh before making decisions.</p>}
     {props.message && <p role="status">{props.message}</p>}
+    {props.sources.some((source) => source.incomplete) && <ul aria-label="Work source coverage" className="work-source-coverage">{props.sources.map((source) => <li key={source.profile}><strong>{source.profile}</strong>: {source.incomplete ? `Incomplete (${source.status})` : 'Complete'} · Last success: {source.lastSuccess ?? 'never'}{source.message ? ` · ${source.message}` : ''}</li>)}</ul>}
+    <label htmlFor="needs-me-group">Group by</label><select disabled={props.pending} id="needs-me-group" onChange={(event) => props.onGroupBy(event.target.value as WorkInboxProps['groupBy'])} value={props.groupBy}><option value="topic">Topic</option><option value="session">Session</option><option value="project">Project</option></select>
     <div aria-label="Work filters" className="work-filters" role="group">
       {([['needs_me', 'Needs Me'], ['in_progress', 'In Progress'], ['ideas', 'Ideas']] as const).map(([id, label]) => <button aria-pressed={!history && filter === id} disabled={props.pending} key={id} onClick={() => {setFilter(id); setHistory(false);
 
@@ -80,7 +108,28 @@ export function WorkInbox(props: WorkInboxProps) {
  if (props.selected) {props.onClose()}}} type="button">History &amp; snoozed</button>
     </div>
     {props.selected ? <WorkDetail key={`${props.selected.profile}:${props.selected.id}`} {...props} item={props.selected} /> : <div className="work-list">
-      {visible.map((item) => <button className="work-summary" disabled={props.status !== 'verified' || props.pending} key={`${item.profile}:${item.id}`} onClick={() => props.onOpen(item.profile, item.id)} type="button"><span className="label">{item.profile} · {item.status} · Revision {item.revision}</span><strong>{item.title}</strong><span>{item.brief}</span><small>{item.owner}: {item.nextAction}</small>{item.preparationStatus && <small>{item.preparationStatus}</small>}</button>)}
+      {visible.map((item, index) => <div className="work-priority-row" key={`${item.profile}:${item.id}`}>
+        {!history && filter === 'needs_me' && item.priority && (index === 0 || visible[index - 1]?.priority?.groupOrder !== item.priority.groupOrder) && <header className="work-topic-heading">
+          <p className="kicker">{props.groupBy[0].toUpperCase() + props.groupBy.slice(1)}{item.priority.topicCollection ? ` · ${item.priority.topicCollection}` : ''}</p>
+          <h3>{item.priority.topicName}</h3>
+          <p>Recommended · {item.priority.eligibility.replaceAll('_', ' ')}</p>
+        </header>}
+        <button className="work-summary" disabled={props.status !== 'verified' || props.pending} onClick={() => props.onOpen(item.profile, item.id)} type="button">
+          <span className="label">{item.profile} · {item.status} · Revision {item.revision}</span>
+          <strong>{item.title}</strong><span>{item.brief}</span>
+          {item.priority && <>
+            <small><strong>Why here:</strong> {item.priority.why_here}</small>
+            <small><strong>Next step:</strong> {item.priority.next_step}</small>
+            <small><strong>Trade-off:</strong> {item.priority.trade_off}</small>
+            <small><strong>Assessment freshness:</strong> {item.priority.assessed_at ?? 'Not assessed'}</small>
+            <small><strong>Recommendation evidence:</strong> {item.priority.evidence.length ? item.priority.evidence.join(' · ') : 'No evidence supplied'}</small>
+            <small>Benefit {item.priority.assessment?.benefit ?? 'unassessed'} · Confidence {item.priority.assessment?.confidence ?? 'unknown'}</small>
+            {item.priority.override && <small className="work-override">{item.priority.override.active ? 'Active review override' : 'Review override'}: {item.priority.override.label} — {item.priority.override.reason}</small>}
+          </>}
+          <small>{item.owner}: {item.nextAction}</small>
+          {item.preparationStatus && <small>{item.preparationStatus}</small>}
+        </button>
+      </div>)}
       {props.status === 'verified' && visible.length === 0 && <p>No work in this view. Completed, declined and snoozed work remains in history.</p>}
     </div>}
   </section>
@@ -116,6 +165,10 @@ function WorkDetail({ item, status, pending, onClose, onDecision, onComment }: W
     <dl><dt>Next action</dt><dd>{item.nextAction || 'Not specified'}</dd><dt>Owner</dt><dd>{item.owner || 'Unassigned'}</dd><dt>Current decision</dt><dd>{item.decision || 'No decision yet'}</dd>{item.snoozedUntil && <><dt>Snoozed until</dt><dd>{item.snoozedUntil}</dd></>}</dl>
     {item.preparationStatus && <p className="work-boundary">{item.preparationStatus}</p>}
     {item.executionAcknowledgedAt && <p>Tracker handoff acknowledged: {item.executionAcknowledgedAt}</p>}
+    {item.trackerEvidence && <TrackerStatus evidence={item.trackerEvidence} heading="Current tracker evidence" />}
+    {item.completionEvidence?.length ? <><h4>Completion evidence</h4><WorkLinks links={item.completionEvidence.map((label) => ({ label, url: label }))} /></> : null}
+    <h4>Tracker status history</h4>
+    {item.trackerStatusHistory?.length ? <ol className="work-discussion">{item.trackerStatusHistory.map((entry, index) => <li key={`${entry.observed_at}:${index}`}><TrackerStatus evidence={entry} /></li>)}</ol> : <p>No recorded tracker status.</p>}
     <h4>Evidence</h4><WorkLinks links={item.evidence} />
     <div className="work-scope"><section><h4>Proposed preparation scope</h4><ul>{item.permitted.map((text, i) => <li key={i}>{text}</li>)}</ul></section><section><h4>Excluded scope</h4><ul>{item.excluded.map((text, i) => <li key={i}>{text}</li>)}</ul></section></div>
     <h4>Previews &amp; links</h4><WorkLinks links={item.previews} />
