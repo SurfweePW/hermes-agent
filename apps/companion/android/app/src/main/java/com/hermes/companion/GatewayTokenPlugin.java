@@ -97,14 +97,25 @@ public final class GatewayTokenPlugin extends Plugin {
             try {
                 ownerWorker.execute(() -> {
                     try {
+                        if ("webSocketUrl".equals(operation)) {
+                            OwnerSession.Disclosure disclosure = owner.webSocketUrl(base);
+                            // Keep the ticket opaque until the trusted UI-thread callback actually resolves it.
+                            withTrustedCall(call, new String[] {"baseUrl"}, () -> {
+                                try {
+                                    call.resolve(disclosure.reveal());
+                                } catch (Exception ignored) {
+                                    call.reject("Owner sign-in unavailable, cancelled, or expired. Try signing in again.",
+                                        "OWNER_AUTH_FAILED");
+                                }
+                            });
+                            return;
+                        }
                         JSObject result;
                         switch (operation) {
                             case "signIn": result = owner.signIn(base, this::openOwnerBrowser); break;
                             case "signOut": result = owner.signOut(base); break;
-                            case "webSocketUrl": result = owner.webSocketUrl(base); break;
                             default: result = owner.status(base);
                         }
-                        // Re-check on the UI thread after asynchronous work before disclosing even a WS ticket.
                         withTrustedCall(call, new String[] {"baseUrl"}, () -> call.resolve(result));
                     } catch (OwnerSession.Unsupported ignored) {
                         call.reject("This gateway has no supported native owner sign-in provider.", "OWNER_UNSUPPORTED");

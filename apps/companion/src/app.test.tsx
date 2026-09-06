@@ -42,6 +42,60 @@ describe('App', () => {
     expect(document.body.textContent).not.toContain('test-token')
   })
 
+  it('offers native Google owner sign-in during setup and reaches owner-ready without a token', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(async () => ({ ignored: 'native-owner-secret' })),
+      ownerStatus: vi.fn(),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://fixture.invalid/api/ws?ticket=single-use-ticket')
+    }
+
+    const store = createCompanionStore({
+      gatewayFactory: createFakeGateway,
+      ownerAuthBridge: ownerAuth,
+      storage: { getItem: () => null, setItem: () => undefined }
+    })
+
+    render(<App store={store} />)
+    fireEvent.change(screen.getByLabelText('Gateway base URL'), { target: { value: 'https://fixture.invalid/' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in with Google' }))
+
+    await waitFor(() => expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner' }))
+    expect(ownerAuth.ownerSignIn).toHaveBeenCalledWith({ baseUrl: 'https://fixture.invalid' })
+    expect(document.body.textContent).not.toContain('native-owner-secret')
+    expect(screen.getByText('Companion is ready')).toBeTruthy()
+  })
+
+  it('describes owner bootstrap without claiming it is Android-only', () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(),
+      ownerStatus: vi.fn(),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn()
+    }
+
+    const store = createCompanionStore({
+      gatewayFactory: createFakeGateway,
+      ownerAuthBridge: ownerAuth,
+      storage: { getItem: () => null, setItem: () => undefined }
+    })
+
+    render(<App store={store} />)
+
+    expect(screen.getByText(/native app.*system browser.*single-use connection ticket/i)).toBeTruthy()
+    expect(document.body.textContent).not.toMatch(/Android browser flow/i)
+  })
+
+  it('does not offer browser owner bootstrap when the trusted native bridge is unavailable', () => {
+    const store = createCompanionStore({ gatewayFactory: createFakeGateway, storage: { getItem: () => null, setItem: () => undefined } })
+
+    render(<App store={store} />)
+
+    expect(screen.queryByRole('button', { name: 'Sign in with Google' })).toBeNull()
+    expect(screen.getByText(/Google owner sign-in requires a trusted native app bridge.*Browser setup requires a session token/i)).toBeTruthy()
+    expect(document.body.textContent).not.toMatch(/only in the native Android app/i)
+  })
+
   it('truthfully distinguishes encrypted native storage and allows a saved-token connection', async () => {
     let token: string | undefined = 'saved-native-token'
 
@@ -63,7 +117,7 @@ describe('App', () => {
     expect(document.body.textContent).not.toContain('saved-native-token')
   })
 
-  it('labels browser credentials session-only and provides an explicit saved-token reset', () => {
+  it('labels browser credentials session-only and provides an explicit saved-token reset', async () => {
     let token: string | undefined = 'saved-native-token'
 
     const secretStore: SessionSecretStore = {
@@ -77,7 +131,7 @@ describe('App', () => {
     const store = createCompanionStore({ gatewayFactory: createFakeGateway, secretStore, storage: { getItem: () => null, setItem: () => undefined } })
     const { unmount } = render(<App store={store} />)
     fireEvent.click(screen.getByRole('button', { name: /forget saved token/i }))
-    expect(token).toBeUndefined()
+    await waitFor(() => expect(token).toBeUndefined())
     unmount()
 
     render(<App store={createCompanionStore({ gatewayFactory: createFakeGateway, storage: { getItem: () => null, setItem: () => undefined } })} />)

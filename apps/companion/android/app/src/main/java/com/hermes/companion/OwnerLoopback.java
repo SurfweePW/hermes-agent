@@ -12,7 +12,7 @@ import java.util.HashMap;
 import java.util.Map;
 
 /** One attempt, one listener, one verifier. No credentials are ever delivered through this HTTP surface. */
-final class OwnerLoopback implements AutoCloseable {
+final class OwnerLoopback implements OwnerSession.Attempt {
     private final ServerSocket server;
     private final long deadline;
     private final String state = OwnerAuthPolicy.random();
@@ -26,11 +26,11 @@ final class OwnerLoopback implements AutoCloseable {
         deadline = System.nanoTime() + timeoutMillis * 1_000_000L;
     }
 
-    String redirectUri() { return "http://127.0.0.1:" + server.getLocalPort() + path; }
-    String state() { return state; }
-    String challenge() throws Exception { return OwnerAuthPolicy.challenge(verifier); }
+    @Override public String redirectUri() { return "http://127.0.0.1:" + server.getLocalPort() + path; }
+    @Override public String state() { return state; }
+    @Override public String challenge() throws Exception { return OwnerAuthPolicy.challenge(verifier); }
 
-    synchronized String takeVerifier() {
+    @Override public synchronized String takeVerifier() {
         if (consumed || verifier == null) throw new IllegalStateException();
         consumed = true;
         String result = verifier;
@@ -38,7 +38,7 @@ final class OwnerLoopback implements AutoCloseable {
         return result;
     }
 
-    String awaitCode() throws Exception {
+    @Override public String awaitCode() throws Exception {
         while (!server.isClosed()) {
             long remaining = (deadline - System.nanoTime()) / 1_000_000L;
             if (remaining <= 0) throw new java.net.SocketTimeoutException();

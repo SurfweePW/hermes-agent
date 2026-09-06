@@ -142,6 +142,181 @@ function harness(baseUrl: string | null = null, profiles?: ProfilesListResult, s
 }
 
 describe('CompanionStore setup and sessions', () => {
+  it('bootstraps a native owner connection without opening a shared-token socket first', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ignored: 'renderer-secret' })),
+      ownerStatus: vi.fn(),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=single-use-owner-ticket')
+    }
+
+    const secrets = tokenStore('saved-shared-token')
+    const { store, storage, gateways } = harness(null, undefined, secrets, ownerAuth)
+
+    await store.configureOwner({ baseUrl: 'https://gateway.test/' })
+
+    expect(ownerAuth.ownerSignIn).toHaveBeenCalledWith({ baseUrl: 'https://gateway.test' })
+    expect(ownerAuth.ownerWebSocketUrl).toHaveBeenCalledWith({ baseUrl: 'https://gateway.test' })
+    expect(gateways).toHaveLength(1)
+    expect(gateways[0].calls[0]).toEqual(['connect', 'wss://gateway.test/api/ws?ticket=single-use-owner-ticket'])
+    expect(JSON.stringify(gateways[0].calls)).not.toContain('saved-shared-token')
+    expect(JSON.stringify(store.getSnapshot())).not.toContain('renderer-secret')
+    expect(secrets.set).not.toHaveBeenCalled()
+    expect(storage.setItem).toHaveBeenCalledWith('hermes.companion.gatewayBaseUrl', 'https://gateway.test')
+    expect(store.getSnapshot()).toMatchObject({ phase: 'ready', baseUrl: 'https://gateway.test', connectionMode: 'owner' })
+  })
+
+  it('validates owner bootstrap URLs before crossing the native boundary', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(),
+      ownerStatus: vi.fn(),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn()
+    }
+
+    const { store, storage, gateways } = harness(null, undefined, undefined, ownerAuth)
+
+    await store.configureOwner({ baseUrl: 'https://gateway.test/?ticket=do-not-accept' })
+
+    expect(ownerAuth.ownerSignIn).not.toHaveBeenCalled()
+    expect(ownerAuth.ownerWebSocketUrl).not.toHaveBeenCalled()
+    expect(gateways).toHaveLength(0)
+    expect(storage.setItem).not.toHaveBeenCalled()
+    expect(store.getSnapshot()).toMatchObject({ phase: 'setup', connectionMode: 'shared' })
+    expect(store.getSnapshot().error).toMatch(/authentication query parameters/i)
+  })
+
+  it.each([
+    ['URL validation', 'https://gateway.test/?ticket=do-not-accept', 'authentication query parameters'],
+    ['native sign-in', 'https://gateway.test/sign-in-failure', 'Companion could not reach the gateway'],
+    ['connection ticket', 'https://gateway.test/ticket-failure', 'Companion could not reach the gateway']
+  ])('keeps an owner %s failure visible while late hydration restores saved-token actions', async (_failure, baseUrl, expectedError) => {
+    const token = deferred<string | undefined>()
+    const secrets = tokenStore()
+    vi.mocked(secrets.get).mockReturnValue(token.promise)
+
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(async ({ baseUrl: normalizedBaseUrl }) => {
+        if (normalizedBaseUrl.endsWith('/sign-in-failure')) {throw new Error('owner sign-in failed')}
+
+        return { signedIn: true }
+      }),
+      ownerStatus: vi.fn(),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async ({ baseUrl: normalizedBaseUrl }) => {
+        if (normalizedBaseUrl.endsWith('/ticket-failure')) {throw new Error('owner ticket failed')}
+
+        return 'wss://gateway.test/api/ws?ticket=owner-ticket'
+      })
+    }
+
+    const { store, gateways } = harness(null, undefined, secrets, ownerAuth)
+
+    await store.configureOwner({ baseUrl })
+    expect(store.getSnapshot()).toMatchObject({ phase: 'setup' })
+    expect(store.getSnapshot().error).toContain(expectedError)
+
+    token.resolve('late-shared-token')
+    await token.promise
+    await Promise.resolve()
+
+    expect(store.getSnapshot()).toMatchObject({
+      phase: 'setup',
+      hasSavedToken: true,
+      canForgetSavedToken: true
+    })
+    expect(store.getSnapshot().error).toContain(expectedError)
+    expect(JSON.stringify(store.getSnapshot())).not.toContain('late-shared-token')
+
+    await store.configure({ baseUrl: 'https://shared.gateway.test', token: '' })
+    expect(gateways.at(-1)?.calls[0]).toEqual([
+      'connect',
+      'wss://shared.gateway.test/api/ws?token=late-shared-token'
+    ])
+    expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'shared' })
+  })
+
+  it('does not let a saved-token storage failure overwrite an active owner bootstrap', async () => {
+    const token = deferred<string | undefined>()
+    const signIn = deferred<{ signedIn: boolean }>()
+    const secrets = tokenStore()
+    vi.mocked(secrets.get).mockReturnValue(token.promise)
+
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(() => signIn.promise),
+      ownerStatus: vi.fn(),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket')
+    }
+
+    const { store } = harness(null, undefined, secrets, ownerAuth)
+    const configuring = store.configureOwner({ baseUrl: 'https://gateway.test' })
+
+    expect(store.getSnapshot()).toMatchObject({ phase: 'connecting', error: null })
+    token.reject(new Error('secure storage failed'))
+    await expect(token.promise).rejects.toThrow('secure storage failed')
+    await Promise.resolve()
+    expect(store.getSnapshot()).toMatchObject({ phase: 'connecting', error: null })
+
+    signIn.resolve({ signedIn: true })
+    await configuring
+    expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner', error: null })
+  })
+
+  it('fails closed when a newer owner bootstrap supersedes an in-flight attempt', async () => {
+    const firstSignIn = deferred<{ signedIn: boolean }>()
+    const secondSignIn = deferred<{ signedIn: boolean }>()
+
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn()
+        .mockImplementationOnce(() => firstSignIn.promise)
+        .mockImplementationOnce(() => secondSignIn.promise),
+      ownerStatus: vi.fn(),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async ({ baseUrl }) => `wss://${new URL(baseUrl).host}/api/ws?ticket=owner-ticket`)
+    }
+
+    const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
+    const first = store.configureOwner({ baseUrl: 'https://first.gateway.test' })
+    const second = store.configureOwner({ baseUrl: 'https://latest.gateway.test' })
+
+    firstSignIn.reject(new Error('owner sign-in cancelled by newer attempt'))
+    await first
+    expect(store.getSnapshot()).toMatchObject({ phase: 'connecting', baseUrl: 'https://latest.gateway.test', error: null })
+    expect(ownerAuth.ownerWebSocketUrl).not.toHaveBeenCalled()
+    expect(gateways).toHaveLength(0)
+
+    secondSignIn.resolve({ signedIn: true })
+    await second
+
+    expect(ownerAuth.ownerWebSocketUrl).toHaveBeenCalledTimes(1)
+    expect(ownerAuth.ownerWebSocketUrl).toHaveBeenCalledWith({ baseUrl: 'https://latest.gateway.test' })
+    expect(gateways).toHaveLength(1)
+    expect(gateways[0].calls[0]).toEqual(['connect', 'wss://latest.gateway.test/api/ws?ticket=owner-ticket'])
+    expect(store.getSnapshot()).toMatchObject({ phase: 'ready', baseUrl: 'https://latest.gateway.test', connectionMode: 'owner' })
+  })
+
+  it('can retry owner bootstrap successfully after a failure', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn()
+        .mockRejectedValueOnce(new Error('owner sign-in failed'))
+        .mockResolvedValueOnce({ signedIn: true }),
+      ownerStatus: vi.fn(),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=retry-ticket')
+    }
+
+    const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
+
+    await store.configureOwner({ baseUrl: 'https://gateway.test' })
+    expect(store.getSnapshot()).toMatchObject({ phase: 'setup', error: 'Companion could not reach the gateway. Check the connection and try again.' })
+
+    await store.configureOwner({ baseUrl: 'https://gateway.test' })
+    expect(ownerAuth.ownerSignIn).toHaveBeenCalledTimes(2)
+    expect(gateways).toHaveLength(1)
+    expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner', error: null })
+  })
+
   it('connects to an older gateway when attention.list is unavailable', async () => {
     const { store, gateways } = harness()
     const configuring = store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
@@ -182,6 +357,108 @@ describe('CompanionStore setup and sessions', () => {
     expect(gateways[0].calls[0]).toEqual(['connect', 'ws://localhost:8642/api/ws?token=async-native-token'])
     expect(store.getSnapshot()).toMatchObject({ phase: 'ready', hasSavedToken: true, canForgetSavedToken: true })
     expect(JSON.stringify(store.getSnapshot())).not.toContain('async-native-token')
+  })
+
+  it.each([
+    ['a saved token', ''],
+    ['an explicit token', 'explicit-shared-token']
+  ])('does not let delayed shared configure with %s supersede a later owner configure', async (_kind, sharedToken) => {
+    const hydration = deferred<string | undefined>()
+    const secrets = tokenStore()
+    vi.mocked(secrets.get).mockReturnValue(hydration.promise)
+
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(async () => ({ signedIn: true })),
+      ownerStatus: vi.fn(),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://owner.gateway.test/api/ws?ticket=owner-ticket')
+    }
+
+    const { store, gateways } = harness(null, undefined, secrets, ownerAuth)
+
+    const shared = store.configure({ baseUrl: 'https://shared.gateway.test', token: sharedToken })
+    expect(store.getSnapshot()).toMatchObject({ phase: 'connecting', baseUrl: 'https://shared.gateway.test' })
+    expect(gateways).toHaveLength(0)
+
+    await store.configureOwner({ baseUrl: 'https://owner.gateway.test' })
+    expect(store.getSnapshot()).toMatchObject({
+      phase: 'ready', baseUrl: 'https://owner.gateway.test', connectionMode: 'owner'
+    })
+
+    hydration.resolve('hydrated-shared-token')
+    await shared
+
+    expect(gateways).toHaveLength(1)
+    expect(gateways[0].calls[0]).toEqual([
+      'connect', 'wss://owner.gateway.test/api/ws?ticket=owner-ticket'
+    ])
+    expect(secrets.set).not.toHaveBeenCalled()
+    expect(store.getSnapshot()).toMatchObject({
+      phase: 'ready',
+      baseUrl: 'https://owner.gateway.test',
+      connectionMode: 'owner',
+      hasSavedToken: true,
+      canForgetSavedToken: true
+    })
+  })
+
+  it('keeps a pending then failed owner attempt authoritative when stale shared token persistence completes', async () => {
+    let persistedToken: string | undefined = 'previous-shared-token'
+    const setStarted = deferred<void>()
+    const releaseSet = deferred<void>()
+    const secrets = tokenStore(persistedToken)
+
+    vi.mocked(secrets.get).mockImplementation(() => persistedToken)
+    vi.mocked(secrets.set).mockImplementation(async (_name, value) => {
+      setStarted.resolve()
+      await releaseSet.promise
+      persistedToken = value
+    })
+    vi.mocked(secrets.delete).mockImplementation(() => {persistedToken = undefined})
+
+    const ownerSignIn = deferred<{ signedIn: boolean }>()
+
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(() => ownerSignIn.promise),
+      ownerStatus: vi.fn(),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn()
+    }
+
+    const { store, storage } = harness(null, undefined, secrets, ownerAuth)
+
+    const shared = store.configure({
+      baseUrl: 'https://stale-shared.gateway.test',
+      token: 'stale-replacement-token'
+    })
+
+    await setStarted.promise
+
+    const owner = store.configureOwner({ baseUrl: 'https://current-owner.gateway.test' })
+    expect(store.getSnapshot()).toMatchObject({
+      phase: 'connecting', baseUrl: 'https://current-owner.gateway.test', error: null
+    })
+
+    releaseSet.resolve()
+    await shared
+
+    expect(persistedToken).toBe('previous-shared-token')
+    expect(storage.setItem).not.toHaveBeenCalledWith(
+      'hermes.companion.gatewayBaseUrl', 'https://stale-shared.gateway.test'
+    )
+    expect(store.getSnapshot()).toMatchObject({
+      phase: 'connecting', baseUrl: 'https://current-owner.gateway.test', error: null
+    })
+
+    ownerSignIn.reject(new Error('owner replacement failed'))
+    await owner
+
+    expect(store.getSnapshot()).toMatchObject({
+      phase: 'setup', baseUrl: 'https://current-owner.gateway.test', connectionMode: 'shared'
+    })
+    expect(store.getSnapshot().error).toContain('could not reach the gateway')
+    expect(storage.setItem).not.toHaveBeenCalled()
+    expect(persistedToken).toBe('previous-shared-token')
   })
 
   it('persists a replacement only after authenticated roster load succeeds', async () => {

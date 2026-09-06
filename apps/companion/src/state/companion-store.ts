@@ -75,6 +75,7 @@ export interface CompanionSnapshot {
   hasSavedToken: boolean
   canForgetSavedToken: boolean
   storesTokenEncrypted: boolean
+  ownerAuthAvailable: boolean
   connectionMode: CompanionConnectionMode
 }
 
@@ -115,6 +116,7 @@ export interface CompanionStore {
   getSnapshot(): CompanionSnapshot
   subscribe(listener: () => void): () => void
   configure(input: { baseUrl: string; token: string }): Promise<void>
+  configureOwner(input: { baseUrl: string }): Promise<void>
   connectOwner(): Promise<void>
   signOutOwner(): Promise<void>
   selectTeammate(teammateId: string, storedSessionId?: string): Promise<void>
@@ -332,6 +334,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
   let savedToken: string | undefined
   let savedTokenError: string | null = null
   let pendingSavedToken: Promise<string | undefined> | null = null
+  let secretMutationTail: Promise<void> = Promise.resolve()
   let connectionMode: CompanionConnectionMode = 'shared'
 
   try {
@@ -377,6 +380,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     hasSavedToken: Boolean(savedToken),
     canForgetSavedToken: Boolean(savedToken || savedTokenError),
     storesTokenEncrypted: secrets.persistent,
+    ownerAuthAvailable: Boolean(ownerAuth),
     connectionMode
   })
 
@@ -394,15 +398,25 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     for (const listener of listeners) {listener()}
   }
 
+  const savedTokenHydrationGeneration = connectionGeneration
+
   const savedTokenReady = pendingSavedToken
     ? pendingSavedToken.then((token) => {
         savedToken = token
         savedTokenError = null
-        publish({ hasSavedToken: Boolean(token), canForgetSavedToken: Boolean(token), error: null })
+        publish({
+          hasSavedToken: Boolean(token),
+          canForgetSavedToken: Boolean(token),
+          ...(connectionGeneration === savedTokenHydrationGeneration ? { error: null } : {})
+        })
       }).catch(() => {
         savedToken = undefined
         savedTokenError = SECURE_CREDENTIAL_ERROR
-        publish({ hasSavedToken: false, canForgetSavedToken: true, error: SECURE_CREDENTIAL_ERROR })
+        publish({
+          hasSavedToken: false,
+          canForgetSavedToken: true,
+          ...(connectionGeneration === savedTokenHydrationGeneration ? { error: SECURE_CREDENTIAL_ERROR } : {})
+        })
       })
     : Promise.resolve()
 
@@ -520,6 +534,49 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
   const isCurrentConnection = (client: CompanionGateway, generation: number) => (
     !destroyed && gateway === client && connectionGeneration === generation
   )
+
+  const mutateSecret = async <T>(mutation: () => T | Promise<T>): Promise<T> => {
+    const previous = secretMutationTail
+    let release!: () => void
+
+    secretMutationTail = new Promise<void>((resolve) => {release = resolve})
+    await previous.catch(() => undefined)
+
+    try {return await mutation()} finally {release()}
+  }
+
+  const persistSharedToken = async (
+    client: CompanionGateway,
+    operation: number,
+    replacementToken: string
+  ): Promise<boolean> => mutateSecret(async () => {
+    if (!isCurrentConnection(client, operation)) {return false}
+    const previousToken = savedToken
+
+    try {
+      await secrets.set(TOKEN_SECRET_NAME, replacementToken)
+    } catch {
+      throw new SecureCredentialError()
+    }
+
+    if (!isCurrentConnection(client, operation)) {
+      // The native write cannot be cancelled once dispatched. Restore the value
+      // this attempt replaced before allowing a newer token mutation to proceed.
+      try {
+        if (previousToken) {await secrets.set(TOKEN_SECRET_NAME, previousToken)}
+        else {await secrets.delete(TOKEN_SECRET_NAME)}
+      } catch {
+        throw new SecureCredentialError()
+      }
+
+      return false
+    }
+
+    savedToken = replacementToken
+    savedTokenError = null
+
+    return true
+  })
 
   const loadRoster = async (client: CompanionGateway, generation: number) => {
     const result = await client.listProfiles()
@@ -726,13 +783,16 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       return () => listeners.delete(listener)
     },
     async configure(input) {
-      work.reset()
-
-      if (pendingSavedToken) {await savedTokenReady}
       const operation = ++connectionGeneration
+      work.reset()
 
       try {
         const configuration = parseGatewayBaseUrl(input.baseUrl)
+        publish({ phase: 'connecting', baseUrl: configuration.baseUrl, warnings: configuration.warnings, error: null })
+
+        if (pendingSavedToken) {await savedTokenReady}
+
+        if (connectionGeneration !== operation || destroyed) {return}
         const replacementToken = input.token
         const token = replacementToken || savedToken
 
@@ -741,18 +801,14 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         const client = await connect('connecting', operation, 'shared', token)
 
         if (client && isCurrentConnection(client, operation)) {
-          if (replacementToken) {
-            try {
-              await secrets.set(TOKEN_SECRET_NAME, replacementToken)
-            } catch {
-              throw new SecureCredentialError()
-            }
+          if (replacementToken && !await persistSharedToken(client, operation, replacementToken)) {return}
 
-            savedToken = replacementToken
-            savedTokenError = null
-          }
+          if (!isCurrentConnection(client, operation)) {return}
 
           if (storage) {persistGatewayBaseUrl(storage, input)}
+
+          if (!isCurrentConnection(client, operation)) {return}
+
           publish({ phase: 'ready', hasSavedToken: Boolean(savedToken), canForgetSavedToken: Boolean(savedToken) })
         }
       } catch (error) {
@@ -760,6 +816,44 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
           discardGateway(operation)
           publish({
             phase: 'setup',
+            teammates: [],
+            selectedTeammateId: null,
+            runtimeSessionId: null,
+            storedSessionId: null,
+            messages: [],
+            pendingApproval: null,
+            streamingText: '',
+            turnStatus: 'idle',
+            error: publicError(error)
+          })
+        }
+      }
+    },
+    async configureOwner(input) {
+      work.reset()
+      const operation = ++connectionGeneration
+
+      try {
+        const configuration = parseGatewayBaseUrl(input.baseUrl)
+
+        if (!ownerAuth) {throw new Error('Owner authentication is unavailable.')}
+        publish({ phase: 'connecting', baseUrl: configuration.baseUrl, warnings: configuration.warnings, error: null })
+        await ownerAuth.ownerSignIn({ baseUrl: configuration.baseUrl })
+
+        if (connectionGeneration !== operation || destroyed) {return}
+        const client = await connect('connecting', operation, 'owner')
+
+        if (client && isCurrentConnection(client, operation)) {
+          if (storage) {persistGatewayBaseUrl(storage, { baseUrl: configuration.baseUrl, token: '' })}
+          publish({ phase: 'ready', connectionMode: 'owner', error: null })
+        }
+      } catch (error) {
+        if (connectionGeneration === operation) {
+          discardGateway(operation)
+          connectionMode = 'shared'
+          publish({
+            phase: 'setup',
+            connectionMode: 'shared',
             teammates: [],
             selectedTeammateId: null,
             runtimeSessionId: null,
@@ -1094,7 +1188,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     },
     async forgetSavedToken() {
       try {
-        await secrets.delete(TOKEN_SECRET_NAME)
+        await mutateSecret(() => secrets.delete(TOKEN_SECRET_NAME))
         savedToken = undefined
         savedTokenError = null
         publish({ hasSavedToken: false, canForgetSavedToken: false, error: null })
