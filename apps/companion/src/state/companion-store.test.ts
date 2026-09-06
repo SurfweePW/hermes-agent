@@ -777,11 +777,13 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('purges owner-only Work and directory caches before sign-out completes', async () => {
     const signOut = deferred<void>()
+
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(), ownerStatus: vi.fn(async () => ({ signedIn: true })),
       ownerSignOut: vi.fn(() => signOut.promise),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket')
     }
+
     const { createFakeWorkGateway } = await import('../fixtures/fake-work-gateway')
     const store = createCompanionStore({ gatewayFactory: createFakeWorkGateway, ownerAuthBridge: ownerAuth, storage: { getItem: () => null, setItem: () => undefined } })
     await store.configureOwner({ baseUrl: 'https://gateway.test' })

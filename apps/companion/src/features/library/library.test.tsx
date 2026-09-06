@@ -17,7 +17,7 @@ const capabilities = (maxChunkSize: number) => ({ version: 1 as const, max_page_
 
 function gateway(overrides: Partial<LibraryGateway> = {}): LibraryGateway {
   return {
-    libraryCapabilities: vi.fn().mockResolvedValue(capabilities(4)),
+    libraryCapabilities: vi.fn().mockResolvedValue(capabilities(8)),
     libraryProfiles: vi.fn().mockResolvedValue({ items: [{ profile: 'atlas', configured: true }], backend_namespace: 'test', as_of: '2026-01-02T00:00:00Z' }),
     listLibrary: vi.fn().mockResolvedValue(complete()),
     getLibraryArtifact: vi.fn().mockResolvedValue(detail),
@@ -115,7 +115,9 @@ describe('Library', () => {
     const payload = 'abcdefghij'
     const calls: number[] = []
 
-    const fake = gateway({ downloadLibraryArtifact: vi.fn(async ({ offset = 0, chunk_size = 4 }): Promise<LibraryChunk> => {
+    const fake = gateway({
+      libraryCapabilities: vi.fn().mockResolvedValue(capabilities(4)),
+      downloadLibraryArtifact: vi.fn(async ({ offset = 0, chunk_size = 4 }): Promise<LibraryChunk> => {
       calls.push(offset)
       const part = payload.slice(offset, offset + chunk_size)
 

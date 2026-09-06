@@ -1,6 +1,6 @@
 import { type KeyboardEvent } from 'react'
 
-import type { TopicCollection, TopicDetail, TopicItem, TopicSourceItem, TopicWorkItem } from '../../gateway/topic-types'
+import type { TopicCollection, TopicDetail, TopicItem } from '../../gateway/topic-types'
 
 import type { DirectorySnapshot } from './directory-store'
 
@@ -81,7 +81,7 @@ function TopicRow({ item, onOpen }: { item: TopicItem & { profile: string; sourc
   return <button className="directory-row directory-row--topic" onClick={onOpen} type="button"><span><strong>{item.name}</strong><small>{item.objective}</small><small>{item.collection} · Backend: {item.source} · Profile: {item.profile} · {item.lifecycle}</small></span><span><small>{action}</small><small>Linked work count unavailable · {item.linked_work.coverage} coverage</small></span><b aria-hidden="true">→</b></button>
 }
 
-export function TopicDetailView({ snapshot, params, onNavigate, tab, onTab }: { snapshot: DirectorySnapshot; params: URLSearchParams; onNavigate(params: URLSearchParams): void; tab: string; onTab(tab: string): void }) {
+export function TopicDetailView({ snapshot, params, onNavigate, onOpenSource, tab, onTab }: { snapshot: DirectorySnapshot; params: URLSearchParams; onNavigate(params: URLSearchParams): void; onOpenSource(kind: 'project' | 'session', profile: string, source: string, id: string): void; tab: string; onTab(tab: string): void }) {
   const detail = snapshot.selectedTopic
 
   const back = () => {
@@ -111,24 +111,31 @@ export function TopicDetailView({ snapshot, params, onNavigate, tab, onTab }: { 
     requestAnimationFrame(() => list?.querySelectorAll<HTMLElement>('[role="tab"]')[nextIndex!]?.focus())
   }
 
-  return <section className="directory-detail"><button className="back-button" onClick={back} type="button">← Back to topics</button>{detail ? <><p className="kicker">Topic · {detail.topic.collection} · Backend: {detail.backend_namespace} · Profile: {detail.profile}</p><h2>{detail.topic.name}</h2><p className="read-only-note">Read-only organization detail</p><div aria-label="Topic detail" className="detail-tabs" role="tablist">{tabs.map(([value, label], index) => <button aria-controls={`topic-detail-panel-${value}`} aria-selected={tab === value} id={`topic-detail-tab-${value}`} key={value} onClick={() => onTab(value)} onKeyDown={(event) => onKeyDown(event, index)} role="tab" tabIndex={tab === value ? 0 : -1} type="button">{label}</button>)}</div>{tabs.map(([value]) => <div aria-labelledby={`topic-detail-tab-${value}`} hidden={tab !== value} id={`topic-detail-panel-${value}`} key={value} role="tabpanel">{tab === value && <Panel detail={detail} onNavigate={onNavigate} tab={tab} />}</div>)}</> : <Empty copy={snapshot.detailMessage ?? 'Waiting for the read-only organization projection.'} title={snapshot.detailStatus === 'loading' ? 'Loading verified topic…' : 'Topic unavailable'} />}</section>
+  return <section className="directory-detail"><button className="back-button" onClick={back} type="button">← Back to topics</button>{detail ? <><p className="kicker">Topic · {detail.topic.collection} · Backend: {detail.backend_namespace} · Profile: {detail.profile}</p><h2>{detail.topic.name}</h2><p className="read-only-note">Read-only organization detail</p><div aria-label="Topic detail" className="detail-tabs" role="tablist">{tabs.map(([value, label], index) => <button aria-controls={`topic-detail-panel-${value}`} aria-selected={tab === value} id={`topic-detail-tab-${value}`} key={value} onClick={() => onTab(value)} onKeyDown={(event) => onKeyDown(event, index)} role="tab" tabIndex={tab === value ? 0 : -1} type="button">{label}</button>)}</div>{tabs.map(([value]) => <div aria-labelledby={`topic-detail-tab-${value}`} hidden={tab !== value} id={`topic-detail-panel-${value}`} key={value} role="tabpanel">{tab === value && <Panel detail={detail} onNavigate={onNavigate} onOpenSource={onOpenSource} snapshot={snapshot} tab={tab} />}</div>)}</> : <Empty copy={snapshot.detailMessage ?? 'Waiting for the read-only organization projection.'} title={snapshot.detailStatus === 'loading' ? 'Loading verified topic…' : 'Topic unavailable'} />}</section>
 }
 
-function Panel({ detail, tab, onNavigate }: { detail: TopicDetail; tab: string; onNavigate(params: URLSearchParams): void }) {
+function Panel({ detail, tab, onNavigate, onOpenSource, snapshot }: { detail: TopicDetail; tab: string; onNavigate(params: URLSearchParams): void; onOpenSource(kind: 'project' | 'session', profile: string, source: string, id: string): void; snapshot: DirectorySnapshot }) {
   if (tab === 'overview') { return <><p>{detail.overview.objective}</p><dl className="detail-facts"><div><dt>Verified lifecycle</dt><dd>{detail.overview.verified_status.value} · observed {displayDate(detail.overview.verified_status.observed_at)}</dd></div><div><dt>Status authority</dt><dd>{detail.overview.verified_status.authority}</dd></div><div><dt>Next useful action</dt><dd>{detail.overview.next_useful_action.availability === 'available' ? detail.overview.next_useful_action.references?.join(', ') : detail.overview.next_useful_action.reason ?? 'Not available from this source'}</dd></div><div><dt>Updated</dt><dd>{displayDate(detail.topic.updated_at)}</dd></div></dl></> }
 
-  if (tab === 'needs_me') { return <CollectionEmpty collection={detail.needs_me} empty="No Needs Me items" unavailable="Needs Me unavailable" /> }
+  if (tab === 'needs_me') { return <EntityWork projection={snapshot.entityProjection} type="needsMe" /> }
 
   if (tab === 'files') { return <div className="directory-empty" role="status"><strong>Linked Library files</strong><p>Open the authorized Library relationship filter for this topic.</p><button onClick={() => onNavigate(new URLSearchParams({ view: 'library', libraryProfile: detail.profile, libraryTopic: detail.topic.id }))} type="button">View files in Library</button></div> }
 
-  if (tab === 'work') { return detail.work.items?.length ? <WorkItems items={detail.work.items} /> : <CollectionEmpty collection={detail.work} empty="No organization work bindings" unavailable="Work unavailable" /> }
+  if (tab === 'work') { return <EntityWork projection={snapshot.entityProjection} type="work" /> }
 
-  return detail.sources.items?.length ? <SourceItems items={detail.sources.items} /> : <CollectionEmpty collection={detail.sources} empty="No organization source references" unavailable="Sources unavailable" />
+  return snapshot.topicSourceDetails.length ? <ul className="reference-list">{snapshot.topicSourceDetails.map((item) => <li key={`${item.source.kind}:${item.source.canonical_id}`}><strong>{item.title}</strong><span>{item.source.relationship} · {item.status} · {item.detail}</span>{item.source.kind === 'project' ? <button onClick={() => { if (item.source.kind === 'project') { onOpenSource('project', item.source.namespace.profile, item.source.namespace.backend_id, item.source.source_id) } }} type="button">Open project</button> : item.source.kind === 'session' ? <button onClick={() => { if (item.source.kind === 'session') { onOpenSource('session', item.source.namespace.profile, item.source.namespace.backend_id, item.source.session.persisted_session_id) } }} type="button">Open session</button> : null}</li>)}</ul> : snapshot.entityProjection?.status === 'loading' ? <Empty copy="Resolving authorized live source records." title="Loading sources…" /> : <CollectionEmpty collection={detail.sources} empty="No organization source references" unavailable="Sources unavailable" />
 }
 
-function WorkItems({ items }: { items: TopicWorkItem[] }) { return <ul className="reference-list">{items.map((item) => <li key={item.canonical_id}><strong>{item.work_kind}: {item.source_work_id}</strong><span>{item.relationship} binding · source record status unavailable</span></li>)}</ul> }
+export function EntityWork({ projection, type }: { projection: DirectorySnapshot['entityProjection']; type: 'work' | 'needsMe' }) {
+  if (!projection || projection.status === 'loading') { return <Empty copy="Resolving authorized organization bindings and durable work records." title="Loading verified work…" /> }
 
-function SourceItems({ items }: { items: TopicSourceItem[] }) { return <ul className="reference-list">{items.map((item) => <li key={`${item.kind}:${item.canonical_id}`}><strong>{item.kind}</strong><span>{item.relationship} · live source details unavailable</span></li>)}</ul> }
+  if (projection.status !== 'ready') { return <Empty copy={projection.message ?? 'The authorized projection could not be verified.'} title="Work unavailable" /> }
+  const items = projection[type]
+
+  if (!items.length) { return <Empty copy={projection.complete ? 'The complete authorized relationship projection returned no items.' : projection.message ?? 'No empty result is being claimed because relationship coverage is incomplete.'} title={projection.complete ? type === 'needsMe' ? 'No Needs Me items' : 'No linked work' : 'Work coverage incomplete'} /> }
+
+  return <ul className="reference-list">{items.map((entry) => <li key={entry.id}><strong>{entry.detail?.item.title ?? `${entry.binding.work_kind}: ${entry.binding.source_work_id}`}</strong><span>{entry.detail ? `${entry.detail.item.state.replaceAll('_', ' ')} · ${entry.detail.item.preparation_status.replaceAll('_', ' ')} · revision ${entry.detail.item.revision}` : 'Source record missing'}</span>{entry.priority && <span>{entry.priority.why_here} · Next: {entry.priority.next_step}</span>}</li>)}</ul>
+}
 
 function CollectionEmpty({ collection, empty, unavailable }: { collection: TopicCollection<unknown>; empty: string; unavailable: string }) {
   const status = collection.coverage.status

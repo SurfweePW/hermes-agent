@@ -64,6 +64,17 @@ export interface TopicListResult {
 }
 
 export interface SourceNamespace { backend_id: string; profile: string }
+export interface TopicSessionRef {
+  namespace: SourceNamespace
+  persisted_session_id: string
+  lineage_root_id: string
+  resolved_tip_id?: string | null
+}
+export interface TopicProjectRef {
+  namespace: SourceNamespace
+  source_id: string
+  kind: string
+}
 export interface TopicCollection<T> { items: T[] | null; coverage: Record<string, string | boolean> }
 export interface TopicWorkItem {
   id: string
@@ -76,13 +87,19 @@ export interface TopicWorkItem {
   updated_at: string
   authorization_filtered: boolean
   source_status: { availability: 'unknown'; coverage: 'unavailable' }
+  primary_session: TopicSessionRef | null
+  related_sessions: TopicSessionRef[]
+  source_projects: TopicProjectRef[]
 }
-export interface TopicSourceItem {
-  kind: 'namespace' | 'project' | 'session'
+export interface TopicSourceItemBase {
   canonical_id: string
   relationship: string
-  namespace?: SourceNamespace
 }
+export type TopicSourceItem = TopicSourceItemBase & (
+  | { kind: 'namespace'; namespace: SourceNamespace }
+  | { kind: 'project'; namespace: SourceNamespace; source_id: string; project_kind: string }
+  | { kind: 'session'; namespace: SourceNamespace; session: TopicSessionRef }
+)
 export interface TopicDetail {
   topic: TopicItem
   overview: { objective: string; next_useful_action: TopicNextAction; verified_status: TopicItem['verified_status']; coverage: { status: 'complete'; authority: 'organization.db' } }

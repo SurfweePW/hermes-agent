@@ -1,4 +1,5 @@
-import type { TopicCoverage, TopicDetail, TopicItem, TopicLifecycle, TopicListOptions, TopicListResult } from '../../gateway/topic-types'
+import type { NeedsMePriorityItem, NeedsMePriorityResult } from '../../gateway/organization-types'
+import type { TopicCoverage, TopicDetail, TopicItem, TopicLifecycle, TopicListOptions, TopicListResult, TopicSourceItem, TopicWorkItem } from '../../gateway/topic-types'
 import type {
   CompanionProject,
   CompanionProjectDetail,
@@ -9,6 +10,7 @@ import type {
   CompanionSessionListOptions,
   CompanionSessionListResult
 } from '../../gateway/types'
+import type { WorkCard, WorkDetail } from '../../gateway/work-types'
 
 export type DirectoryStatus = 'idle' | 'loading' | 'ready' | 'unsupported' | 'error' | 'offline'
 export interface SourceCoverage {
@@ -38,6 +40,26 @@ export interface TopicSourceCoverage {
   backendNamespace: string | null
 }
 export interface DirectoryTopic extends TopicItem { profile: string; source: string }
+export interface EntityWorkItem {
+  id: string
+  binding: TopicWorkItem
+  detail: WorkDetail | null
+  priority: NeedsMePriorityItem | null
+  status: 'available' | 'missing'
+}
+export interface EntityProjection {
+  status: DirectoryStatus
+  complete: boolean
+  work: EntityWorkItem[]
+  needsMe: EntityWorkItem[]
+  message: string | null
+}
+export interface TopicSourceDetail {
+  source: TopicSourceItem
+  status: 'ready' | 'missing' | 'error'
+  title: string
+  detail: string
+}
 export interface DirectoryGateway {
   listCompanionSessions(options: CompanionSessionListOptions): Promise<CompanionSessionListResult>
   getCompanionSessionHistory(profile: string, id: string, cursor?: string, expectedSource?: string): Promise<CompanionSessionHistoryResult>
@@ -45,6 +67,9 @@ export interface DirectoryGateway {
   getCompanionProject(profile: string, id: string, cursor?: string): Promise<CompanionProjectDetail>
   listCompanionTopics(options: TopicListOptions): Promise<TopicListResult>
   getCompanionTopic(profile: string, id: string): Promise<TopicDetail>
+  listNeedsMePriorities(profile: string, reviewId?: string, groupBy?: 'topic' | 'session' | 'project'): Promise<NeedsMePriorityResult>
+  listWork(profile: string): Promise<{ items: WorkCard[] }>
+  getWork(profile: string, id: string): Promise<WorkDetail>
 }
 export interface DirectorySnapshot {
   sessions: readonly CompanionSession[]
@@ -54,6 +79,8 @@ export interface DirectorySnapshot {
   history: CompanionSessionHistoryResult | null
   topics: readonly DirectoryTopic[]
   selectedTopic: TopicDetail | null
+  entityProjection: EntityProjection | null
+  topicSourceDetails: readonly TopicSourceDetail[]
   topicCoverage: readonly TopicSourceCoverage[]
   detailStatus: DirectoryStatus
   detailMessage: string | null
@@ -79,7 +106,7 @@ export interface DirectoryStore {
 const sourceKey = (source: string, profile: string, id: string) => JSON.stringify([source, profile, id])
 const errorCode = (error: unknown) => typeof error === 'object' && error !== null && 'code' in error ? Number(error.code) : undefined
 const unsupported = (error: unknown) => errorCode(error) === -32601 || (error instanceof Error && /method not found|unknown method|-32601/i.test(error.message))
-const initialSnapshot = (): DirectorySnapshot => ({ sessions: [], projects: [], topics: [], selectedProject: null, selectedSession: null, selectedTopic: null, history: null, detailStatus: 'idle', detailMessage: null, coverage: [], topicCoverage: [] })
+const initialSnapshot = (): DirectorySnapshot => ({ sessions: [], projects: [], topics: [], selectedProject: null, selectedSession: null, selectedTopic: null, entityProjection: null, topicSourceDetails: [], history: null, detailStatus: 'idle', detailMessage: null, coverage: [], topicCoverage: [] })
 
 const pendingCoverage = (profile: string): SourceCoverage => ({
   profile,
@@ -165,7 +192,13 @@ export function createDirectoryStore(): DirectoryStore {
       publish(projection())
     } catch (error) {
       if (generation !== epoch || gateway !== client) { return }
-      if (errorCode(error) === 4403) {purgeUnauthorized(); return}
+
+      if (errorCode(error) === 4403) {
+        purgeUnauthorized()
+
+        return
+      }
+
       topicCoverage.set(profile, append
         ? { profile, status: failureStatus(error), coverage: previous?.coverage ?? null, message: unsupported(error) ? 'Backend update required for Topics.' : 'Topics could not be verified.', cursor: previous?.cursor ?? null, hasMore: previous?.hasMore ?? false, loaded: previous?.loaded ?? 0, total: previous?.total ?? null, backendNamespace: previous?.backendNamespace ?? null }
         : { profile, status: failureStatus(error), coverage: null, message: unsupported(error) ? 'Backend update required for Topics.' : 'Topics could not be verified.', cursor: null, hasMore: false, loaded: 0, total: null, backendNamespace: null })
@@ -195,7 +228,11 @@ export function createDirectoryStore(): DirectoryStore {
     const sessionError = sessionSettled.status === 'rejected' ? sessionSettled.reason : null
     const projectError = projectSettled.status === 'rejected' ? projectSettled.reason : null
 
-    if (errorCode(sessionError) === 4403 || errorCode(projectError) === 4403) {purgeUnauthorized(); return}
+    if (errorCode(sessionError) === 4403 || errorCode(projectError) === 4403) {
+      purgeUnauthorized()
+
+      return
+    }
 
     if (sessionResult) {
       if (append !== 'sessions') {for (const [key, item] of sessions) {if (item.profile === profile) {sessions.delete(key)}}}
@@ -246,13 +283,130 @@ export function createDirectoryStore(): DirectoryStore {
     publish(projection())
   }
 
+  const loadEntityProjection = async (client: DirectoryGateway, kind: 'project' | 'session' | 'topic', profile: string, id: string, source: string, selectedTopic?: TopicDetail): Promise<EntityProjection> => {
+    let details: TopicDetail[] = []
+    let complete = true
+
+    if (kind === 'topic' && selectedTopic) {
+      details = [selectedTopic]
+      complete = selectedTopic.work.coverage.organization_bindings === 'complete' && selectedTopic.work.coverage.authorization_filtered !== true
+    } else {
+      let cursor: string | undefined
+      let expectedTotal: number | null = null
+      const seen = new Set<string>()
+
+      do {
+        const page = await client.listCompanionTopics({ profile, limit: 50, ...(cursor ? { cursor } : {}) })
+
+        if (page.backend_namespace !== source || (expectedTotal !== null && page.total !== expectedTotal)) { throw new Error('Topic relationship snapshot changed while loading entity work.') }
+        expectedTotal = page.total
+        complete = complete && page.coverage.status === 'complete' && page.coverage.authorization_filtered !== true
+
+        for (const item of page.items) {
+          if (seen.has(item.id)) { continue }
+          seen.add(item.id)
+          details.push(await client.getCompanionTopic(profile, item.id))
+        }
+
+        cursor = page.has_more && page.next_cursor ? page.next_cursor : undefined
+      } while (cursor)
+
+      complete = complete && expectedTotal === seen.size
+    }
+
+    const bindings = new Map<string, TopicWorkItem>()
+
+    for (const detail of details) {
+      complete = complete && detail.work.coverage.organization_bindings === 'complete' && detail.work.coverage.authorization_filtered !== true
+      const sourceMatches = kind === 'project' && detail.sources.items?.some((item) => item.kind === 'project' && item.namespace.profile === profile && item.namespace.backend_id === source && item.source_id === id)
+
+      for (const binding of detail.work.items ?? []) {
+        const matches = kind === 'topic'
+          || kind === 'project' && (sourceMatches || binding.source_projects.some((item) => item.namespace.profile === profile && item.namespace.backend_id === source && item.source_id === id))
+          || kind === 'session' && [binding.primary_session, ...binding.related_sessions].some((item) => item?.namespace.profile === profile && item.namespace.backend_id === source && (item.persisted_session_id === id || item.lineage_root_id === id))
+
+        if (matches && profiles.includes(binding.source_namespace.profile) && binding.source_namespace.backend_id === source) { bindings.set(binding.canonical_id, binding) }
+      }
+    }
+
+    const priority = await client.listNeedsMePriorities(profile, undefined, kind)
+    complete = complete
+      && priority.coverage.work === 'complete'
+      && priority.coverage.organization === 'complete'
+      && !priority.coverage.authorization_filtered
+    const priorityByWork = new Map(priority.groups.flatMap((group) => group.items).map((item) => [JSON.stringify([item.profile, item.work_id]), item]))
+    const cardsByProfile = new Map<string, WorkCard[]>()
+
+    for (const sourceProfile of new Set([...bindings.values()].map((binding) => binding.source_namespace.profile))) {
+      cardsByProfile.set(sourceProfile, (await client.listWork(sourceProfile)).items)
+    }
+
+    const work: EntityWorkItem[] = []
+
+    for (const binding of bindings.values()) {
+      const card = cardsByProfile.get(binding.source_namespace.profile)?.find((item) => item.id === binding.source_work_id || item.source_key === binding.source_work_id)
+      const detail = card ? await client.getWork(card.profile, card.id) : null
+      work.push({ id: binding.canonical_id, binding, detail, priority: card ? priorityByWork.get(JSON.stringify([card.profile, card.id])) ?? null : null, status: detail ? 'available' : 'missing' })
+
+      if (!detail) { complete = false }
+    }
+
+    work.sort((left, right) => (right.priority !== null ? 1 : 0) - (left.priority !== null ? 1 : 0) || (right.detail?.item.updated_at ?? right.binding.updated_at).localeCompare(left.detail?.item.updated_at ?? left.binding.updated_at))
+
+    return { status: 'ready', complete, work, needsMe: work.filter((item) => item.detail?.item.state === 'needs_me'), message: complete ? null : 'Some authorized relationship or source records could not be verified.' }
+  }
+
+  const loadTopicSources = async (client: DirectoryGateway, detail: TopicDetail): Promise<TopicSourceDetail[]> => Promise.all((detail.sources.items ?? []).map(async (source): Promise<TopicSourceDetail> => {
+    if (source.kind === 'namespace') { return { source, status: 'ready', title: source.namespace.profile, detail: `Authorized namespace · ${source.namespace.backend_id}` } }
+
+    try {
+      if (source.kind === 'project') {
+        const value = await client.getCompanionProject(source.namespace.profile, source.source_id)
+
+        if (value.project.source !== source.namespace.backend_id) { throw new Error('Project source identity changed.') }
+
+        return { source, status: 'ready', title: value.project.title, detail: `${value.project.type.replaceAll('_', ' ')} · ${value.project.archived ? 'archived' : 'current'}` }
+      }
+
+      const value = await client.getCompanionSessionHistory(source.namespace.profile, source.session.persisted_session_id, undefined, source.namespace.backend_id)
+      const known = sessions.get(sourceKey(source.namespace.backend_id, source.namespace.profile, source.session.persisted_session_id))
+
+      return { source, status: 'ready', title: known?.title || source.session.persisted_session_id, detail: `${value.entries.length} messages loaded · ${value.coverage.complete ? 'complete history' : 'partial history'}` }
+    } catch (error) {
+      if (errorCode(error) === 4403) { throw error }
+
+      return { source, status: errorCode(error) === 4404 ? 'missing' : 'error', title: source.kind === 'project' ? source.source_id : source.session.persisted_session_id, detail: errorCode(error) === 4404 ? 'Source record not found' : 'Live source could not be verified' }
+    }
+  }))
+
+  const publishSupplemental = async (client: DirectoryGateway, generation: number, kind: 'project' | 'session' | 'topic', profile: string, id: string, source: string, detail?: TopicDetail) => {
+    try {
+      const [projection, sourceDetails] = await Promise.all([
+        loadEntityProjection(client, kind, profile, id, source, detail),
+        detail ? loadTopicSources(client, detail) : Promise.resolve([])
+      ])
+
+      if (generation === epoch && gateway === client) { publish({ entityProjection: projection, topicSourceDetails: sourceDetails }) }
+    } catch (error) {
+      if (generation !== epoch || gateway !== client) { return }
+
+      if (errorCode(error) === 4403) {
+        purgeUnauthorized()
+
+        return
+      }
+
+      publish({ entityProjection: { status: failureStatus(error), complete: false, work: [], needsMe: [], message: unsupported(error) ? 'Backend update required for authorized Work and Needs Me.' : 'Authorized Work and Needs Me could not be verified.' }, topicSourceDetails: [] })
+    }
+  }
+
   const openProject = async (profile: string, id: string, source?: string, preserve = false) => {
     const client = gateway
 
     if (!client || !profiles.includes(profile)) {return}
     selection = { kind: 'project', profile, id, source }
     const generation = ++epoch
-    publish({ ...(preserve ? {} : { selectedProject: null }), selectedSession: null, selectedTopic: null, history: null, detailStatus: 'loading', detailMessage: null })
+    publish({ ...(preserve ? {} : { selectedProject: null }), selectedSession: null, selectedTopic: null, entityProjection: { status: 'loading', complete: false, work: [], needsMe: [], message: null }, topicSourceDetails: [], history: null, detailStatus: 'loading', detailMessage: null })
 
     try {
       const detail = await client.getCompanionProject(profile, id)
@@ -262,9 +416,15 @@ export function createDirectoryStore(): DirectoryStore {
       if (source && detail.project.source !== source) {throw new Error('Source identity changed while loading project details.')}
       projects.set(sourceKey(detail.project.source, detail.project.profile, detail.project.id), detail.project)
       publish({ ...projection(), selectedProject: detail, selectedSession: null, selectedTopic: null, history: null, detailStatus: 'ready' })
+      await publishSupplemental(client, generation, 'project', profile, id, detail.project.source)
     } catch (error) {
       if (generation === epoch && gateway === client) {
-        if (errorCode(error) === 4403) {purgeUnauthorized(); return}
+        if (errorCode(error) === 4403) {
+          purgeUnauthorized()
+
+          return
+        }
+
         const isUnsupported = unsupported(error)
         publish({ detailStatus: isUnsupported ? 'unsupported' : 'error', detailMessage: isUnsupported ? 'Backend update required for project details.' : 'Project details could not be verified.' })
       }
@@ -282,7 +442,7 @@ export function createDirectoryStore(): DirectoryStore {
 
     selection = { kind: 'session', profile, id, source: source ?? known?.source }
     const generation = ++epoch
-    publish({ selectedSession: preserve ? snapshot.selectedSession ?? known ?? null : known ?? null, selectedProject: null, selectedTopic: null, ...(preserve ? {} : { history: null }), detailStatus: 'loading', detailMessage: null })
+    publish({ selectedSession: preserve ? snapshot.selectedSession ?? known ?? null : known ?? null, selectedProject: null, selectedTopic: null, entityProjection: { status: 'loading', complete: false, work: [], needsMe: [], message: null }, topicSourceDetails: [], ...(preserve ? {} : { history: null }), detailStatus: 'loading', detailMessage: null })
 
     try {
       const result = await client.getCompanionSessionHistory(profile, id, undefined, source)
@@ -292,9 +452,15 @@ export function createDirectoryStore(): DirectoryStore {
       if (source && result.source !== source) {throw new Error('Source identity changed while loading session history.')}
       const authoritative = known?.source === result.source ? known : null
       publish({ ...projection(), selectedSession: authoritative, history: result, detailStatus: 'ready' })
+      await publishSupplemental(client, generation, 'session', profile, id, result.source)
     } catch (error) {
       if (generation === epoch && gateway === client) {
-        if (errorCode(error) === 4403) {purgeUnauthorized(); return}
+        if (errorCode(error) === 4403) {
+          purgeUnauthorized()
+
+          return
+        }
+
         const isUnsupported = unsupported(error)
         publish({ detailStatus: isUnsupported ? 'unsupported' : 'error', detailMessage: isUnsupported ? 'Backend update required for persisted session history.' : 'Session history could not be verified.' })
       }
@@ -307,7 +473,7 @@ export function createDirectoryStore(): DirectoryStore {
     if (!client?.getCompanionTopic || !profiles.includes(profile)) {return}
     selection = { kind: 'topic', profile, id, source }
     const generation = ++epoch
-    publish({ selectedProject: null, selectedSession: null, history: null, ...(preserve ? {} : { selectedTopic: null }), detailStatus: 'loading', detailMessage: null })
+    publish({ selectedProject: null, selectedSession: null, history: null, entityProjection: { status: 'loading', complete: false, work: [], needsMe: [], message: null }, topicSourceDetails: [], ...(preserve ? {} : { selectedTopic: null }), detailStatus: 'loading', detailMessage: null })
 
     try {
       const detail = await client.getCompanionTopic(profile, id)
@@ -317,9 +483,15 @@ export function createDirectoryStore(): DirectoryStore {
       if (source && detail.backend_namespace !== source) {throw new Error('Source identity changed while loading topic details.')}
       topics.set(`${profile}\0${detail.backend_namespace}\0${detail.topic.id}`, { ...detail.topic, profile, source: detail.backend_namespace })
       publish({ ...projection(), selectedTopic: detail, detailStatus: 'ready' })
+      await publishSupplemental(client, generation, 'topic', profile, id, detail.backend_namespace, detail)
     } catch (error) {
       if (generation === epoch && gateway === client) {
-        if (errorCode(error) === 4403) {purgeUnauthorized(); return}
+        if (errorCode(error) === 4403) {
+          purgeUnauthorized()
+
+          return
+        }
+
         publish({ detailStatus: failureStatus(error), detailMessage: unsupported(error) ? 'Backend update required for topic details.' : 'Topic details could not be verified.' })
       }
     }
@@ -369,13 +541,13 @@ export function createDirectoryStore(): DirectoryStore {
         for (const profile of profiles) {coverage.set(profile, { ...pendingCoverage(profile), status: 'unsupported', sessionStatus: 'unsupported', projectStatus: 'unsupported', message: 'Backend update required for complete browsing.' })}
 
         for (const profile of profiles) {topicCoverage.set(profile, { profile, status: 'unsupported', coverage: null, message: 'Backend update required for Topics.', cursor: null, hasMore: false, loaded: 0, total: null, backendNamespace: null })}
-        publish({ ...projection(), selectedProject: null, selectedSession: null, selectedTopic: null, history: null, detailStatus: 'idle', detailMessage: null })
+        publish({ ...projection(), selectedProject: null, selectedSession: null, selectedTopic: null, entityProjection: null, topicSourceDetails: [], history: null, detailStatus: 'idle', detailMessage: null })
 
         return
       }
 
       gateway = candidate as DirectoryGateway
-      publish({ ...projection(), selectedProject: null, selectedSession: null, selectedTopic: null, history: null, detailStatus: 'idle', detailMessage: null })
+      publish({ ...projection(), selectedProject: null, selectedSession: null, selectedTopic: null, entityProjection: null, topicSourceDetails: [], history: null, detailStatus: 'idle', detailMessage: null })
       await refresh()
     },
     disconnect() {
@@ -386,7 +558,7 @@ export function createDirectoryStore(): DirectoryStore {
       for (const [profile, item] of coverage) {coverage.set(profile, { ...item, status: 'offline', sessionStatus: 'offline', projectStatus: 'offline', complete: false, message: 'Reconnect to verify this source.' })}
 
       for (const [profile, item] of topicCoverage) {topicCoverage.set(profile, { ...item, status: 'offline', message: 'Reconnect to verify Topics.' })}
-      publish({ ...projection(), selectedProject: null, selectedSession: null, selectedTopic: null, history: null, detailStatus: 'offline', detailMessage: 'Reconnect to verify details.' })
+      publish({ ...projection(), selectedProject: null, selectedSession: null, selectedTopic: null, entityProjection: null, topicSourceDetails: [], history: null, detailStatus: 'offline', detailMessage: 'Reconnect to verify details.' })
     },
     reset() {
       ++epoch; gateway = null; profiles = []; selection = null; refreshInFlight = null; sessions.clear(); projects.clear(); topics.clear(); coverage.clear(); topicCoverage.clear()
@@ -447,7 +619,12 @@ export function createDirectoryStore(): DirectoryStore {
         publish({ history: { ...next, entries: [...current.entries, ...next.entries.filter((entry) => !seen.has(entry.id))], coverage: { ...next.coverage, complete: current.coverage.complete && next.coverage.complete, message: [...new Set(coverageMessage)].join(' ') || null } }, detailStatus: 'ready' })
       } catch (error) {
         if (generation === epoch && gateway === client) {
-          if (errorCode(error) === 4403) {purgeUnauthorized(); return}
+          if (errorCode(error) === 4403) {
+            purgeUnauthorized()
+
+            return
+          }
+
           publish({ detailStatus: 'error', detailMessage: 'Older history could not be verified.' })
         }
       }
@@ -481,7 +658,12 @@ export function createDirectoryStore(): DirectoryStore {
         })
       } catch (error) {
         if (generation === epoch && gateway === client) {
-          if (errorCode(error) === 4403) {purgeUnauthorized(); return}
+          if (errorCode(error) === 4403) {
+            purgeUnauthorized()
+
+            return
+          }
+
           publish({ detailStatus: 'error', detailMessage: 'Complete project membership could not be verified.' })
         }
       }
@@ -489,6 +671,6 @@ export function createDirectoryStore(): DirectoryStore {
     openProject,
     openSession,
     openTopic,
-    clearDetail() {selection = null; ++epoch; publish({ selectedProject: null, selectedSession: null, selectedTopic: null, history: null, detailStatus: 'idle', detailMessage: null })}
+    clearDetail() {selection = null; ++epoch; publish({ selectedProject: null, selectedSession: null, selectedTopic: null, entityProjection: null, topicSourceDetails: [], history: null, detailStatus: 'idle', detailMessage: null })}
   }
 }

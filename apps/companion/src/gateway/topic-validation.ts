@@ -5,6 +5,8 @@ import type {
   TopicDetail,
   TopicItem,
   TopicListResult,
+  TopicProjectRef,
+  TopicSessionRef,
   TopicSourceItem,
   TopicWorkItem
 } from './topic-types'
@@ -61,6 +63,26 @@ const namespace = (value: unknown, backend: string, method: string): SourceNames
   if (backendId !== backend || /[\\/]/.test(profile) || profile.includes('://')) { return malformed(method) }
 
   return { backend_id: backendId, profile }
+}
+
+const sessionRef = (value: unknown, backend: string, method: string): TopicSessionRef => {
+  if (!record(value)) { return malformed(method) }
+  const resolved = value.resolved_tip_id
+
+  if (!(resolved === undefined || resolved === null || typeof resolved === 'string')) { return malformed(method) }
+
+  return {
+    namespace: namespace(value.namespace, backend, method),
+    persisted_session_id: text(value.persisted_session_id, method, 500),
+    lineage_root_id: text(value.lineage_root_id, method, 500),
+    ...(resolved !== undefined ? { resolved_tip_id: resolved as string | null } : {})
+  }
+}
+
+const projectRef = (value: unknown, backend: string, method: string): TopicProjectRef => {
+  if (!record(value)) { return malformed(method) }
+
+  return { namespace: namespace(value.namespace, backend, method), source_id: text(value.source_id, method, 500), kind: text(value.kind, method, 100) }
 }
 
 const nextAction = (value: unknown, method: string): TopicItem['next_useful_action'] => {
@@ -143,14 +165,26 @@ export function validateTopicDetail(value: unknown, expectedProfile: string, exp
     if (!record(raw) || !record(raw.source_status) || !['primary', 'related'].includes(raw.relationship as string) || typeof raw.authorization_filtered !== 'boolean' || raw.source_status.availability !== 'unknown' || raw.source_status.coverage !== 'unavailable') { return malformed(method) }
     const updatedAt = instant(raw.updated_at, method)
 
-    return { id: text(raw.id, method, 200), canonical_id: text(raw.canonical_id, method, 1000), work_kind: text(raw.work_kind, method, 200), source_work_id: text(raw.source_work_id, method, 200), source_namespace: namespace(raw.source_namespace, backend, method), relationship: raw.relationship as 'primary' | 'related', version: integer(raw.version, method), updated_at: updatedAt!, authorization_filtered: raw.authorization_filtered, source_status: { availability: 'unknown', coverage: 'unavailable' } }
+    if (!(raw.primary_session === null || record(raw.primary_session)) || !Array.isArray(raw.related_sessions) || !Array.isArray(raw.source_projects)) { return malformed(method) }
+
+    return { id: text(raw.id, method, 200), canonical_id: text(raw.canonical_id, method, 1000), work_kind: text(raw.work_kind, method, 200), source_work_id: text(raw.source_work_id, method, 500), source_namespace: namespace(raw.source_namespace, backend, method), relationship: raw.relationship as 'primary' | 'related', version: integer(raw.version, method), updated_at: updatedAt!, authorization_filtered: raw.authorization_filtered, source_status: { availability: 'unknown', coverage: 'unavailable' }, primary_session: raw.primary_session === null ? null : sessionRef(raw.primary_session, backend, method), related_sessions: raw.related_sessions.map((item) => sessionRef(item, backend, method)), source_projects: raw.source_projects.map((item) => projectRef(item, backend, method)) }
   }, false)
 
   const sources = collection<TopicSourceItem>(value.sources, method, (raw) => {
     if (!record(raw) || !['namespace', 'project', 'session'].includes(raw.kind as string)) { return malformed(method) }
-    const namespaceRaw = raw.kind === 'session' && record(raw.session) ? raw.session.namespace : raw.namespace
+    const base = { canonical_id: text(raw.canonical_id, method, 1000), relationship: text(raw.relationship, method, 200) }
 
-    return { kind: raw.kind as TopicSourceItem['kind'], canonical_id: text(raw.canonical_id, method, 1000), relationship: text(raw.relationship, method, 200), ...(namespaceRaw ? { namespace: namespace(namespaceRaw, backend, method) } : {}) }
+    if (raw.kind === 'session') {
+      const session = sessionRef(raw.session, backend, method)
+
+      return { ...base, kind: 'session', namespace: session.namespace, session }
+    }
+
+    if (raw.kind === 'project') {
+      return { ...base, kind: 'project', namespace: namespace(raw.namespace, backend, method), source_id: text(raw.source_id, method, 500), project_kind: text(raw.project_kind, method, 100) }
+    }
+
+    return { ...base, kind: 'namespace', namespace: namespace(raw.namespace, backend, method) }
   }, false)
 
   const needsMe = collection<never>(value.needs_me, method, () => malformed(method), true)

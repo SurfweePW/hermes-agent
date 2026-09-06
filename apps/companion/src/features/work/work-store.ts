@@ -131,7 +131,11 @@ export function createWorkStore(): WorkStore {
     const failed = responses.filter((response): response is Extract<(typeof responses)[number], { ok: false }> => !response.ok)
     const refreshedAt = new Date().toISOString()
 
-    if (failed.some(({ error }) => errorCode(error) === 4403)) {purgeUnauthorized(); return}
+    if (failed.some(({ error }) => errorCode(error) === 4403)) {
+      purgeUnauthorized()
+
+      return
+    }
 
     for (const response of successful) {
       for (const existingKey of [...cards.keys()]) {
@@ -156,7 +160,11 @@ export function createWorkStore(): WorkStore {
     try {
       detail = selection && successful.some(({ profile }) => profile === selection?.profile) ? await client.getWork(selection.profile, selection.id) : detail
     } catch (error) {
-      if (errorCode(error) === 4403) {purgeUnauthorized(); return}
+      if (errorCode(error) === 4403) {
+        purgeUnauthorized()
+
+        return
+      }
       // Keep the last verified detail; source coverage already communicates an incomplete refresh.
     }
 

@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import type { NeedsMePriorityResult } from '../../gateway/organization-types'
 import type { TopicDetail, TopicItem, TopicListResult } from '../../gateway/topic-types'
 import type {
   CompanionProject,
@@ -7,6 +8,7 @@ import type {
   CompanionSession,
   CompanionSessionHistoryResult
 } from '../../gateway/types'
+import type { WorkCard } from '../../gateway/work-types'
 
 import { createDirectoryStore, type DirectoryGateway } from './directory-store'
 
@@ -125,7 +127,13 @@ function gateway(): DirectoryGateway {
     getCompanionSessionHistory: vi.fn(async (_profile, id) => history(id)),
     getCompanionProject: vi.fn(async () => projectDetail([session('one')])),
     listCompanionTopics: vi.fn(async () => topicPage([])),
-    getCompanionTopic: vi.fn(async () => topicDetail())
+    getCompanionTopic: vi.fn(async () => topicDetail()),
+    listNeedsMePriorities: vi.fn(async (_profile: string, _reviewId?: string, groupBy: 'topic' | 'session' | 'project' = 'topic'): Promise<NeedsMePriorityResult> => ({
+      profile, backend_namespace: 'organization-db', sort: 'recommended', policy_version: 'v1', review_id: null, group_by: groupBy,
+      groups: [], as_of: '2026-09-03T00:00:00.000Z', coverage: { work: 'complete', organization: 'complete', authorization_filtered: false }
+    })),
+    listWork: vi.fn(async () => ({ items: [] })),
+    getWork: vi.fn(async () => { throw new Error('Unexpected work lookup') })
   }
 }
 
@@ -137,6 +145,51 @@ function deferred<T>() {
 }
 
 describe('createDirectoryStore', () => {
+  it('hydrates authorized topic bindings with durable Work and Needs Me details', async () => {
+    const client = gateway()
+
+    const binding: NonNullable<TopicDetail['work']['items']>[number] = {
+      id: 'binding-1', canonical_id: 'binding:launch-checklist', work_kind: 'task', source_work_id: 'launch-checklist',
+      source_namespace: { backend_id: 'organization-db', profile }, relationship: 'primary', version: 1,
+      updated_at: '2026-09-03T00:00:00.000Z', authorization_filtered: false,
+      source_status: { availability: 'unknown', coverage: 'unavailable' }, primary_session: null, related_sessions: [], source_projects: []
+    }
+
+    const card: WorkCard = {
+      id: 'launch-checklist', profile, source_key: 'launch-checklist', state: 'needs_me', title: 'Approve launch checklist', brief: 'Review release gates.',
+      evidence: [], next_action: 'Approve it', owner: profile, revision: 2, version: 3, created_at: '2026-09-01T00:00:00.000Z',
+      updated_at: '2026-09-03T00:00:00.000Z', snoozed_until: null, attention_due: true, attention_key: 'launch-checklist', approval: null,
+      preparation_status: 'prepared', handoff_key: null, execution_link: null, tracker_evidence: null, completion_evidence: null
+    }
+
+    const detailed = topicDetail()
+    detailed.work = { items: [binding], coverage: { status: 'complete', organization_bindings: 'complete', authorization_filtered: false } }
+    vi.mocked(client.getCompanionTopic).mockResolvedValue(detailed)
+    vi.mocked(client.listWork).mockResolvedValue({ items: [card] })
+    vi.mocked(client.getWork).mockResolvedValue({ item: card, comments: [], decisions: [], tracker_status_history: [] })
+    vi.mocked(client.listNeedsMePriorities).mockResolvedValue({
+      profile, backend_namespace: 'organization-db', sort: 'recommended', policy_version: 'v1', review_id: null, group_by: 'topic',
+      groups: [{
+        id: 'topic-1', group: { kind: 'topic', id: topic.id, name: topic.name, collection: topic.collection, objective: topic.objective },
+        eligibility: 'assessed', eligible_action_count: 1, why_here: 'Release gate',
+        items: [{ profile, work_id: card.id, candidate_id: 'candidate-1', eligibility: 'assessed', why_here: 'Release gate', next_step: 'Approve it', trade_off: 'Delay', assessed_at: null, evidence: [], assessment: null, override: null }]
+      }],
+      as_of: '2026-09-03T00:00:00.000Z', coverage: { work: 'complete', organization: 'complete', authorization_filtered: false }
+    })
+    const store = createDirectoryStore()
+    await store.attach(client, [profile])
+
+    await store.openTopic(profile, topic.id, 'organization-db')
+
+    expect(client.listNeedsMePriorities).toHaveBeenLastCalledWith(profile, undefined, 'topic')
+    expect(client.getWork).toHaveBeenCalledWith(profile, card.id)
+    expect(store.getSnapshot().entityProjection).toMatchObject({
+      status: 'ready', complete: true,
+      work: [{ status: 'available', detail: { item: { title: 'Approve launch checklist' } } }],
+      needsMe: [{ priority: { next_step: 'Approve it' } }]
+    })
+  })
+
   it('clears stale topic rows while a changed query loads and keeps them suppressed on failure', async () => {
     const client = gateway()
     vi.mocked(client.listCompanionTopics).mockResolvedValueOnce(topicPage([topic]))

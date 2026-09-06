@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { TopicCoverage, TopicDetail, TopicItem } from '../../gateway/topic-types'
 
-import type { DirectorySnapshot } from './directory-store'
+import type { DirectorySnapshot, EntityProjection, TopicSourceDetail } from './directory-store'
 import { WorkDirectory } from './work-directory'
 
 const topic: TopicItem = {
@@ -78,6 +78,57 @@ const detail: TopicDetail = {
   warnings: []
 }
 
+const binding: NonNullable<TopicDetail['work']['items']>[number] = {
+  id: 'binding-1',
+  canonical_id: 'work-binding:atlas:launch-checklist',
+  work_kind: 'task',
+  source_work_id: 'launch-checklist',
+  source_namespace: { backend_id: 'organization-db', profile: 'atlas' },
+  relationship: 'primary',
+  version: 2,
+  updated_at: '2026-09-06T09:30:00.000Z',
+  authorization_filtered: false,
+  source_status: { availability: 'unknown', coverage: 'unavailable' },
+  primary_session: null,
+  related_sessions: [],
+  source_projects: []
+}
+
+const entityProjection: EntityProjection = {
+  status: 'ready',
+  complete: true,
+  work: [{
+    id: binding.canonical_id,
+    binding,
+    status: 'available',
+    detail: {
+      item: {
+        id: 'launch-checklist', profile: 'atlas', source_key: 'launch-checklist', state: 'needs_me', title: 'Approve launch checklist', brief: 'Review release gates.',
+        evidence: [], next_action: 'Approve the checklist', owner: 'atlas', revision: 4, version: 5,
+        created_at: '2026-09-01T10:00:00.000Z', updated_at: '2026-09-06T09:30:00.000Z', snoozed_until: null,
+        attention_due: true, attention_key: 'launch-checklist', approval: null, preparation_status: 'prepared', handoff_key: null,
+        execution_link: null, tracker_evidence: null, completion_evidence: null
+      },
+      comments: [], decisions: [], tracker_status_history: []
+    },
+    priority: {
+      profile: 'atlas', work_id: 'launch-checklist', candidate_id: 'candidate-1', eligibility: 'assessed', why_here: 'Release gate is ready',
+      next_step: 'Approve the checklist', trade_off: 'Delays launch if deferred', assessed_at: '2026-09-06T09:30:00.000Z', evidence: [], assessment: null, override: null
+    }
+  }],
+  needsMe: [],
+  message: null
+}
+
+entityProjection.needsMe = [...entityProjection.work]
+
+const topicSourceDetails: TopicSourceDetail[] = [{
+  source: { kind: 'project', canonical_id: 'project:atlas:launch', relationship: 'primary_project', namespace: { backend_id: 'organization-db', profile: 'atlas' }, source_id: 'launch-project', project_kind: 'desktop_project' },
+  status: 'ready',
+  title: 'Launch project',
+  detail: 'desktop project · current'
+}]
+
 const snapshot = (change: Partial<DirectorySnapshot> = {}): DirectorySnapshot => ({
   sessions: [],
   projects: [],
@@ -86,6 +137,8 @@ const snapshot = (change: Partial<DirectorySnapshot> = {}): DirectorySnapshot =>
   history: null,
   topics: [{ ...topic, profile: 'atlas', source: 'organization-db' }],
   selectedTopic: null,
+  entityProjection: null,
+  topicSourceDetails: [],
   topicCoverage: [{
     profile: 'atlas',
     status: 'ready',
@@ -143,13 +196,15 @@ describe('Topics directory', () => {
     expect(listing.onLoadOlder).toHaveBeenCalledWith('topics', 'atlas')
   })
 
-  it('renders read-only deep-link tabs without claiming unavailable collections are empty', () => {
+  it('renders authorized Work, Needs Me, Sources, and Files behavior from deep links', () => {
     const focused = props('section=topics&focus=topic-1&focusProfile=atlas&focusSource=organization-db&tab=needs_me&q=launch', {
       selectedTopic: detail,
+      entityProjection,
+      topicSourceDetails,
       detailStatus: 'ready'
     })
 
-    render(<WorkDirectory {...focused} />)
+    const { rerender } = render(<WorkDirectory {...focused} />)
 
     expect(screen.getByText('Read-only organization detail')).toBeTruthy()
     expect(screen.getByText(/Backend: organization-db · Profile: atlas/)).toBeTruthy()
@@ -161,12 +216,43 @@ describe('Topics directory', () => {
       expect(document.getElementById(tab.getAttribute('aria-controls')!)).toBeTruthy()
     }
 
-    expect(screen.getByText('Needs Me unavailable')).toBeTruthy()
-    expect(screen.getByText(/no empty result is being claimed/i)).toBeTruthy()
+    expect(screen.getByText('Approve launch checklist')).toBeTruthy()
+    expect(screen.getByText(/Release gate is ready · Next: Approve the checklist/)).toBeTruthy()
 
     fireEvent.keyDown(screen.getByRole('tab', { name: 'Needs Me' }), { key: 'ArrowRight' })
     expect((focused.onNavigate.mock.calls.at(-1)?.[0] as URLSearchParams).get('tab')).toBe('work')
 
+    const workView = props('section=topics&focus=topic-1&focusProfile=atlas&focusSource=organization-db&tab=work', {
+      selectedTopic: detail, entityProjection, topicSourceDetails, detailStatus: 'ready'
+    })
+
+    rerender(<WorkDirectory {...workView} />)
+    expect(screen.getByText('Approve launch checklist')).toBeTruthy()
+    expect(screen.getByText(/needs me · prepared · revision 4/)).toBeTruthy()
+
+    const sourcesView = props('section=topics&focus=topic-1&focusProfile=atlas&focusSource=organization-db&tab=sources', {
+      selectedTopic: detail, entityProjection, topicSourceDetails, detailStatus: 'ready'
+    })
+
+    rerender(<WorkDirectory {...sourcesView} />)
+    expect(screen.getByText('Launch project')).toBeTruthy()
+    expect(screen.getByText(/primary_project · ready · desktop project · current/)).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Open project' }))
+    expect(Object.fromEntries((sourcesView.onNavigate.mock.calls.at(-1)?.[0] as URLSearchParams).entries())).toMatchObject({
+      section: 'projects', focus: 'launch-project', focusProfile: 'atlas', focusSource: 'organization-db', tab: 'overview'
+    })
+
+    const filesView = props('section=topics&focus=topic-1&focusProfile=atlas&focusSource=organization-db&tab=files&q=launch', {
+      selectedTopic: detail, entityProjection, topicSourceDetails, detailStatus: 'ready'
+    })
+
+    rerender(<WorkDirectory {...filesView} />)
+    fireEvent.click(screen.getByRole('button', { name: 'View files in Library' }))
+    expect(Object.fromEntries((filesView.onNavigate.mock.calls.at(-1)?.[0] as URLSearchParams).entries())).toEqual({
+      view: 'library', libraryProfile: 'atlas', libraryTopic: 'topic-1'
+    })
+
+    rerender(<WorkDirectory {...focused} />)
     fireEvent.click(screen.getByRole('button', { name: '← Back to topics' }))
     const restored = focused.onNavigate.mock.calls.at(-1)?.[0] as URLSearchParams
     expect(restored.get('focus')).toBeNull()

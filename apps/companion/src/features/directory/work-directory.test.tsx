@@ -43,7 +43,7 @@ const projectDetail: CompanionProjectDetail = {
 
 const snapshot = (change: Partial<DirectorySnapshot> = {}): DirectorySnapshot => ({
   projects: [project], sessions: [session], selectedProject: null, selectedSession: null, history: null,
-  topics: [], selectedTopic: null, topicCoverage: [], detailStatus: 'idle', detailMessage: null, coverage: [coverage], ...change
+  topics: [], selectedTopic: null, entityProjection: null, topicSourceDetails: [], topicCoverage: [], detailStatus: 'idle', detailMessage: null, coverage: [coverage], ...change
 })
 
 const props = (params: string, change: Partial<DirectorySnapshot> = {}) => ({
@@ -82,6 +82,44 @@ describe('WorkDirectory', () => {
     expect(screen.getByText('Research complete.')).toBeTruthy()
     expect(screen.getByText(/Viewing history does not resume or activate this session/)).toBeTruthy()
     expect(screen.getByText(/Tool execution/)).toBeTruthy()
+  })
+
+  it('uses verified entity projections and Library relationship routes in project and session details', () => {
+    const projection = { status: 'ready' as const, complete: true, work: [], needsMe: [], message: null }
+
+    const projectView = props('section=projects&focus=project-1&focusProfile=atlas&focusSource=desktop-db&tab=needs%20me', {
+      selectedProject: projectDetail, entityProjection: projection, detailStatus: 'ready'
+    })
+
+    const { rerender } = render(<WorkDirectory {...projectView} />)
+    expect(screen.getByText('No Needs Me items')).toBeTruthy()
+
+    const projectFiles = props('section=projects&focus=project-1&focusProfile=atlas&focusSource=desktop-db&tab=files', {
+      selectedProject: projectDetail, entityProjection: projection, detailStatus: 'ready'
+    })
+
+    rerender(<WorkDirectory {...projectFiles} />)
+    fireEvent.click(screen.getByRole('button', { name: 'View files in Library' }))
+    expect(Object.fromEntries(projectFiles.onNavigate.mock.calls[0][0] as URLSearchParams)).toEqual({
+      view: 'library', libraryProfile: 'atlas', libraryProject: 'project-1'
+    })
+
+    const sessionView = props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=linked%20work', {
+      selectedSession: session, history, entityProjection: projection, detailStatus: 'ready'
+    })
+
+    rerender(<WorkDirectory {...sessionView} />)
+    expect(screen.getByText('No linked work')).toBeTruthy()
+
+    const sessionFiles = props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=files', {
+      selectedSession: session, history, entityProjection: projection, detailStatus: 'ready'
+    })
+
+    rerender(<WorkDirectory {...sessionFiles} />)
+    fireEvent.click(screen.getByRole('button', { name: 'View files in Library' }))
+    expect(Object.fromEntries(sessionFiles.onNavigate.mock.calls[0][0] as URLSearchParams)).toEqual({
+      view: 'library', libraryProfile: 'atlas', librarySession: 'session-1'
+    })
   })
 
   it('applies the conversation privacy boundary to persisted history', () => {

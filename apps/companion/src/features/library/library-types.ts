@@ -227,6 +227,7 @@ const collection = (value: unknown, method: string): LibraryCollection => {
 
 const relatedLinks = (value: unknown, method: string): LibraryRelatedLink[] => {
   if (value === undefined) {return []}
+
   if (!Array.isArray(value)) {throw new Error(`Malformed ${method} response.`)}
 
   return value.map((entry) => {
@@ -258,7 +259,15 @@ export function validateLibraryProfiles(value: unknown): LibraryProfilesResult {
 
   if (!Array.isArray(raw.items)) {throw new Error(`Malformed ${method} response.`)}
 
-  return { items: raw.items.map((entry) => {const item = record(entry, method); return { profile: string(item.profile, method), configured: boolean(item.configured, method) }}), backend_namespace: string(raw.backend_namespace, method), as_of: string(raw.as_of, method) }
+  return {
+    items: raw.items.map((entry) => {
+      const item = record(entry, method)
+
+      return { profile: string(item.profile, method), configured: boolean(item.configured, method) }
+    }),
+    backend_namespace: string(raw.backend_namespace, method),
+    as_of: string(raw.as_of, method)
+  }
 }
 
 export function validateLibraryCapabilities(value: unknown): LibraryCapabilities {

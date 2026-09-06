@@ -4,7 +4,7 @@ import type { CompanionProject, CompanionSession } from '../../gateway/types'
 import { MessageContent } from '../conversation/message-content'
 
 import type { DirectorySnapshot, DirectoryStatus } from './directory-store'
-import { TopicDetailView, TopicsDirectory } from './topics-directory'
+import { EntityWork, TopicDetailView, TopicsDirectory } from './topics-directory'
 
 export type WorkSection = 'topics' | 'projects' | 'sessions'
 interface DirectoryProps {
@@ -55,7 +55,7 @@ export function WorkDirectory(props: DirectoryProps) {
   }
 
   if (focus && focusProfile && section === 'topics') {
-    return <TopicDetailView onNavigate={props.onNavigate} onTab={(tab) => setParams({ tab })} params={props.params} snapshot={props.snapshot} tab={detailTab} />
+    return <TopicDetailView onNavigate={props.onNavigate} onOpenSource={(kind, profile, source, id) => open(kind, profile, source, id)} onTab={(tab) => setParams({ tab })} params={props.params} snapshot={props.snapshot} tab={detailTab} />
   }
 
   if (focus && focusProfile && section === 'projects') {
@@ -198,26 +198,46 @@ function SessionRow({ item, onOpen }: { item: CompanionSession; onOpen(): void }
 function ProjectDetail({ snapshot, tab, onTab, onBack, onOpenSession, onNavigate, onLoadOlderProjectSessions, params }: DirectoryProps & { tab: string; onTab(tab: string): void; onOpenSession(item: CompanionSession): void }) {
   const detail = snapshot.selectedProject
 
-  return <section className="directory-detail"><BackButton label="projects" onBack={onBack} onNavigate={onNavigate} params={params} />{detail ? <><p className="kicker">{projectType[detail.project.type]} · {detail.project.source} · {detail.project.profile}</p><h2>{detail.project.title}</h2><p className="read-only-note">Read-only source detail</p><DetailCoverage coverage={detail.coverage} label="Membership coverage" /><DetailTabs idPrefix="project-detail" onTab={onTab} tab={tab} tabs={['Overview', 'Sessions', 'Topics', 'Needs Me', 'Work', 'Files']} /><div aria-labelledby={tabId('project-detail', 'tab', tab)} id={tabId('project-detail', 'panel', tab)} role="tabpanel">{tab === 'overview' && <dl className="detail-facts"><div><dt>Last activity</dt><dd>{displayDate(detail.project.last_active)}</dd></div><div><dt>Sessions</dt><dd>{count(detail.project.session_count, 'sessions')}</dd></div><div><dt>Linked work</dt><dd>{count(detail.project.linked_work_count, 'items')}</dd></div></dl>}{tab === 'sessions' && <>{detail.sessions.length ? <div className="directory-list">{detail.sessions.map((item) => <SessionRow item={item} key={`${item.source}:${item.profile}:${item.id}`} onOpen={() => onOpenSession(item)} />)}</div> : <Unavailable copy={detail.coverage.complete ? 'This eligible project exists without an authoritative session membership.' : detail.coverage.message ?? 'The source did not report complete project membership.'} title={detail.coverage.complete ? 'No sessions yet' : 'Session membership unavailable'} />}{detail.membership_has_more && <button className="button" onClick={onLoadOlderProjectSessions} type="button">Load complete project membership</button>}</>}{['topics', 'needs me', 'work'].includes(tab) && (detail.organization_available ? <Refs empty={tab === 'topics' ? 'No linked topics yet' : 'No linked work yet'} items={tab === 'topics' ? detail.topics : tab === 'needs me' ? detail.needs_me : detail.work} /> : <Unavailable copy="This gateway does not expose verified topic or work bindings; no empty relationship is being claimed." title="Organization data unavailable" />)}{tab === 'files' && <FilesLibraryLink onNavigate={onNavigate} params={params} />}</div></> : <DetailLoading snapshot={snapshot} />}</section>
+  return <section className="directory-detail"><BackButton label="projects" onBack={onBack} onNavigate={onNavigate} params={params} />{detail ? <><p className="kicker">{projectType[detail.project.type]} · {detail.project.source} · {detail.project.profile}</p><h2>{detail.project.title}</h2><p className="read-only-note">Read-only source detail</p><DetailCoverage coverage={detail.coverage} label="Membership coverage" /><DetailTabs idPrefix="project-detail" onTab={onTab} tab={tab} tabs={['Overview', 'Sessions', 'Topics', 'Needs Me', 'Work', 'Files']} /><div aria-labelledby={tabId('project-detail', 'tab', tab)} id={tabId('project-detail', 'panel', tab)} role="tabpanel">{tab === 'overview' && <dl className="detail-facts"><div><dt>Last activity</dt><dd>{displayDate(detail.project.last_active)}</dd></div><div><dt>Sessions</dt><dd>{count(detail.project.session_count, 'sessions')}</dd></div><div><dt>Linked work</dt><dd>{count(detail.project.linked_work_count, 'items')}</dd></div></dl>}{tab === 'sessions' && <>{detail.sessions.length ? <div className="directory-list">{detail.sessions.map((item) => <SessionRow item={item} key={`${item.source}:${item.profile}:${item.id}`} onOpen={() => onOpenSession(item)} />)}</div> : <Unavailable copy={detail.coverage.complete ? 'This eligible project exists without an authoritative session membership.' : detail.coverage.message ?? 'The source did not report complete project membership.'} title={detail.coverage.complete ? 'No sessions yet' : 'Session membership unavailable'} />}{detail.membership_has_more && <button className="button" onClick={onLoadOlderProjectSessions} type="button">Load complete project membership</button>}</>}{tab === 'topics' && (detail.organization_available ? <Refs empty={tab === 'topics' ? 'No linked topics yet' : 'No linked work yet'} items={tab === 'topics' ? detail.topics : tab === 'needs me' ? detail.needs_me : detail.work} /> : <Unavailable copy="This gateway does not expose verified topic or work bindings; no empty relationship is being claimed." title="Organization data unavailable" />)}{tab === 'needs me' && <EntityWork projection={snapshot.entityProjection} type="needsMe" />}{tab === 'work' && <EntityWork projection={snapshot.entityProjection} type="work" />}{tab === 'files' && <FilesLibraryLink onNavigate={onNavigate} params={params} />}</div></> : <DetailLoading snapshot={snapshot} />}</section>
 }
 
 function SessionDetail({ snapshot, tab, onTab, onBack, onNavigate, onLoadOlderHistory, params }: DirectoryProps & { tab: string; onTab(tab: string): void }) {
   const session = snapshot.selectedSession
   const history = snapshot.history
 
-  return <section className="directory-detail"><BackButton label="sessions" onBack={onBack} onNavigate={onNavigate} params={params} />{session || history ? <><p className="kicker">Read-only session · {session?.source ?? history?.source} · {session?.profile ?? history?.profile}</p><h2>{session?.title || 'Saved session'}</h2>{!session && <p className="coverage-warning" role="status">Listing metadata was not reported for this deep link. Only authoritative persisted history is shown.</p>}<p className="read-only-note">Viewing history does not resume or activate this session.</p>{history && <DetailCoverage coverage={history.coverage} label="History coverage" />}<DetailTabs idPrefix="session-detail" onTab={onTab} tab={tab} tabs={['Overview', 'History', 'Linked work', 'Files']} /><div aria-labelledby={tabId('session-detail', 'tab', tab)} id={tabId('session-detail', 'panel', tab)} role="tabpanel">{tab === 'overview' && (session ? <dl className="detail-facts"><div><dt>Origin</dt><dd>{session.origin ?? 'Unknown origin'}</dd></div><div><dt>Project</dt><dd>{session.project?.title ?? 'Project membership not reported'}</dd></div><div><dt>Messages</dt><dd>{count(session.message_count, 'messages')}</dd></div><div><dt>Status</dt><dd>{session.status ?? 'Status unknown'}</dd></div></dl> : <Unavailable copy="The history response verifies identity and messages, but does not provide title, origin, project membership, status, or counts." title="Listing metadata unavailable" />)}{tab === 'history' && <History onLoadOlder={onLoadOlderHistory} snapshot={snapshot} />}{tab === 'linked work' && (history?.linked_work_available ? <Refs empty="No linked work yet" items={history.linked_work} /> : <Unavailable copy="This persisted history API does not expose verified organization bindings; no empty relationship is being claimed." title="Linked work unavailable" />)}{tab === 'files' && <FilesLibraryLink onNavigate={onNavigate} params={params} />}</div></> : <DetailLoading snapshot={snapshot} />}</section>
+  return <section className="directory-detail"><BackButton label="sessions" onBack={onBack} onNavigate={onNavigate} params={params} />{session || history ? <><p className="kicker">Read-only session · {session?.source ?? history?.source} · {session?.profile ?? history?.profile}</p><h2>{session?.title || 'Saved session'}</h2>{!session && <p className="coverage-warning" role="status">Listing metadata was not reported for this deep link. Only authoritative persisted history is shown.</p>}<p className="read-only-note">Viewing history does not resume or activate this session.</p>{history && <DetailCoverage coverage={history.coverage} label="History coverage" />}<DetailTabs idPrefix="session-detail" onTab={onTab} tab={tab} tabs={['Overview', 'History', 'Linked work', 'Files']} /><div aria-labelledby={tabId('session-detail', 'tab', tab)} id={tabId('session-detail', 'panel', tab)} role="tabpanel">{tab === 'overview' && (session ? <dl className="detail-facts"><div><dt>Origin</dt><dd>{session.origin ?? 'Unknown origin'}</dd></div><div><dt>Project</dt><dd>{session.project?.title ?? 'Project membership not reported'}</dd></div><div><dt>Messages</dt><dd>{count(session.message_count, 'messages')}</dd></div><div><dt>Status</dt><dd>{session.status ?? 'Status unknown'}</dd></div></dl> : <Unavailable copy="The history response verifies identity and messages, but does not provide title, origin, project membership, status, or counts." title="Listing metadata unavailable" />)}{tab === 'history' && <History onLoadOlder={onLoadOlderHistory} snapshot={snapshot} />}{tab === 'linked work' && <EntityWork projection={snapshot.entityProjection} type="work" />}{tab === 'files' && <FilesLibraryLink onNavigate={onNavigate} params={params} />}</div></> : <DetailLoading snapshot={snapshot} />}</section>
 }
 
-function BackButton({ label, onBack, onNavigate, params }: { label: string; onBack(): void; onNavigate(params: URLSearchParams): void; params: URLSearchParams }) {return <button className="back-button" onClick={() => {onBack(); const next = new URLSearchParams(params);
+function BackButton({ label, onBack, onNavigate, params }: { label: string; onBack(): void; onNavigate(params: URLSearchParams): void; params: URLSearchParams }) {
+  const back = () => {
+    onBack()
+    const next = new URLSearchParams(params)
 
- for (const key of ['focus', 'focusProfile', 'focusSource', 'tab']) {next.delete(key)}; onNavigate(next)}} type="button">← Back to {label}</button>}
+    for (const key of ['focus', 'focusProfile', 'focusSource', 'tab']) {next.delete(key)}
+    onNavigate(next)
+  }
+
+  return <button className="back-button" onClick={back} type="button">← Back to {label}</button>
+}
 
 function FilesLibraryLink({ params, onNavigate }: { params: URLSearchParams; onNavigate(params: URLSearchParams): void }) {
   const section = params.get('section')
   const focus = params.get('focus')
   const profile = params.get('focusProfile')
 
-  return <div className="directory-empty" role="status"><strong>Linked Library files</strong><p>Open the authorized Library relationship filter for this entity.</p><button onClick={() => {const next = new URLSearchParams(); next.set('view', 'library'); if (profile) {next.set('libraryProfile', profile)}; if (focus && section === 'projects') {next.set('libraryProject', focus)}; if (focus && section === 'sessions') {next.set('librarySession', focus)}; onNavigate(next)}} type="button">View files in Library</button></div>
+  const openLibrary = () => {
+    const next = new URLSearchParams()
+    next.set('view', 'library')
+
+    if (profile) {next.set('libraryProfile', profile)}
+
+    if (focus && section === 'projects') {next.set('libraryProject', focus)}
+
+    if (focus && section === 'sessions') {next.set('librarySession', focus)}
+    onNavigate(next)
+  }
+
+  return <div className="directory-empty" role="status"><strong>Linked Library files</strong><p>Open the authorized Library relationship filter for this entity.</p><button onClick={openLibrary} type="button">View files in Library</button></div>
 }
 
 function DetailTabs({ tabs, tab, onTab, idPrefix }: { tabs: readonly string[]; tab: string; onTab(tab: string): void; idPrefix: string }) {

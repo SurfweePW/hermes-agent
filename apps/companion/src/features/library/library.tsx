@@ -181,16 +181,41 @@ export function Library({ params, onNavigate, gateway }: LibraryProps) {
   const rows = useRef(new Map<string, HTMLButtonElement>())
 
   const options = useMemo<LibraryListOptions>(() => ({ ...(query.trim() ? { search: query.trim() } : {}), ...(collection ? { collection } : {}), ...(project ? { project } : {}), ...(topic ? { topic } : {}), ...(session ? { session } : {}), ...(type !== 'all' ? { type: type as LibraryPreviewKind } : {}), ...dateRange(date), ...(status === 'reviewed' ? { reviewed: true } : status === 'live' ? { reviewed: false } : {}) }), [collection, date, project, query, session, status, topic, type])
-  useEffect(() => {let active = true; void gateway.libraryProfiles().then((value) => {if (active) {setProfiles(value.items)}}).catch((cause) => {if (active) {setError(message(cause))}}); return () => {active = false}}, [gateway, retry])
+  useEffect(() => {
+    let active = true
+
+    void gateway.libraryProfiles()
+      .then((value) => {
+        if (active) {setProfiles(value.items)}
+      })
+      .catch((cause) => {
+        if (active) {setError(message(cause))}
+      })
+
+    return () => {active = false}
+  }, [gateway, retry])
   useEffect(() => {
     let active = true
     setLoading(true)
     setError(null)
     const selectedProfiles = profile ? [profile] : profiles.filter((entry) => entry.configured).map((entry) => entry.profile)
-    if (!selectedProfiles.length && profiles.length) {setResult(null); setLoading(false); return () => {active = false}}
+
+    if (!selectedProfiles.length && profiles.length) {
+      setResult(null)
+      setLoading(false)
+
+      return () => {active = false}
+    }
+
     void Promise.all(selectedProfiles.map((name) => completeList(gateway, { ...options, profile: name }))).then((results) => {
       if (!active) {return}
-      if (results.length === 1) {setResult(results[0]); return}
+
+      if (results.length === 1) {
+        setResult(results[0])
+
+        return
+      }
+
       const items = results.flatMap((entry) => entry.items)
       const collections = [...new Map(results.flatMap((entry) => entry.collections).map((entry) => [entry.id, entry])).values()]
       const complete = results.every((entry) => entry.coverage.status === 'complete')
@@ -252,6 +277,7 @@ export function Library({ params, onNavigate, gateway }: LibraryProps) {
 
   const selectVersion = (value: string) => {
     const next = new URLSearchParams(params)
+
     if (value) {next.set('libraryVersion', value)} else {next.delete('libraryVersion')}
     onNavigate(next)
   }
@@ -286,6 +312,7 @@ export function Library({ params, onNavigate, gateway }: LibraryProps) {
   const pinReviewed = async () => {
     if (!detail || !preview?.descriptor || selectedVersion) {return}
     setPinning(true); setDetailError(null)
+
     try {
       await gateway.pinReviewedLibraryArtifact({ profile: detail.profile, artifact_id: detail.artifact_id, reviewed_descriptor: preview.descriptor, provenance: { reviewed_via: 'companion_safe_preview', reviewed_version: preview.versionId ?? 'latest' } })
       setPreview(null)

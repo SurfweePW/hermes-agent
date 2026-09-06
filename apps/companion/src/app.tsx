@@ -44,6 +44,7 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
 
   useEffect(() => {
     let refreshing = false
+
     const refresh = () => {
       if (refreshing || document.visibilityState === 'hidden' || store.getSnapshot().phase !== 'ready') {return}
       refreshing = true
@@ -52,6 +53,7 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
       if (screen === 'work') {requests.push(store.directory.refresh())}
       void Promise.allSettled(requests).finally(() => {refreshing = false})
     }
+
     document.addEventListener('visibilitychange', refresh)
     window.addEventListener('online', refresh)
     window.addEventListener('focus', refresh)
@@ -67,9 +69,11 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
   }, [store])
 
   useEffect(() => {
-    if (initialFocus.current) { initialFocus.current = false;
+    if (initialFocus.current) {
+      initialFocus.current = false
 
- return }
+      return
+    }
 
     mainRef.current?.scrollTo?.({ top: 0 })
     mainRef.current?.focus()
