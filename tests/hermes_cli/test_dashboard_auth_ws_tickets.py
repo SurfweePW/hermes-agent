@@ -13,10 +13,13 @@ import pytest
 
 from hermes_cli.dashboard_auth import ws_tickets
 from hermes_cli.dashboard_auth.ws_tickets import (
+    OWNER_AUTH_LEASE_SECONDS,
     TTL_SECONDS,
     TicketInvalid,
     _reset_for_tests,
     consume_ticket,
+    issue_owner_authorization_lease,
+    leased_human_identity,
     mint_ticket,
 )
 
@@ -90,6 +93,23 @@ class TestTTL:
         clock["now"] += TTL_SECONDS + 1
         with pytest.raises(TicketInvalid, match="expired"):
             consume_ticket(ticket)
+
+
+class TestOwnerAuthorizationLease:
+    def test_server_issued_lease_expires_and_rejects_lookalikes(self, monkeypatch):
+        clock = {"now": 10_000.0}
+        monkeypatch.setattr(ws_tickets, "monotonic", lambda: clock["now"])
+        lease = issue_owner_authorization_lease(
+            consume_ticket(mint_ticket(user_id="u1", provider="stub"))
+        )
+
+        assert OWNER_AUTH_LEASE_SECONDS == 300
+        assert leased_human_identity(lease) == "stub:u1"
+        assert leased_human_identity(
+            {"human_identity": "stub:u1", "expires_at": clock["now"] + 999}
+        ) is None
+        clock["now"] += OWNER_AUTH_LEASE_SECONDS
+        assert leased_human_identity(lease) is None
 
 
 # ---------------------------------------------------------------------------

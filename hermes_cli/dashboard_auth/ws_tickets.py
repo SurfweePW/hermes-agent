@@ -15,10 +15,18 @@ from __future__ import annotations
 import secrets
 import threading
 import time
+from dataclasses import dataclass
+from time import monotonic
 from typing import Any, Dict, Optional, Tuple
 
 #: Long enough for ``getWsTicket()`` -> open WS, short enough that a leaked ticket is uninteresting.
 TTL_SECONDS = 30
+
+#: Maximum lifetime of the human owner authorization copied from a consumed
+#: browser/native admission ticket onto an open WebSocket. Admission remains
+#: one-shot, while sensitive calls must periodically obtain a fresh ticket and
+#: reconnect rather than inheriting human authority for the socket's lifetime.
+OWNER_AUTH_LEASE_SECONDS = 300
 
 _lock = threading.Lock()
 _tickets: Dict[str, Tuple[int, Dict[str, Any]]] = {}  # ticket -> (expires_at, info)
@@ -31,6 +39,40 @@ INTERNAL_PROVIDER = "server-internal"
 
 class TicketInvalid(Exception):
     """Ticket missing, expired, or already consumed."""
+
+
+@dataclass(frozen=True)
+class OwnerAuthorizationLease:
+    """Server-issued, bounded human authorization attached to one WS transport."""
+
+    human_identity: str
+    expires_at: float
+
+
+def issue_owner_authorization_lease(identity: Dict[str, Any]) -> OwnerAuthorizationLease:
+    """Issue a bounded owner-authorization lease from consumed ticket metadata."""
+    provider = identity.get("provider") if isinstance(identity, dict) else None
+    user_id = identity.get("user_id") if isinstance(identity, dict) else None
+    if not isinstance(provider, str) or not provider or not isinstance(user_id, str) or not user_id:
+        raise TicketInvalid("ticket identity invalid")
+    return OwnerAuthorizationLease(
+        human_identity=f"{provider}:{user_id}",
+        expires_at=monotonic() + OWNER_AUTH_LEASE_SECONDS,
+    )
+
+
+def leased_human_identity(lease: object) -> Optional[str]:
+    """Return the server-issued identity while its lease is live, else ``None``.
+
+    Requiring the concrete frozen dataclass rejects JSON-RPC dictionaries and
+    other caller-controlled lookalikes. The monotonic server clock makes the
+    decision independent of client time and immune to wall-clock adjustment.
+    """
+    if not isinstance(lease, OwnerAuthorizationLease):
+        return None
+    if monotonic() >= lease.expires_at:
+        return None
+    return lease.human_identity
 
 
 def mint_ticket(*, user_id: str, provider: str) -> str:

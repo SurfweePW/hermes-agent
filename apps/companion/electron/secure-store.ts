@@ -30,8 +30,8 @@ export class GatewayTokenStore {
   readonly filePath: string
   private readonly safeStorage: SafeStorageAdapter
 
-  constructor(userDataDirectory: string, safeStorage: SafeStorageAdapter) {
-    this.filePath = join(userDataDirectory, 'gateway-token.encrypted')
+  constructor(userDataDirectory: string, safeStorage: SafeStorageAdapter, fileName: 'gateway-token.encrypted' | 'owner-session.encrypted' = 'gateway-token.encrypted') {
+    this.filePath = join(userDataDirectory, fileName)
     this.safeStorage = safeStorage
   }
 

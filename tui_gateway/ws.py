@@ -83,6 +83,11 @@ class WSTransport:
     def __init__(self, ws: Any, loop: asyncio.AbstractEventLoop, *, peer: str = "unknown",
                  auth_identity: dict | None = None) -> None:
         self._ws = ws
+        # Set only by dashboard ticket admission, not JSON-RPC parameters.
+        # The lease itself is checked again on each sensitive RPC.
+        self.companion_owner_authorization = getattr(ws, "scope", {}).get(
+            "companion_owner_authorization"
+        )
         self._loop = loop
         self._peer = peer
         #: Server-verified identity from the WS-upgrade credential, stamped by ``web_server._ws_auth_reason``; None

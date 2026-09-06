@@ -1,4 +1,5 @@
 import { capacitorGatewayTokenBridge } from './capacitor-token-bridge'
+import type { OwnerAuthBridge } from './owner-auth'
 
 export interface SessionSecretStore {
   readonly persistent: boolean
@@ -16,7 +17,7 @@ export interface GatewayTokenBridge {
 
 declare global {
   interface Window {
-    hermesCompanion?: Readonly<{ gatewayToken: GatewayTokenBridge }>
+    hermesCompanion?: Readonly<{ gatewayToken: GatewayTokenBridge } & Partial<OwnerAuthBridge>>
   }
 }
 

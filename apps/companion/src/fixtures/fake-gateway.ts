@@ -85,6 +85,7 @@ export class FakeCompanionGateway implements CompanionGateway {
     const sessions = this.activeSession?.stored_session_id
       ? [{ id: this.activeSession.stored_session_id, title: options.title ?? 'Recent conversation', preview: 'Fixture conversation', started_at: 1, last_active: 1, message_count: 1, source: 'companion', pinned: false }]
       : []
+
     return { sessions }
   }
 

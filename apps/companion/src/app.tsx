@@ -1,18 +1,20 @@
-import { type FormEvent, useEffect, useRef, useState } from 'react'
+import { type FormEvent, useEffect, useRef, useState, useSyncExternalStore } from 'react'
 
 import { NeedsMe } from './features/attention/needs-me'
 import { Conversation } from './features/conversation/conversation'
 import { Recovery } from './features/recovery/recovery'
 import { Roster, type Teammate } from './features/roster/roster'
 import { TeammateDetails } from './features/roster/teammate-details'
-import { createFakeGateway } from './fixtures/fake-gateway'
+import { OwnerSignIn } from './features/work/owner-sign-in'
+import { WorkInbox } from './features/work/work-inbox'
+import { createFakeWorkGateway } from './fixtures/fake-work-gateway'
 import { type CompanionStore, createCompanionStore } from './state/companion-store'
 import { useCompanion } from './state/use-companion'
 
 type Screen = 'teammates' | 'conversation' | 'attention' | 'details' | 'recovery'
 
 const fixtureMode = import.meta.env.VITE_COMPANION_FIXTURE === 'true'
-const defaultStore = createCompanionStore(fixtureMode ? { gatewayFactory: createFakeGateway } : {})
+const defaultStore = createCompanionStore(fixtureMode ? { gatewayFactory: createFakeWorkGateway } : {})
 
 const screenTitles: Record<Screen, string> = {
   teammates: 'Teammates', conversation: 'Conversation', attention: 'Needs Me', details: 'Teammate Details', recovery: 'Recovery'
@@ -20,12 +22,22 @@ const screenTitles: Record<Screen, string> = {
 
 export function App({ store = defaultStore }: { store?: CompanionStore }) {
   const companion = useCompanion(store)
+  const work = useSyncExternalStore(store.work.subscribe, store.work.getSnapshot, store.work.getSnapshot)
   const [screen, setScreen] = useState<Screen>('teammates')
   const mainRef = useRef<HTMLElement>(null)
   const initialScreen = useRef(true)
   const fixtureStarted = useRef(false)
   const selected = companion.teammates.find((teammate) => teammate.id === companion.selectedTeammateId)
-  const attentionCount = companion.attentionItems.length + Number(companion.phase === 'disconnected')
+  const attentionCount = companion.attentionItems.length + work.items.filter((item) => item.bucket === 'needs_me').length + Number(companion.phase === 'disconnected')
+
+  useEffect(() => {
+    const refresh = () => {if (document.visibilityState !== 'hidden' && store.getSnapshot().phase === 'ready') {void store.work.refresh()}}
+    document.addEventListener('visibilitychange', refresh)
+    window.addEventListener('online', refresh)
+    const interval = window.setInterval(refresh, 30_000)
+
+    return () => {document.removeEventListener('visibilitychange', refresh); window.removeEventListener('online', refresh); window.clearInterval(interval)}
+  }, [store])
 
   useEffect(() => {
     if (!fixtureMode || store !== defaultStore || fixtureStarted.current) {return}
@@ -51,8 +63,9 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
   }
 
   const content = (() => {
-    if (companion.phase === 'disconnected' || companion.phase === 'recovering' || screen === 'recovery') {
-      return <Recovery error={companion.error} hasDraft={Boolean(companion.draft)} onBack={companion.phase === 'disconnected' ? undefined : () => setScreen('attention')} onRetry={() => void store.recover()} recovering={companion.phase === 'recovering'} teammateName={selected?.name} turnUncertain={companion.turnStatus === 'uncertain'} />
+    if (((companion.phase === 'disconnected' || companion.phase === 'recovering') && screen !== 'attention') || screen === 'recovery') {
+      return <><Recovery error={companion.error} hasDraft={Boolean(companion.draft)} onBack={companion.phase === 'disconnected' ? undefined : () => setScreen('attention')} onRetry={() => void store.recover()} recovering={companion.phase === 'recovering'} teammateName={selected?.name} turnUncertain={companion.turnStatus === 'uncertain'} />
+        <OwnerSignIn baseUrl={companion.baseUrl} onOwnerConnect={store.connectOwner} onOwnerSignOut={store.signOutOwner} ownerConnected={false} /></>
     }
 
     if (screen === 'conversation') {
@@ -63,7 +76,12 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
         : <ChooseTeammate onBack={() => setScreen('teammates')} />
     }
 
-    if (screen === 'attention') {return <NeedsMe items={companion.attentionItems} onOpen={(item) => { void store.openAttention(item).then(() => setScreen('conversation')) }} onRefresh={() => void store.refreshAttention()} scope={companion.attentionScope} />}
+    if (screen === 'attention') {return <>
+      {companion.phase !== 'ready' && <button disabled={companion.phase === 'recovering'} onClick={() => void store.recover()} type="button">Reconnect to verify work</button>}
+      <OwnerSignIn baseUrl={companion.baseUrl} onOwnerConnect={store.connectOwner} onOwnerSignOut={store.signOutOwner} ownerConnected={companion.connectionMode === 'owner' && companion.phase === 'ready'} />
+      <WorkInbox {...work} onClose={store.work.close} onComment={store.work.comment} onDecision={store.work.decide} onOpen={(profile, id) => void store.work.open(profile, id)} onRefresh={() => void store.work.refresh()} />
+      <NeedsMe items={companion.attentionItems} onOpen={(item) => { if (companion.phase === 'ready') {void store.openAttention(item).then(() => setScreen('conversation'))} }} onRefresh={() => void store.refreshAttention()} scope={companion.attentionScope} />
+    </>}
 
     if (screen === 'details' && selected) {return <TeammateDetails onBack={() => setScreen('teammates')} onMessage={() => setScreen('conversation')} onOpenSession={(id) => { void store.selectTeammate(selected.id, id).then(() => setScreen('conversation')) }} onPin={(id, pinned) => void store.setSessionPinned(id, pinned)} sessions={companion.recentSessions} sessionsLoading={companion.sessionsLoading} teammate={selected} />}
 
@@ -128,7 +146,7 @@ function TeammatesHome({ teammates, attentionCount, onSelect, onNeedsMe, onQuick
     setTask('')
   }
 
-  return <section aria-labelledby="teammates-title" className="teammates-home"><div className="hero-copy"><p className="kicker">Your team at a glance</p><h2 id="teammates-title">Your team is ready.</h2><p className="screen-lede">Send a quick text task or open a teammate.</p></div><form aria-label="Quick task" className="quick-task" onSubmit={handleQuickTaskSubmit}><div className="quick-task__heading"><div><p className="kicker">Quick task</p><h3>Delegate something now</h3></div><span aria-hidden="true">↗</span></div><label htmlFor="quick-task-target">Assign to</label><select id="quick-task-target" onChange={(event) => setTarget(event.target.value)} value={target}>{teammates.map((teammate) => <option key={teammate.id} value={teammate.id}>{teammate.name}</option>)}</select><label htmlFor="quick-task-text">Task</label><textarea id="quick-task-text" onChange={(event) => setTask(event.target.value)} placeholder="What should Hermes do?" rows={3} value={task} /><button className="primary-button" disabled={!task.trim() || !target} type="submit">Send task</button></form>{attentionCount > 0 && <button className="attention-banner" onClick={onNeedsMe} type="button"><span className="attention-banner__count">{attentionCount}</span><span><strong>Needs your judgment</strong><small>Review runtime-local attention</small></span><span aria-hidden="true">→</span></button>}<div className="section-heading"><div><p className="kicker">Available profiles</p><h3>Teammates</h3></div><span>{teammates.length} total</span></div><Roster onSelect={onSelect} teammates={[...teammates]} /></section>
+  return <section aria-labelledby="teammates-title" className="teammates-home"><div className="hero-copy"><p className="kicker">Your team at a glance</p><h2 id="teammates-title">Your team is ready.</h2><p className="screen-lede">Send a quick text task or open a teammate.</p></div><form aria-label="Quick task" className="quick-task" onSubmit={handleQuickTaskSubmit}><div className="quick-task__heading"><div><p className="kicker">Quick task</p><h3>Delegate something now</h3></div><span aria-hidden="true">↗</span></div><label htmlFor="quick-task-target">Assign to</label><select id="quick-task-target" onChange={(event) => setTarget(event.target.value)} value={target}>{teammates.map((teammate) => <option key={teammate.id} value={teammate.id}>{teammate.name}</option>)}</select><label htmlFor="quick-task-text">Task</label><textarea id="quick-task-text" onChange={(event) => setTask(event.target.value)} placeholder="What should Hermes do?" rows={3} value={task} /><button className="primary-button" disabled={!task.trim() || !target} type="submit">Send task</button></form>{attentionCount > 0 && <button className="attention-banner" onClick={onNeedsMe} type="button"><span className="attention-banner__count">{attentionCount}</span><span><strong>Needs your judgment</strong><small>Review work decisions and runtime attention</small></span><span aria-hidden="true">→</span></button>}<div className="section-heading"><div><p className="kicker">Available profiles</p><h3>Teammates</h3></div><span>{teammates.length} total</span></div><Roster onSelect={onSelect} teammates={[...teammates]} /></section>
 }
 
 function ChooseTeammate({ onBack }: { onBack: () => void }) { return <section className="search-empty"><h2>Choose a teammate first</h2><p>Select a teammate to create a conversation.</p><button className="primary-button" onClick={onBack} type="button">View teammates</button></section> }

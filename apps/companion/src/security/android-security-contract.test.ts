@@ -20,13 +20,15 @@ describe('Android native security contract', () => {
     expect(store).not.toMatch(/putString\([^,]+,\s*token\b/)
   })
 
-  it('exposes only get, set and reset after checking the bundled-app origin', () => {
+  it('exposes only get, set, reset and the owner methods after checking the bundled-app origin', () => {
     const plugin = read(pluginPath)
     const methods = [...plugin.matchAll(/@PluginMethod\s+public void (\w+)\(/g)].map((match) => match[1])
 
-    expect(methods).toEqual(['get', 'set', 'reset'])
+    expect(methods).toEqual(['get', 'set', 'reset', 'ownerSignIn', 'ownerStatus', 'ownerSignOut', 'ownerWebSocketUrl'])
     expect(plugin).toContain('isTrustedBundledOrigin')
     expect(plugin).toContain('call.reject(GENERIC_ERROR)')
+    // Owner calls must funnel through the same trust check and fixed-code rejection path.
+    expect(plugin).toMatch(/private void ownerCall\(PluginCall call, String operation\)[\s\S]*?isTrustedBundledOrigin/)
     expect(plugin).not.toMatch(/call\.reject\([^\n]*(exception|getMessage|token)/i)
   })
 

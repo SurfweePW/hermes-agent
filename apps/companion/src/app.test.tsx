@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { App } from './app'
 import { createFakeGateway } from './fixtures/fake-gateway'
+import type { OwnerAuthBridge } from './security/owner-auth'
 import type { SessionSecretStore } from './security/secret-store'
 import { createCompanionStore } from './state/companion-store'
 
@@ -14,6 +15,25 @@ async function readyStore() {
 }
 
 describe('App', () => {
+  it('keeps durable work in Needs Me, shows the old-server boundary and preserves runtime attention', async () => {
+    const store = await readyStore()
+    render(<App store={store} />)
+    fireEvent.click(screen.getAllByRole('button', { name: /^!Needs Me|Needs Me/ })[0])
+    expect(screen.getByRole('heading', { name: 'Decision inbox' })).toBeTruthy()
+    expect(screen.getByText(/does not support the durable work inbox/)).toBeTruthy()
+    expect(screen.getByText('Runtime-local attention')).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Kanban' })).toBeNull()
+  })
+
+  it('refreshes server work on visibility and online events', async () => {
+    const store = await readyStore()
+    const refresh = vi.spyOn(store.work, 'refresh')
+    render(<App store={store} />)
+    fireEvent(document, new Event('visibilitychange'))
+    fireEvent(window, new Event('online'))
+    expect(refresh).toHaveBeenCalledTimes(2)
+  })
+
   it('renders first-run gateway setup without exposing a token as text', () => {
     const store = createCompanionStore({ gatewayFactory: createFakeGateway, storage: { getItem: () => null, setItem: () => undefined } })
     render(<App store={store} />)
@@ -80,6 +100,32 @@ describe('App', () => {
     fireEvent.click(screen.getByRole('button', { name: /forget saved token/i }))
     await waitFor(() => expect(secretStore.delete).toHaveBeenCalledWith('gateway-token'))
     expect(store.getSnapshot()).toMatchObject({ canForgetSavedToken: false, error: null })
+  })
+
+  it('keeps owner credential reset reachable after the socket disconnects', async () => {
+    const original = window.hermesCompanion
+
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(),
+      ownerStatus: vi.fn(),
+      ownerSignOut: vi.fn(async () => undefined),
+      ownerWebSocketUrl: vi.fn()
+    }
+
+    window.hermesCompanion = {
+      gatewayToken: { get: vi.fn(), set: vi.fn(), reset: vi.fn() },
+      ...ownerAuth
+    }
+    const store = createCompanionStore({ gatewayFactory: createFakeGateway, ownerAuthBridge: ownerAuth, storage: { getItem: () => null, setItem: () => undefined } })
+    await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
+    await store.signOutOwner()
+
+    render(<App store={store} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Clear saved owner sign-in' }))
+
+    await waitFor(() => expect(ownerAuth.ownerSignOut).toHaveBeenCalledTimes(2))
+
+    if (original) {window.hermesCompanion = original} else {delete window.hermesCompanion}
   })
 
   it('renders the ready application shell and live roster', async () => {

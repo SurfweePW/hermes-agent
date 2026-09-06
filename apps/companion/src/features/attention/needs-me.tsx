@@ -19,6 +19,7 @@ export function NeedsMe({ items, scope, onOpen, onRefresh }: NeedsMeProps) {
           const actionable = item.actionable
             && (item.resolution === 'approval' || item.resolution === 'open_session')
             && Boolean(item.stored_session_id)
+
           return actionable ? (
             <button className="attention-item attention-item--amber" key={item.id} onClick={() => onOpen(item)} type="button">
               <span className="attention-item__number">!</span><span><span className="label">{item.kind} · {item.profile}</span><strong>{item.title}</strong><small>{item.detail || 'Open the stored session to review.'}</small></span><span aria-hidden="true">→</span>

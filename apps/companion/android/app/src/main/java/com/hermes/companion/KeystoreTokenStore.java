@@ -24,9 +24,17 @@ final class KeystoreTokenStore {
     private static final int TAG_BITS = 128;
 
     private final SharedPreferences preferences;
+    private final String keyAlias;
 
     KeystoreTokenStore(Context context) {
         preferences = context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE);
+        keyAlias = KEY_ALIAS;
+    }
+
+    KeystoreTokenStore(Context context, String ownerBaseUrl) throws Exception {
+        String scope = OwnerAuthPolicy.challenge(ownerBaseUrl);
+        preferences = context.getSharedPreferences("hermes_companion_owner_" + scope, Context.MODE_PRIVATE);
+        keyAlias = "hermes_companion_owner_" + scope;
     }
 
     synchronized String get() throws Exception {
@@ -40,7 +48,7 @@ final class KeystoreTokenStore {
         }
 
         KeyStore keyStore = keyStore();
-        SecretKey key = (SecretKey) keyStore.getKey(KEY_ALIAS, null);
+        SecretKey key = (SecretKey) keyStore.getKey(keyAlias, null);
         if (key == null) {
             throw new IllegalStateException("Secure storage unavailable");
         }
@@ -80,8 +88,8 @@ final class KeystoreTokenStore {
         }
 
         KeyStore keyStore = keyStore();
-        if (keyStore.containsAlias(KEY_ALIAS)) {
-            keyStore.deleteEntry(KEY_ALIAS);
+        if (keyStore.containsAlias(keyAlias)) {
+            keyStore.deleteEntry(keyAlias);
         }
     }
 
@@ -91,16 +99,16 @@ final class KeystoreTokenStore {
         return keyStore;
     }
 
-    private static SecretKey getOrCreateKey() throws Exception {
+    private SecretKey getOrCreateKey() throws Exception {
         KeyStore keyStore = keyStore();
-        SecretKey existing = (SecretKey) keyStore.getKey(KEY_ALIAS, null);
+        SecretKey existing = (SecretKey) keyStore.getKey(keyAlias, null);
         if (existing != null) {
             return existing;
         }
 
         KeyGenerator generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, KEYSTORE);
         generator.init(new KeyGenParameterSpec.Builder(
-            KEY_ALIAS,
+            keyAlias,
             KeyProperties.PURPOSE_ENCRYPT | KeyProperties.PURPOSE_DECRYPT
         )
             .setBlockModes(KeyProperties.BLOCK_MODE_GCM)

@@ -16,10 +16,14 @@ import java.net.URI;
 public final class GatewayTokenPlugin extends Plugin {
     static final String GENERIC_ERROR = "Secure token storage unavailable.";
     private KeystoreTokenStore store;
+    private OwnerSession owner;
+    private final java.util.concurrent.ThreadPoolExecutor ownerWorker = new java.util.concurrent.ThreadPoolExecutor(
+        2, 2, 0L, java.util.concurrent.TimeUnit.MILLISECONDS, new java.util.concurrent.ArrayBlockingQueue<>(16));
 
     @Override
     public void load() {
         store = new KeystoreTokenStore(getContext().getApplicationContext());
+        owner = new OwnerSession(getContext().getApplicationContext());
     }
 
     @PluginMethod
@@ -66,6 +70,76 @@ public final class GatewayTokenPlugin extends Plugin {
                 call.reject(GENERIC_ERROR);
             }
         });
+    }
+
+    @PluginMethod
+    public void ownerSignIn(PluginCall call) { ownerCall(call, "signIn"); }
+
+    @PluginMethod
+    public void ownerStatus(PluginCall call) { ownerCall(call, "status"); }
+
+    @PluginMethod
+    public void ownerSignOut(PluginCall call) { ownerCall(call, "signOut"); }
+
+    @PluginMethod
+    public void ownerWebSocketUrl(PluginCall call) { ownerCall(call, "webSocketUrl"); }
+
+    private void ownerCall(PluginCall call, String operation) {
+        withTrustedCall(call, new String[] {"baseUrl"}, () -> {
+            final String base;
+            try {
+                if (!(call.getData().opt("baseUrl") instanceof String)) throw new IllegalArgumentException();
+                base = OwnerAuthPolicy.baseUrl(call.getString("baseUrl"), BuildConfig.DEBUG);
+            } catch (Exception ignored) {
+                call.reject("Invalid owner gateway URL.", "INVALID_BASE_URL");
+                return;
+            }
+            try {
+                ownerWorker.execute(() -> {
+                    try {
+                        JSObject result;
+                        switch (operation) {
+                            case "signIn": result = owner.signIn(base, this::openOwnerBrowser); break;
+                            case "signOut": result = owner.signOut(base); break;
+                            case "webSocketUrl": result = owner.webSocketUrl(base); break;
+                            default: result = owner.status(base);
+                        }
+                        // Re-check on the UI thread after asynchronous work before disclosing even a WS ticket.
+                        withTrustedCall(call, new String[] {"baseUrl"}, () -> call.resolve(result));
+                    } catch (OwnerSession.Unsupported ignored) {
+                        call.reject("This gateway has no supported native owner sign-in provider.", "OWNER_UNSUPPORTED");
+                    } catch (Exception ignored) {
+                        // Never forward URLs, response bodies, exception causes, codes, verifiers or bearer credentials.
+                        call.reject("Owner sign-in unavailable, cancelled, or expired. Try signing in again.", "OWNER_AUTH_FAILED");
+                    }
+                });
+            } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                call.reject("Owner sign-in is busy.", "OWNER_AUTH_BUSY");
+            }
+        });
+    }
+
+    private void openOwnerBrowser(String url) throws Exception {
+        java.util.concurrent.CompletableFuture<Void> launched = new java.util.concurrent.CompletableFuture<>();
+        WebView webView = getBridge().getWebView();
+        webView.post(() -> {
+            try {
+                if (launched.isDone() || !isTrustedBundledOrigin(webView.getUrl())) throw new IllegalStateException();
+                android.content.Intent intent = new android.content.Intent(android.content.Intent.ACTION_VIEW, android.net.Uri.parse(url));
+                intent.addCategory(android.content.Intent.CATEGORY_BROWSABLE);
+                getActivity().startActivity(intent);
+                launched.complete(null);
+            } catch (Exception ignored) { launched.completeExceptionally(new IllegalStateException()); }
+        });
+        try { launched.get(10, java.util.concurrent.TimeUnit.SECONDS); }
+        finally { launched.cancel(false); }
+    }
+
+    @Override
+    protected void handleOnDestroy() {
+        if (owner != null) owner.close();
+        ownerWorker.shutdownNow();
+        super.handleOnDestroy();
     }
 
     private void withTrustedCall(PluginCall call, String[] expectedKeys, Runnable action) {

@@ -106,6 +106,37 @@ function harness(): {
 }
 
 describe('CompanionClient RPC domain methods', () => {
+  it('uses exact durable work frames without runtime approval semantics', async () => {
+    const { client, connect } = harness()
+    const socket = await connect()
+    const capability = client.workCapabilities('CMO Exact')
+    expect(socket.frame()).toMatchObject({ method: 'work.capabilities', params: { profile: 'CMO Exact' } })
+    socket.respond({ can_decide: false, reason: 'Human login required' })
+    await expect(capability).resolves.toEqual({ can_decide: false, reason: 'Human login required' })
+    const list = client.listWork('CMO Exact')
+    expect(socket.frame().params).toEqual({ profile: 'CMO Exact', include_snoozed: true })
+    socket.respond({ items: [] }); await list
+    const decisionParams = { profile: 'CMO Exact', id: 'stable:01', expected_version: 7, revision: 3, action: 'request_changes' as const, idempotency_key: 'decision-1', reason: 'Narrow scope' }
+    const decision = client.decideWork(decisionParams)
+    expect(socket.frame()).toMatchObject({ method: 'work.decide', params: decisionParams })
+    expect(socket.frame().params).toEqual(decisionParams)
+    socket.respond({}); await decision
+    const commentParams = { profile: 'CMO Exact', id: 'stable:01', text: 'Focused comment', idempotency_key: 'comment-1' }
+    const comment = client.commentWork(commentParams)
+    expect(socket.frame()).toMatchObject({ method: 'work.comment', params: commentParams })
+    expect(socket.frame().params).toEqual(commentParams)
+    socket.respond({}); await comment
+    client.close()
+  })
+
+  it('rejects malformed capability instead of granting business decisions', async () => {
+    const { client, connect } = harness(); const socket = await connect()
+    const request = client.workCapabilities('cmo')
+    socket.respond({ can_decide: 'true', reason: null })
+    await expect(request).rejects.toThrow('Malformed durable work response')
+    client.close()
+  })
+
   it('uses the exact profile, session, prompt, interrupt, and approval protocol', async () => {
     const { client, connect } = harness()
     const socket = await connect()

@@ -1,9 +1,11 @@
 import { dirname, join } from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { app, BrowserWindow, type BrowserWindowConstructorOptions, ipcMain, type IpcMainInvokeEvent, protocol, safeStorage } from 'electron'
+import { app, BrowserWindow, type BrowserWindowConstructorOptions, ipcMain, type IpcMainInvokeEvent, protocol, safeStorage, shell } from 'electron'
 
 import { CHANNELS } from './channels'
+import { OwnerAuth } from './owner-auth'
+import { registerOwnerIpc } from './owner-ipc'
 import { GatewayTokenStore } from './secure-store'
 
 export const APP_ID = 'com.hermes.companion'
@@ -182,9 +184,33 @@ if (app?.whenReady) {
 
     app.setAsDefaultProtocolClient(PROTOCOL)
     registerGatewayTokenIpc(new GatewayTokenStore(app.getPath('userData'), safeStorage), rendererTarget.trusted)
-    createCompanionWindow(rendererTarget)
+
+    const owner = new OwnerAuth(new GatewayTokenStore(app.getPath('userData'), safeStorage, 'owner-session.encrypted'),
+      (url) => shell.openExternal(url))
+
+    let ownerWindow: BrowserWindow | undefined
+
+    const openWindow = () => {
+      const window = createCompanionWindow(rendererTarget)
+      ownerWindow = window
+      window.webContents.on('did-start-navigation', (_event, _url, _inPlace, isMainFrame) => {
+        if (isMainFrame) { owner.cancel() }
+      })
+      window.webContents.on('render-process-gone', () => owner.cancel())
+      window.on('closed', () => {
+        owner.cancel()
+
+        if (ownerWindow === window) { ownerWindow = undefined }
+      })
+    }
+
+    registerOwnerIpc(owner, ipcMain, () => ownerWindow && !ownerWindow.isDestroyed()
+      ? { contents: ownerWindow.webContents, url: rendererTarget.kind === 'url' ? rendererTarget.value : rendererTarget.trusted }
+      : undefined)
+    app.on('before-quit', () => owner.cancel())
+    openWindow()
     app.on('activate', () => {
-      if (BrowserWindow.getAllWindows().length === 0) { createCompanionWindow(rendererTarget) }
+      if (BrowserWindow.getAllWindows().length === 0) { openWindow() }
     })
   })
 

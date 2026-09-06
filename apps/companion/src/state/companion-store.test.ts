@@ -2,6 +2,7 @@ import type { ConnectionState } from '@hermes/shared'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { CompanionEvent, GatewaySessionSummary, ProfilesListResult, SessionResult } from '../gateway/types'
+import type { OwnerAuthBridge } from '../security/owner-auth'
 import type { SessionSecretStore } from '../security/secret-store'
 
 import { type CompanionGateway, type CompanionGatewayFactory, createCompanionStore } from './companion-store'
@@ -61,8 +62,12 @@ class ControlledGateway implements CompanionGateway {
 
     return { sessions: this.sessions }
   }
-  async setSessionPinned(profile: string, id: string, pinned: boolean) { this.calls.push(['setSessionPinned', profile, id, pinned]); return { pinned, session_id: id, changed: true } }
-  async listAttention() { this.calls.push(['listAttention']); return this.attentionResult }
+  async setSessionPinned(profile: string, id: string, pinned: boolean) { this.calls.push(['setSessionPinned', profile, id, pinned]);
+
+ return { pinned, session_id: id, changed: true } }
+  async listAttention() { this.calls.push(['listAttention']);
+
+ return this.attentionResult }
   async submitPrompt(id: string, text: string) { this.calls.push(['submitPrompt', id, text]);
 
  return this.submit }
@@ -105,7 +110,7 @@ function tokenStore(initial?: string, persistent = true) {
   return store
 }
 
-function harness(baseUrl: string | null = null, profiles?: ProfilesListResult, secretStore?: SessionSecretStore) {
+function harness(baseUrl: string | null = null, profiles?: ProfilesListResult, secretStore?: SessionSecretStore, ownerAuthBridge?: OwnerAuthBridge) {
   const gateways: ControlledGateway[] = []
 
   const factory: CompanionGatewayFactory = () => {
@@ -126,7 +131,12 @@ function harness(baseUrl: string | null = null, profiles?: ProfilesListResult, s
     setItem: vi.fn((key: string, value: string) => values.set(key, value))
   }
 
-  const store = createCompanionStore({ gatewayFactory: factory, storage, ...(secretStore ? { secretStore } : {}) })
+  const store = createCompanionStore({
+    gatewayFactory: factory,
+    storage,
+    ...(secretStore ? { secretStore } : {}),
+    ...(ownerAuthBridge ? { ownerAuthBridge } : {})
+  })
 
   return { store, storage, gateways }
 }
@@ -135,6 +145,7 @@ describe('CompanionStore setup and sessions', () => {
   it('connects to an older gateway when attention.list is unavailable', async () => {
     const { store, gateways } = harness()
     const configuring = store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
+
     gateways[0].listAttention = async () => {throw new Error('Method not found (-32601)')}
 
     await configuring
@@ -344,6 +355,7 @@ describe('CompanionStore setup and sessions', () => {
     }]
     await store.selectTeammate('atlas')
     await vi.waitFor(() => expect(store.getSnapshot().recentSessions).toHaveLength(1))
+
     gateways[0].setSessionPinned = async () => {throw new Error('Method not found (-32601)')}
 
     await store.setSessionPinned('recent-1', true)
@@ -425,6 +437,59 @@ describe('CompanionStore setup and sessions', () => {
 })
 
 describe('CompanionStore prompts, approvals, and recovery', () => {
+  it('replaces the shared transport with an owner ticket connection and signs out closed', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(),
+      ownerStatus: vi.fn(),
+      ownerSignOut: vi.fn(async () => undefined),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket-one')
+    }
+
+    const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
+    await store.configure({ baseUrl: 'https://gateway.test', token: 'shared-secret' })
+
+    await store.connectOwner()
+
+    expect(ownerAuth.ownerWebSocketUrl).toHaveBeenCalledWith({ baseUrl: 'https://gateway.test' })
+    expect(gateways).toHaveLength(2)
+    expect(gateways[0].calls.filter(([name]) => name === 'close')).toHaveLength(1)
+    expect(gateways[1].calls[0]).toEqual(['connect', 'wss://gateway.test/api/ws?ticket=owner-ticket-one'])
+    expect(JSON.stringify(gateways[1].calls)).not.toContain('shared-secret')
+    expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner' })
+
+    await store.signOutOwner()
+
+    expect(gateways[1].calls.filter(([name]) => name === 'close')).toHaveLength(1)
+    expect(ownerAuth.ownerSignOut).toHaveBeenCalledWith({ baseUrl: 'https://gateway.test' })
+    expect(store.getSnapshot()).toMatchObject({ phase: 'disconnected', connectionMode: 'shared' })
+  })
+
+  it('recovers owner mode with a fresh one-use ticket instead of the saved shared token', async () => {
+    const ownerUrls = [
+      'wss://gateway.test/api/ws?ticket=owner-ticket-one',
+      'wss://gateway.test/api/ws?ticket=owner-ticket-two'
+    ]
+
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(),
+      ownerStatus: vi.fn(),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => ownerUrls.shift()!)
+    }
+
+    const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
+    await store.configure({ baseUrl: 'https://gateway.test', token: 'shared-secret' })
+    await store.connectOwner()
+    gateways[1].setState('closed')
+
+    await store.recover()
+
+    expect(ownerAuth.ownerWebSocketUrl).toHaveBeenCalledTimes(2)
+    expect(gateways[2].calls[0]).toEqual(['connect', 'wss://gateway.test/api/ws?ticket=owner-ticket-two'])
+    expect(JSON.stringify(gateways[2].calls)).not.toContain('shared-secret')
+    expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner' })
+  })
+
   it('refreshes authoritative attention for events from a non-selected runtime session', async () => {
     const { store, gateways } = harness()
     await store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })

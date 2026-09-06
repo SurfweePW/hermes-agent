@@ -442,13 +442,22 @@ def _dashboard_public_hosts() -> frozenset[str]:
 
 
 def should_require_auth(host: str, allow_public: bool = False) -> bool:
-    """True iff the auth gate must be active: any non-loopback bind.
+    """True iff the auth gate must be active.
 
     RFC1918 / CGNAT / link-local are deliberately PUBLIC — a hostile LAN device
     is the threat model. ``allow_public`` (legacy ``--insecure``) is accepted for
     old launch scripts but IGNORED since the June 2026 hermes-0day campaign.
+
+    Loopback remains exempt by default, but private reverse-proxy deployments
+    can explicitly engage the same gate with
+    ``dashboard.require_auth_on_loopback``.
     """
-    return host not in _LOOPBACK_HOST_VALUES
+    if host not in _LOOPBACK_HOST_VALUES:
+        return True
+    required = (load_config().get("dashboard") or {}).get("require_auth_on_loopback", False)
+    if type(required) is not bool:
+        raise ValueError("dashboard.require_auth_on_loopback must be boolean")
+    return required
 
 
 def should_require_dashboard_auth(
@@ -763,10 +772,35 @@ async def _dashboard_selftest_loop() -> None:
 from hermes_cli import web_server_gateway as _gateway_mod  # noqa: E402
 from hermes_cli.web_server_gateway import _ACTION_LOG_FILES, _terminate_desktop_managed_gateway  # noqa: E402
 from hermes_cli.web_server_sessions import _auto_archive_ticker_loop  # noqa: E402
+from hermes_cli import web_server_chat as _chat_mod  # noqa: E402
 from hermes_cli.web_server_chat import PTY_REGISTRY  # noqa: E402
 from hermes_cli.web_server_dashboard import (  # noqa: E402
     _discover_dashboard_plugins, _mount_plugin_api_routes, mount_spa,
 )
+
+
+# Keep owner authority attached to admission, not caller-controlled RPC params.
+# The chat/auth implementation now lives in a sibling; this facade installs the
+# Companion integration without restoring the pre-split WebSocket code here.
+_ws_auth_reason_impl = _chat_mod._ws_auth_reason
+
+
+def _ws_auth_reason_with_owner_lease(ws: Any) -> tuple[Optional[str], str]:
+    if not hasattr(ws, "scope"):
+        ws.scope = {}
+    ws.scope.pop("companion_owner_authorization", None)
+    reason, credential = _ws_auth_reason_impl(ws)
+    if reason is None and credential in {"ticket", "ticket-subprotocol"}:
+        from hermes_cli.dashboard_auth.ws_tickets import issue_owner_authorization_lease
+
+        identity = getattr(ws, "_hermes_auth_identity", None)
+        if not isinstance(identity, dict):
+            return "ticket_invalid", credential
+        ws.scope["companion_owner_authorization"] = issue_owner_authorization_lease(identity)
+    return reason, credential
+
+
+_chat_mod._ws_auth_reason = _ws_auth_reason_with_owner_lease
 
 
 _GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")

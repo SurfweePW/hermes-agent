@@ -25,6 +25,7 @@ import type {
   SessionResult,
   SetPinnedResult
 } from './types'
+import { validateWorkCapability, validateWorkDetail, validateWorkList, type WorkCommentParams, type WorkDecisionParams } from './work-types'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -89,6 +90,7 @@ function validatedPendingApprovals(value: unknown): PendingApprovalsResult {
 
 function requiredString(record: Record<string, unknown>, key: string, error: string): string {
   const value = record[key]
+
   if (typeof value !== 'string') {throw new Error(error)}
 
   return value
@@ -96,6 +98,7 @@ function requiredString(record: Record<string, unknown>, key: string, error: str
 
 function validatedSessions(value: unknown): SessionListResult {
   const error = 'Malformed session.list response.'
+
   if (!isRecord(value) || !Array.isArray(value.sessions)) {throw new Error(error)}
 
   const sessions = value.sessions.map((candidate): GatewaySessionSummary => {
@@ -124,17 +127,24 @@ function validatedSessions(value: unknown): SessionListResult {
 
 function validatedAttention(value: unknown): AttentionListResult {
   const error = 'Malformed attention.list response.'
+
   if (!isRecord(value) || !Array.isArray(value.items)) {throw new Error(error)}
   const kinds = new Set(['approval', 'question', 'blocker', 'completion', 'error'])
+
   const items = value.items.map((candidate): GatewayAttentionItem => {
     if (!isRecord(candidate) || !kinds.has(candidate.kind as string)) {throw new Error(error)}
     const profile = requiredString(candidate, 'profile', error)
+
     if (!profile || profile.length > 64 || /[\\/]/.test(profile) || profile.includes('://')) {
       throw new Error(error)
     }
+
     const stored = candidate.stored_session_id
+
     if (stored !== null && typeof stored !== 'string') {throw new Error(error)}
+
     if (typeof candidate.occurred_at !== 'number') {throw new Error(error)}
+
     const item: GatewayAttentionItem = {
       id: requiredString(candidate, 'id', error),
       kind: candidate.kind as GatewayAttentionItem['kind'],
@@ -151,7 +161,9 @@ function validatedAttention(value: unknown): AttentionListResult {
         ? candidate.resolution
         : (() => {throw new Error(error)})()
     }
+
     if (typeof candidate.request_id === 'string') {item.request_id = candidate.request_id}
+
     if (candidate.request !== undefined) {
       const approval = validatedApproval(candidate.request)
       item.request = {
@@ -164,6 +176,7 @@ function validatedAttention(value: unknown): AttentionListResult {
 
     return item
   })
+
   const scope = typeof value.scope === 'string' ? value.scope : undefined
 
   return { items, ...(scope ? { scope } : {}) }
@@ -315,6 +328,7 @@ export class CompanionClient {
     }
 
     if (options.hidden !== undefined) {params.hidden = options.hidden}
+
     if (options.source !== undefined) {params.source = options.source}
 
     return this.gateway.request('session.create', params)
@@ -332,9 +346,13 @@ export class CompanionClient {
 
   listSessions(options: SessionListOptions): Promise<SessionListResult> {
     const params: Record<string, unknown> = { profile: options.profile }
+
     if (options.limit !== undefined) {params.limit = options.limit}
+
     if (options.include_hidden !== undefined) {params.include_hidden = options.include_hidden}
+
     if (options.include_archived !== undefined) {params.include_archived = options.include_archived}
+
     if (options.title !== undefined) {params.title = options.title}
 
     return this.gateway.request<unknown>('session.list', params).then(validatedSessions)
@@ -342,6 +360,26 @@ export class CompanionClient {
 
   setSessionPinned(profile: string, sessionId: string, pinned: boolean): Promise<SetPinnedResult> {
     return this.gateway.request('session.set_pinned', { profile, session_id: sessionId, pinned })
+  }
+
+  workCapabilities(profile: string) {
+    return this.gateway.request<unknown>('work.capabilities', { profile }).then(validateWorkCapability)
+  }
+
+  listWork(profile: string) {
+    return this.gateway.request<unknown>('work.list', { profile, include_snoozed: true }).then((value) => validateWorkList(value, profile))
+  }
+
+  getWork(profile: string, id: string) {
+    return this.gateway.request<unknown>('work.get', { profile, id }).then((value) => validateWorkDetail(value, profile, id))
+  }
+
+  decideWork(params: WorkDecisionParams): Promise<unknown> {
+    return this.gateway.request('work.decide', { ...params })
+  }
+
+  commentWork(params: WorkCommentParams): Promise<unknown> {
+    return this.gateway.request('work.comment', { ...params })
   }
 
   listAttention(): Promise<AttentionListResult> {
