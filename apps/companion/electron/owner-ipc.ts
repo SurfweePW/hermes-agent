@@ -4,6 +4,29 @@ import { CHANNELS } from './channels'
 import type { OwnerAuth } from './owner-auth'
 import { ownerErrorCode } from './owner-auth'
 
+/**
+ * Trust the same packaged HTML document across in-document query routing.
+ * A query changed with history.pushState does not replace the document or its
+ * preload, while a different file, origin, credentials, or fragment remains
+ * outside the native capability boundary.
+ */
+export function isTrustedDocumentUrl(candidate: string, trustedDocument: string): boolean {
+  try {
+    const frame = new URL(candidate)
+    const trusted = new URL(trustedDocument)
+
+    if (trusted.protocol === 'http:') {
+      return frame.origin === trusted.origin
+    }
+
+    return trusted.protocol === 'file:' && frame.protocol === 'file:'
+      && frame.host === trusted.host && frame.pathname === trusted.pathname
+      && !frame.username && !frame.password && !frame.hash
+  } catch {
+    return false
+  }
+}
+
 /** Exact window AND exact main-frame document, not any window at an allowed origin. */
 export function registerOwnerIpc(owner: OwnerAuth, ipc: Pick<IpcMain, 'handle'>,
   trusted: () => { contents: WebContents; url: string } | undefined): void {
@@ -13,7 +36,8 @@ export function registerOwnerIpc(owner: OwnerAuth, ipc: Pick<IpcMain, 'handle'>,
 
       const allowed = () => !!target && trusted()?.contents === target.contents
         && !target.contents.isDestroyed() && event.sender === target.contents
-        && event.senderFrame === target.contents.mainFrame && event.senderFrame?.url === target.url
+        && event.senderFrame === target.contents.mainFrame
+        && isTrustedDocumentUrl(event.senderFrame?.url ?? '', target.url)
 
       if (!allowed()) { return { ok: false, error: 'untrusted-renderer' } }
       const input = args[0] as { baseUrl?: unknown } | null

@@ -60,6 +60,17 @@ describe('owner IPC trust and payload validation', () => {
     expect(owner.ownerWebSocketUrl).toHaveBeenCalledWith(input)
   })
 
+  it('keeps the native bridge available after in-document query routing', async () => {
+    const { handlers, owner, event, frame } = rig()
+
+    frame.url = 'file:///app/dist/web/index.html?view=work&section=sessions'
+
+    await expect(handlers.get(CHANNELS.ownerWebSocketUrl)!(event, { baseUrl })).resolves.toEqual({
+      ok: true, value: 'ws://127.0.0.1:8642/api/ws?ticket=single_use_ticket_1'
+    })
+    expect(owner.ownerWebSocketUrl).toHaveBeenCalledOnce()
+  })
+
   it('fails closed unless the sender is the current main window main frame at the trusted document', async () => {
     const cases = [
       () => { const r = rig(); r.setTarget(undefined);

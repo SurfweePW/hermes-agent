@@ -61,7 +61,9 @@ describe('Companion Electron shell', () => {
 
   it('allows only the exact packaged file or trusted loopback origin to navigate', () => {
     expect(isTrustedRendererUrl('file:///app/dist/index.html', 'file:///app/dist/index.html')).toBe(true)
+    expect(isTrustedRendererUrl('file:///app/dist/index.html?view=work&section=sessions', 'file:///app/dist/index.html')).toBe(true)
     expect(isTrustedRendererUrl('file:///tmp/evil.html', 'file:///app/dist/index.html')).toBe(false)
+    expect(isTrustedRendererUrl('file:///app/dist/index.html#untrusted', 'file:///app/dist/index.html')).toBe(false)
     expect(isTrustedRendererUrl('http://localhost:5173/assets/main.js', 'http://localhost:5173')).toBe(true)
     expect(isTrustedRendererUrl('http://evil.example/', 'http://localhost:5173')).toBe(false)
   })
@@ -92,6 +94,9 @@ describe('Companion Electron shell', () => {
 
     expect(handlers.get(CHANNELS.get)?.(event)).toEqual({ ok: true, value: 'secret' })
     expect(store.get).toHaveBeenCalledOnce()
+
+    frame.url = 'file:///app/dist/index.html?view=work&section=sessions'
+    expect(handlers.get(CHANNELS.get)?.(event)).toEqual({ ok: true, value: 'secret' })
 
     expect(handlers.get(CHANNELS.set)?.(event, '')).toEqual({ ok: false, error: 'invalid-request' })
     expect(store.set).not.toHaveBeenCalled()

@@ -5,7 +5,7 @@ import { app, BrowserWindow, type BrowserWindowConstructorOptions, ipcMain, type
 
 import { CHANNELS } from './channels'
 import { OwnerAuth } from './owner-auth'
-import { registerOwnerIpc } from './owner-ipc'
+import { isTrustedDocumentUrl, registerOwnerIpc } from './owner-ipc'
 import { GatewayTokenStore } from './secure-store'
 
 export const APP_ID = 'com.hermes.companion'
@@ -79,15 +79,7 @@ export function selectRendererTarget({ directory, isPackaged, developmentServer 
 }
 
 export function isTrustedRendererUrl(candidate: string, trustedRenderer: string): boolean {
-  try {
-    const frameUrl = new URL(candidate)
-
-    return trustedRenderer.startsWith('http://')
-      ? frameUrl.origin === trustedRenderer
-      : frameUrl.href === trustedRenderer
-  } catch {
-    return false
-  }
+  return isTrustedDocumentUrl(candidate, trustedRenderer)
 }
 
 function isTrustedSender(event: IpcMainInvokeEvent, trustedRenderer: string): boolean {
