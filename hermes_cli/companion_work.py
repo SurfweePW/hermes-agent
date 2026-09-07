@@ -10,7 +10,8 @@ import json
 from pathlib import Path
 import sys
 
-from hermes_cli.companion_work_store import WorkError, WorkStore
+from hermes_cli.companion_work_store import (
+    WorkError, WorkStore, anchored_store_path)
 
 DECISION_AUTH_REASON = ('Owner sign-in required: use an authorized dashboard session and a fresh '
                         'single-use ticket. Shared tokens and agent/internal clients cannot decide.')
@@ -55,6 +56,11 @@ def resolve_store(profile=None):
         raise WorkError('profile unavailable', 4404)
     if selected != current:
         home = get_profile_dir(selected)
+    # Fail closed on redirect attacks at the production entry point: a
+    # symlinked store file or profile directory must not relocate business
+    # decisions outside the Hermes home. Only profile-derived paths reach
+    # here, so the anchor invariant holds for every store this creates.
+    anchored_store_path(Path(home) / 'companion-work.db')
     from hermes_cli.config import load_config_path_readonly
 
     config = load_config_path_readonly(Path(home) / 'config.yaml')

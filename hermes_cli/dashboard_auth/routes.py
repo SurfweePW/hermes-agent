@@ -457,17 +457,29 @@ async def auth_logout(request: Request):
         from hermes_cli.dashboard_auth.middleware import _verify_access_token
 
         bearer = extract_bearer(request)
-        candidates = [token for token in (at, bearer) if token]
-        for access_token in dict.fromkeys(candidates):
+        # An explicit Authorization bearer expresses the caller's intended
+        # identity; an ambient cookie may belong to a different user in the
+        # same browser context. Verify the bearer first and only fall back to
+        # the cookie when no bearer was presented, so logout never revokes
+        # authority for the wrong identity. All verified identities are
+        # revoked, not merely the first match.
+        cookie_first = [t for t in (bearer, at) if t]
+        for access_token in dict.fromkeys(cookie_first):
             try:
-                sess = _verify_access_token(
+                verified = _verify_access_token(
                     request, access_token=access_token, audit=False)
             except Exception as e:  # noqa: BLE001 — logout remains best-effort
                 _log.warning(
                     "dashboard-auth: identity lookup during logout failed: %s", e)
                 continue
-            if sess is not None:
-                break
+            if verified is not None:
+                from hermes_cli.dashboard_auth.ws_tickets import (
+                    revoke_owner_authorization)
+                revoke_owner_authorization(
+                    provider=getattr(verified, "provider", ""),
+                    user_id=getattr(verified, "user_id", ""))
+                if sess is None:
+                    sess = verified
     if sess is not None:
         from hermes_cli.dashboard_auth.ws_tickets import revoke_owner_authorization
         revoke_owner_authorization(provider=sess.provider, user_id=sess.user_id)

@@ -352,7 +352,14 @@ def test_native_bearer_logout_revokes_owner_authorization(gated_client, monkeypa
     )
 
     assert response.status_code == 302
-    assert revoked == [{"provider": "stub", "user_id": "stub-user-1"}]
+    # The bearer is verified first (it expresses the caller's identity), but
+    # the ambient cookie session from the native login flow is still present
+    # in the test client's cookie jar. Logout revokes EVERY verified identity,
+    # so the same user is revoked twice — once per presented credential.
+    assert revoked == [
+        {"provider": "stub", "user_id": "stub-user-1"},
+        {"provider": "stub", "user_id": "stub-user-1"},
+    ]
 
 
 

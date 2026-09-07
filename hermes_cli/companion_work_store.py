@@ -69,8 +69,10 @@ def anchored_store_path(path: Path) -> Path:
     symlinked store file or a symlinked profile directory would silently write
     business decisions to an attacker-chosen location.
     """
+    from hermes_constants import get_hermes_home
+
     resolved = Path(path).resolve(strict=False)
-    home = Path(os.environ.get('HERMES_HOME') or Path.home() / '.hermes')
+    home = Path(get_hermes_home())
     try:
         resolved.relative_to(home.resolve(strict=False))
     except ValueError as exc:
