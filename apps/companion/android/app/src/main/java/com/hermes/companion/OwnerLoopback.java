@@ -50,10 +50,10 @@ final class OwnerLoopback implements OwnerSession.Attempt {
                     String request = readHeaders(new OwnerDeadlineInput(socket.getInputStream(), socket,
                         Math.min(deadline, System.nanoTime() + 2_000_000_000L)), 8192);
                     String code = parseRequest(request, path, state, server.getLocalPort());
-                    String body = "Sign-in received. You may return to Companion.";
-                    String response = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nCache-Control: no-store\r\n"
-                        + "Referrer-Policy: no-referrer\r\nContent-Security-Policy: default-src 'none'\r\nConnection: close\r\nContent-Length: "
-                        + body.length() + "\r\n\r\n" + body;
+                    String response = "HTTP/1.1 302 Found\r\n"
+                        + "Location: hermes-companion://owner-auth-complete\r\n"
+                        + "Cache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n"
+                        + "Content-Security-Policy: default-src 'none'\r\nConnection: close\r\nContent-Length: 0\r\n\r\n";
                     socket.getOutputStream().write(response.getBytes(StandardCharsets.US_ASCII));
                     return code;
                 } catch (IllegalArgumentException | java.io.IOException ignored) {

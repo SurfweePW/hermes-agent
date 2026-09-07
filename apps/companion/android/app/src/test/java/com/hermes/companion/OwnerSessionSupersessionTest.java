@@ -241,6 +241,34 @@ public class OwnerSessionSupersessionTest {
         } finally { release(oldBoundary); release(newBoundary); close(oldSession, newSession); workers.shutdownNow(); }
     }
 
+    @Test public void recreatedSessionStatusWaitsForBrowserSignInWithoutClosingItsLoopback() throws Exception {
+        SharedPersistence persistence = new SharedPersistence();
+        FakeAttempt oldAttempt = FakeAttempt.blocking("old-code");
+        OwnerSession oldSession = new OwnerSession(null, new FakeBoundary(persistence, oldAttempt));
+        OwnerSession recreatedSession = new OwnerSession(null, boundary(persistence));
+        ExecutorService workers = Executors.newFixedThreadPool(2);
+        try {
+            Future<JSObject> signIn = workers.submit(() -> signIn(oldSession));
+            await(oldAttempt.awaiting);
+            java.util.concurrent.atomic.AtomicReference<Thread> statusThread = new java.util.concurrent.atomic.AtomicReference<>();
+            Future<JSObject> status = workers.submit(() -> {
+                statusThread.set(Thread.currentThread());
+                return recreatedSession.status(BASE);
+            });
+            long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2);
+            while (statusThread.get() == null || statusThread.get().getState() != Thread.State.TIMED_WAITING) {
+                if (System.nanoTime() >= deadline) fail("recreated status did not wait for the active browser sign-in");
+                Thread.yield();
+            }
+            assertFalse(status.isDone());
+            assertFalse(oldAttempt.closed);
+            oldAttempt.release.countDown();
+            assertNull(signIn.get(2, TimeUnit.SECONDS));
+            assertNull(status.get(2, TimeUnit.SECONDS));
+            assertCredential(persistence, "old-credentials");
+        } finally { oldAttempt.release.countDown(); close(oldSession, recreatedSession); workers.shutdownNow(); }
+    }
+
     private void assertRefreshFailureDoesNotDeleteReplacement(int status) throws Exception {
         SharedPersistence persistence = seeded("old-expired");
         FakeBoundary oldBoundary = boundary(persistence);
@@ -533,5 +561,6 @@ public class OwnerSessionSupersessionTest {
         }
         @Override public JSObject ticketResult(String base, Object response) { return null; }
         @Override public JSObject signedInResult(String base) { return null; }
+        @Override public JSObject statusResult(String base, boolean signedIn, boolean supported) { return null; }
     }
 }

@@ -186,7 +186,7 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
     }
 
     if (screen === 'needs') {return <>
-      {companion.phase !== 'ready' && <button disabled={companion.phase === 'recovering'} onClick={() => void store.recover()} type="button">Reconnect to verify work</button>}
+      {companion.phase !== 'ready' && <button className="button reconnect-button" disabled={companion.phase === 'recovering'} onClick={() => void store.recover()} type="button">Reconnect to verify work</button>}
       <OwnerSignIn baseUrl={companion.baseUrl} onOwnerConnect={store.connectOwner} onOwnerSignOut={store.signOutOwner} ownerConnected={companion.connectionMode === 'owner' && companion.phase === 'ready'} />
       <WorkInbox {...work} onClose={store.work.close} onComment={store.work.comment} onDecision={store.work.decide} onGroupBy={(groupBy) => void store.work.setGroupBy(groupBy)} onOpen={(profile, id) => void store.work.open(profile, id)} onRefresh={() => void store.work.refresh()} />
       <NeedsMe items={companion.attentionItems} onOpen={(item) => { if (companion.phase === 'ready') {void store.openAttention(item).then(() => setScreen('conversation'))} }} onRefresh={() => void store.refreshAttention()} scope={companion.attentionScope} />
@@ -203,7 +203,7 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
 
   return (
     <div className="app-shell app-shell--two-column">
-      <header className="mobile-header"><Wordmark /><span aria-label="Profile: Companion user" className="avatar avatar--user" role="img">CU</span></header>
+      <header className="mobile-header"><div className="mobile-brand"><Wordmark /><BuildStamp /></div><span aria-label="Profile: Companion user" className="avatar avatar--user" role="img">CU</span></header>
       <aside className="left-rail">
         <Wordmark />
         <nav aria-label="Main navigation" className="primary-nav">
@@ -212,11 +212,11 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
           <NavButton active={screen === 'library'} icon="▤" label="Library" onClick={() => navigate('library')} />
         </nav>
         <div className="rail-roster"><div className="rail-section-title"><span>Teammates</span><span>{companion.teammates.length}</span></div><Roster compact onSelect={openTeammate} teammates={companion.teammates} /></div>
-        <div className="connection"><span aria-hidden="true" /><div><strong>Companion is ready</strong><small>{companion.teammates.length} teammates available</small></div></div>
+        <div className="connection"><span aria-hidden="true" /><div><strong>Companion is ready</strong><small>{companion.teammates.length} teammates · v{__COMPANION_VERSION__}</small></div></div>
       </aside>
       <main aria-label={screenTitles[screen]} className={`main-content${screen === 'conversation' ? ' main-content--conversation' : ''}`} ref={mainRef} tabIndex={-1}>
         <h1 className="sr-only">Hermes Companion</h1>
-        {screen !== 'conversation' && <header className="desktop-topbar"><div><span>Hermes Companion</span><strong>{screenTitles[screen]}</strong></div><span aria-label="Profile: Companion user" className="avatar avatar--user" role="img">CU</span></header>}
+        {screen !== 'conversation' && <header className="desktop-topbar"><div><span>Hermes Companion · v{__COMPANION_VERSION__}</span><strong>{screenTitles[screen]}</strong></div><span aria-label="Profile: Companion user" className="avatar avatar--user" role="img">CU</span></header>}
         {companion.error && <div className="decision-toast" role="alert">{companion.error}</div>}
         {content}
       </main>
@@ -237,10 +237,12 @@ function SetupScreen({ initialBaseUrl, warnings, connecting, error, hasSavedToke
     ? 'The native app stores the token encrypted in secure device storage.'
     : 'The browser keeps the token for this session only.'
 
-  return <main aria-labelledby="setup-title" className="recovery-screen"><section className="recovery-card"><Wordmark /><p className="kicker">Connection setup</p><h1 id="setup-title">Connect Hermes Companion</h1><p>Use the private HTTP(S) base URL for your Hermes gateway. {storageCopy}</p><form onSubmit={(event) => { event.preventDefault(); onConnect(baseUrl, token) }}><label>Gateway base URL<input autoComplete="url" onChange={(event) => setBaseUrl(event.target.value)} placeholder="http://localhost:8642" required type="url" value={baseUrl} /></label>{ownerAuthAvailable ? <><button className="primary-button" disabled={connecting || !baseUrl.trim()} onClick={() => onOwnerConnect(baseUrl)} type="button">{connecting ? 'Connecting…' : 'Sign in with Google'}</button><p role="status">Owner sign-in uses the native app and system browser with a single-use connection ticket.</p></> : <p role="status">Google owner sign-in requires a trusted native app bridge. Browser setup requires a session token.</p>}<label>Session token<input autoComplete="off" onChange={(event) => setToken(event.target.value)} placeholder={hasSavedToken ? 'Leave blank to use saved token' : undefined} required={!hasSavedToken} type="password" value={token} /></label>{hasSavedToken && <p role="status">A saved encrypted token is available. Enter a new token to replace it after a successful connection.</p>}{warnings.map((warning) => <p key={warning} role="status">{warning}</p>)}{error && <p role="alert">{error}</p>}<button className={ownerAuthAvailable ? undefined : 'primary-button'} disabled={connecting} type="submit">{connecting ? 'Connecting…' : hasSavedToken && !token ? 'Use saved token' : 'Connect privately'}</button>{canForgetSavedToken && <button disabled={connecting} onClick={onForgetSavedToken} type="button">Forget saved token</button>}</form></section></main>
+  return <main aria-labelledby="setup-title" className="recovery-screen"><section className="recovery-card"><Wordmark /><BuildStamp /><p className="kicker">Connection setup</p><h1 id="setup-title">Connect Hermes Companion</h1><p>Use the private HTTP(S) base URL for your Hermes gateway. {storageCopy}</p><form onSubmit={(event) => { event.preventDefault(); onConnect(baseUrl, token) }}><label>Gateway base URL<input autoComplete="url" onChange={(event) => setBaseUrl(event.target.value)} placeholder="http://localhost:8642" required type="url" value={baseUrl} /></label>{ownerAuthAvailable ? <><button className="primary-button" disabled={connecting || !baseUrl.trim()} onClick={() => onOwnerConnect(baseUrl)} type="button">{connecting ? 'Connecting…' : 'Sign in with Google'}</button><p role="status">Owner sign-in uses the native app and system browser with a single-use connection ticket.</p></> : <p role="status">Google owner sign-in requires a trusted native app bridge. Browser setup requires a session token.</p>}<label>Session token<input autoComplete="off" onChange={(event) => setToken(event.target.value)} placeholder={hasSavedToken ? 'Leave blank to use saved token' : undefined} required={!hasSavedToken} type="password" value={token} /></label>{hasSavedToken && <p role="status">A saved encrypted token is available. Enter a new token to replace it after a successful connection.</p>}{warnings.map((warning) => <p key={warning} role="status">{warning}</p>)}{error && <p role="alert">{error}</p>}<button className={ownerAuthAvailable ? undefined : 'primary-button'} disabled={connecting} type="submit">{connecting ? 'Connecting…' : hasSavedToken && !token ? 'Use saved token' : 'Connect privately'}</button>{canForgetSavedToken && <button disabled={connecting} onClick={onForgetSavedToken} type="button">Forget saved token</button>}</form></section></main>
 }
 
 function Wordmark() { return <div className="wordmark"><span aria-hidden="true" className="wordmark__sigil">H+</span><span>Hermes<strong>Companion</strong></span></div> }
+
+function BuildStamp() { return <small className="build-stamp">v{__COMPANION_VERSION__} · {__COMPANION_GIT_COMMIT__.slice(0, 8)}</small> }
 interface NavButtonProps { active: boolean; icon: string; label: string; onClick: () => void; badge?: string }
 
 function NavButton({ active, icon, label, onClick, badge }: NavButtonProps) { return <button aria-current={active ? 'page' : undefined} className={`nav-button${active ? ' nav-button--active' : ''}`} onClick={onClick} type="button"><span aria-hidden="true" className="nav-button__icon">{icon}</span><span>{label}</span>{badge && <span aria-label={`${badge} items`} className="nav-badge">{badge}</span>}</button> }

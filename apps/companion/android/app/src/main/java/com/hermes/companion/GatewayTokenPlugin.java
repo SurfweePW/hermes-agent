@@ -6,6 +6,7 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
+import android.util.Log;
 import android.webkit.WebView;
 
 import org.json.JSONObject;
@@ -15,10 +16,12 @@ import java.net.URI;
 @CapacitorPlugin(name = "GatewayToken")
 public final class GatewayTokenPlugin extends Plugin {
     static final String GENERIC_ERROR = "Secure token storage unavailable.";
+    private static final String OWNER_LOG_TAG = "HermesOwnerAuth";
     private KeystoreTokenStore store;
     private OwnerSession owner;
     private final java.util.concurrent.ThreadPoolExecutor ownerWorker = new java.util.concurrent.ThreadPoolExecutor(
         2, 2, 0L, java.util.concurrent.TimeUnit.MILLISECONDS, new java.util.concurrent.ArrayBlockingQueue<>(16));
+    private final OwnerTaskLifecycle ownerLifecycle = new OwnerTaskLifecycle();
 
     @Override
     public void load() {
@@ -94,6 +97,11 @@ public final class GatewayTokenPlugin extends Plugin {
                 call.reject("Invalid owner gateway URL.", "INVALID_BASE_URL");
                 return;
             }
+            if (!ownerLifecycle.begin()) {
+                call.reject("Owner authentication was interrupted. Reopen the app and try again.",
+                    "OWNER_AUTH_INTERRUPTED");
+                return;
+            }
             try {
                 ownerWorker.execute(() -> {
                     try {
@@ -120,11 +128,15 @@ public final class GatewayTokenPlugin extends Plugin {
                     } catch (OwnerSession.Unsupported ignored) {
                         call.reject("This gateway has no supported native owner sign-in provider.", "OWNER_UNSUPPORTED");
                     } catch (Exception ignored) {
+                        Log.w(OWNER_LOG_TAG, operation + " failed: " + safeFailureKind(ignored));
                         // Never forward URLs, response bodies, exception causes, codes, verifiers or bearer credentials.
                         call.reject("Owner sign-in unavailable, cancelled, or expired. Try signing in again.", "OWNER_AUTH_FAILED");
+                    } finally {
+                        if (ownerLifecycle.finish()) closeOwnerRuntime();
                     }
                 });
             } catch (java.util.concurrent.RejectedExecutionException ignored) {
+                ownerLifecycle.finish();
                 call.reject("Owner sign-in is busy.", "OWNER_AUTH_BUSY");
             }
         });
@@ -146,11 +158,25 @@ public final class GatewayTokenPlugin extends Plugin {
         finally { launched.cancel(false); }
     }
 
+    static String safeFailureKind(Exception failure) {
+        if (failure instanceof OwnerHttp.Failure) {
+            return "gateway-http-" + ((OwnerHttp.Failure) failure).status;
+        }
+        return failure.getClass().getSimpleName();
+    }
+
     @Override
     protected void handleOnDestroy() {
+        // Samsung may destroy the Activity while Chrome owns the OAuth flow.
+        // Let an active operation receive the loopback callback and persist its
+        // refresh credential; a recreated Activity resumes through ownerStatus.
+        if (ownerLifecycle.destroy()) closeOwnerRuntime();
+        super.handleOnDestroy();
+    }
+
+    private void closeOwnerRuntime() {
         if (owner != null) owner.close();
         ownerWorker.shutdownNow();
-        super.handleOnDestroy();
     }
 
     private void withTrustedCall(PluginCall call, String[] expectedKeys, Runnable action) {

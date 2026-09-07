@@ -832,7 +832,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     }
   }
 
-  return {
+  const api: CompanionStore = {
     work,
     directory,
     library,
@@ -900,6 +900,10 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
         if (!ownerAuth) {throw new Error('Owner authentication is unavailable.')}
         publish({ phase: 'connecting', baseUrl: configuration.baseUrl, warnings: configuration.warnings, error: null })
+        // Persist only the validated, non-secret endpoint before opening the
+        // system browser so Activity recreation can resume this exact flow.
+
+        if (storage) {persistGatewayBaseUrl(storage, { baseUrl: configuration.baseUrl, token: '' })}
         const ownerStatus = await ownerAuth.ownerStatus({ baseUrl: configuration.baseUrl })
 
         if (connectionGeneration !== operation || destroyed) {return}
@@ -1279,4 +1283,20 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       listeners.clear()
     }
   }
+
+  if (ownerAuth && snapshot.baseUrl) {
+    const bootstrapBaseUrl = snapshot.baseUrl
+    const bootstrapGeneration = connectionGeneration
+
+    void ownerAuth.ownerStatus({ baseUrl: bootstrapBaseUrl }).then((status) => {
+      if (destroyed
+        || connectionGeneration !== bootstrapGeneration
+        || snapshot.phase !== 'setup'
+        || !hasExistingOwnerSession(status)) {return}
+
+      return api.configureOwner({ baseUrl: bootstrapBaseUrl })
+    }).catch(() => undefined)
+  }
+
+  return api
 }

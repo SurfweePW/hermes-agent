@@ -6,6 +6,7 @@ import { describe, expect, it } from 'vitest'
 import {
   assertAsarContents,
   assertPackagedRenderer,
+  createInstallStamp,
   createPackagingPlan,
   createZipVerificationCommands
 } from './package-mac.mjs'
@@ -82,5 +83,18 @@ describe('macOS packaging workflow', () => {
         args: [`${extractedAppPath}/Contents/MacOS/Hermes Companion`, '-verify_arch', 'arm64']
       }
     ])
+  })
+
+  it('embeds immutable release provenance outside the ASAR', () => {
+    expect(createInstallStamp(packageJson, 'a'.repeat(40), '2026-09-07T12:00:00.000Z')).toEqual({
+      product: 'Hermes Companion',
+      version: packageJson.version,
+      gitCommit: 'a'.repeat(40),
+      sourceCommit: 'a'.repeat(40),
+      dirty: false,
+      packagedAt: '2026-09-07T12:00:00.000Z'
+    })
+    expect(createInstallStamp(packageJson, 'a'.repeat(40), '2026-09-07T12:00:00.000Z', true).gitCommit).toBe(`${'a'.repeat(40)}-dirty`)
+    expect(() => createInstallStamp(packageJson, 'short')).toThrow(/full Git commit/i)
   })
 })

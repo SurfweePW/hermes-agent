@@ -1,5 +1,38 @@
 apply plugin: 'com.android.application'
 
+def releaseSigningFields = [
+    'HERMES_COMPANION_ANDROID_KEYSTORE',
+    'HERMES_COMPANION_ANDROID_STORE_PASSWORD',
+    'HERMES_COMPANION_ANDROID_KEY_ALIAS',
+    'HERMES_COMPANION_ANDROID_KEY_PASSWORD'
+]
+def releaseTaskRequested = gradle.startParameter.taskNames.any { taskName ->
+    taskName.toLowerCase(Locale.ROOT).contains('release')
+}
+def releaseSigningValues = releaseSigningFields.collectEntries { field ->
+    def value = providers.gradleProperty(field)
+        .orElse(providers.environmentVariable(field))
+        .getOrNull()
+    [(field): value]
+}
+def companionGitCommit = providers.gradleProperty('HERMES_COMPANION_GIT_COMMIT')
+    .orElse(providers.environmentVariable('HERMES_COMPANION_GIT_COMMIT'))
+    .getOrElse('development')
+
+if (releaseTaskRequested) {
+    def missingFields = releaseSigningFields.findAll { field -> !releaseSigningValues[field]?.trim() }
+    if (!missingFields.isEmpty()) {
+        throw new GradleException("Missing Android release signing fields: ${missingFields.join(', ')}")
+    }
+    def keystore = file(releaseSigningValues.HERMES_COMPANION_ANDROID_KEYSTORE)
+    if (!keystore.isFile()) {
+        throw new GradleException("Android release keystore does not exist: ${keystore}")
+    }
+    if (!(companionGitCommit ==~ /[0-9a-f]{40}/)) {
+        throw new GradleException('Android release provenance requires HERMES_COMPANION_GIT_COMMIT as a full commit SHA.')
+    }
+}
+
 android {
     namespace = "com.hermes.companion"
     buildFeatures {
@@ -10,17 +43,29 @@ android {
         applicationId "com.hermes.companion"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 2
-        versionName "0.3.0"
+        versionCode 3
+        versionName "0.4.0"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        buildConfigField "String", "COMPANION_GIT_COMMIT", "\"${companionGitCommit.replace('\\', '\\\\').replace('"', '\\"')}\""
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
              // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
             ignoreAssetsPattern = '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (releaseTaskRequested) {
+                storeFile file(releaseSigningValues.HERMES_COMPANION_ANDROID_KEYSTORE)
+                storePassword releaseSigningValues.HERMES_COMPANION_ANDROID_STORE_PASSWORD
+                keyAlias releaseSigningValues.HERMES_COMPANION_ANDROID_KEY_ALIAS
+                keyPassword releaseSigningValues.HERMES_COMPANION_ANDROID_KEY_PASSWORD
+            }
+        }
+    }
     buildTypes {
         release {
+            signingConfig signingConfigs.release
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }

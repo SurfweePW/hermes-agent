@@ -13,7 +13,7 @@ export function NeedsMe({ items, scope, onOpen, onRefresh }: NeedsMeProps) {
       <p className="kicker">Runtime-local attention</p>
       <h2 id="needs-title">Needs Me <span className="heading-count">{items.length}</span></h2>
       <p className="screen-lede">Scope: <strong>{scope}</strong>. This is not a global inbox; only items reported by the connected gateway runtime appear here.</p>
-      <button onClick={onRefresh} type="button">Refresh</button>
+      <button className="button" onClick={onRefresh} type="button">Refresh</button>
       <div className="attention-list">
         {items.map((item) => {
           const actionable = item.actionable

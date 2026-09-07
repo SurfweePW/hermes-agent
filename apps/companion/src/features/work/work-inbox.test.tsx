@@ -63,6 +63,17 @@ describe('durable work inbox', () => {
     fireEvent.change(screen.getByLabelText('Group by'), { target: { value: 'session' } })
     expect(p.onGroupBy).toHaveBeenCalledWith('session')
   })
+  it('keeps detailed source errors behind progressive disclosure', () => {
+    render(<WorkInbox {...props({ selected: null, sources: [
+      { profile: 'atlas', status: 'verified', incomplete: false, lastSuccess: '2026-09-07T10:00:00Z', message: null },
+      { profile: 'offline', status: 'error', incomplete: true, lastSuccess: null, message: 'Refresh failed' }
+    ] })} />)
+    const summary = screen.getByText('1 of 2 work sources incomplete')
+    const details = summary.closest('details') as HTMLDetailsElement
+    expect(details.open).toBe(false)
+    fireEvent.click(summary)
+    expect(details.open).toBe(true)
+  })
   it.each(['offline', 'error', 'unsupported', 'loading'] as const)('disables decision and comment on %s', (status) => {
     render(<WorkInbox {...props({ status })} />)
     expect(screen.getByRole('group', { name: 'Decision for revision 2' }).hasAttribute('disabled')).toBe(true)

@@ -1,10 +1,12 @@
 package com.hermes.companion;
 
+import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertFalse;
 import static org.junit.Assert.assertTrue;
 
 import org.junit.Test;
 
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -17,6 +19,13 @@ public class GatewaySecurityTest {
         assertFalse(GatewayTokenValidator.isValid(""));
         assertFalse(GatewayTokenValidator.isValid("token\nvalue"));
         assertFalse(GatewayTokenValidator.isValid("x".repeat(GatewayTokenValidator.MAX_TOKEN_LENGTH + 1)));
+    }
+
+
+    @Test
+    public void ownerFailureLoggingNeverIncludesResponseBodiesOrCredentials() {
+        assertEquals("gateway-http-401", GatewayTokenPlugin.safeFailureKind(new OwnerHttp.Failure(401)));
+        assertEquals("IOException", GatewayTokenPlugin.safeFailureKind(new IOException("secret response body")));
     }
 
     @Test

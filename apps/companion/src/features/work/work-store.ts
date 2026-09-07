@@ -172,9 +172,8 @@ export function createWorkStore(): WorkStore {
 
     if (detail) {cards.set(key(detail.item.profile, detail.item.id), detail.item)}
     const reasons = [...new Set(successful.filter(({ capability }) => !capability.can_decide).map(({ capability }) => capability.reason || 'Human-authenticated dashboard login is required for business decisions.'))]
-    const incomplete = failed.length ? `${failed.length} of ${responses.length} work sources incomplete.` : ''
     const status = successful.length ? 'verified' : failed.every(({ error }) => errorCode(error) === -32601) ? 'unsupported' : 'error'
-    publish({ ...projection(), status, sources: profiles.map((profile) => sourceStates.get(profile)!).filter(Boolean), message: [incomplete, ...reasons].filter(Boolean).join(' ') || null })
+    publish({ ...projection(), status, sources: profiles.map((profile) => sourceStates.get(profile)!).filter(Boolean), message: reasons.join(' ') || null })
   }
 
   const mutate = async (input: WorkDecisionInput | { text: string }): Promise<boolean> => {

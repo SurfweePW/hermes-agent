@@ -10,6 +10,18 @@ import com.getcapacitor.BridgeActivity;
 
 public class MainActivity extends BridgeActivity {
     @Override
+    public void onResume() {
+        super.onResume();
+        OwnerAppVisibility.onResume();
+    }
+
+    @Override
+    public void onPause() {
+        OwnerAppVisibility.onPause();
+        super.onPause();
+    }
+
+    @Override
     public void onCreate(Bundle savedInstanceState) {
         registerPlugin(GatewayTokenPlugin.class);
         super.onCreate(savedInstanceState);

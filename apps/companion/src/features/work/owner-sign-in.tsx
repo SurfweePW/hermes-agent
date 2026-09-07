@@ -38,9 +38,9 @@ export function OwnerSignIn({ baseUrl, ownerConnected, onOwnerConnect, onOwnerSi
   return <section aria-label="Owner decision access" className="work-owner-auth">
     <p>A shared server token is not human approval. Owner sign-in is separate from runtime tool permissions.</p>
     {bridge ? ownerConnected
-      ? <button disabled={pending} onClick={() => void signOut()} type="button">Sign out of decision access</button>
-      : <><button disabled={pending} onClick={() => void signIn()} type="button">{pending ? 'Working…' : 'Sign in to make decisions'}</button>
-        <button disabled={pending} onClick={() => void signOut()} type="button">Clear saved owner sign-in</button></>
+      ? <button className="button" disabled={pending} onClick={() => void signOut()} type="button">Sign out of decision access</button>
+      : <><button className="button primary-button" disabled={pending} onClick={() => void signIn()} type="button">{pending ? 'Working…' : 'Sign in to make decisions'}</button>
+        <button className="button" disabled={pending} onClick={() => void signOut()} type="button">Clear saved owner sign-in</button></>
       : <p>Native owner sign-in is unavailable in this client. Use a human-authenticated dashboard connection; no token-based approval bypass is available.</p>}
     {message && <p role="status">{message}</p>}
   </section>

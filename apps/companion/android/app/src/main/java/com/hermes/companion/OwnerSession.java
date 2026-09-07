@@ -71,6 +71,9 @@ final class OwnerSession implements AutoCloseable {
         Object requestTicket(String base, Object credentials) throws Exception;
         JSObject ticketResult(String base, Object response) throws Exception;
         JSObject signedInResult(String base) throws Exception;
+        default JSObject statusResult(String base, boolean signedIn, boolean supported) {
+            return OwnerSession.statusResult(base, signedIn, supported);
+        }
     }
     static final class Unsupported extends Exception { }
 
@@ -104,6 +107,9 @@ final class OwnerSession implements AutoCloseable {
             @Override public Attempt newAttempt() throws Exception { return new OwnerLoopback(180000); }
             @Override public void requireSupport(String base) throws Exception { OwnerSession.this.requireSupport(base); }
             @Override public Object exchangeCode(String base, String code, String verifier) throws Exception {
+                // Chrome owns the foreground during OAuth. Samsung may suspend this
+                // app's network and DNS until the verified loopback redirects here.
+                OwnerAppVisibility.awaitResumed(30000);
                 return OwnerHttp.request(base, "/auth/native/token",
                     new JSONObject().put("code", code).put("code_verifier", verifier), null);
             }
@@ -219,15 +225,16 @@ final class OwnerSession implements AutoCloseable {
     }
 
     JSObject status(String base) throws Exception {
+        awaitOlderAttempt(base, 30000);
         ReadLease lease = readLease(base);
         try { boundary.requireSupport(base); }
         catch (Unsupported ignored) {
             lease.requireCurrent();
-            return statusResult(base, false, false);
+            return boundary.statusResult(base, false, false);
         }
         StoredCredentials credentials = credentials(base, lease);
         lease.requireCurrent();
-        return statusResult(base, credentials != null, true);
+        return boundary.statusResult(base, credentials != null, true);
     }
 
     JSObject signOut(String base) throws Exception {
@@ -358,6 +365,20 @@ final class OwnerSession implements AutoCloseable {
                     entry.setValue(new BaseOperation(operation.id, operation.sessionId, null));
                     break;
                 }
+            }
+            REGISTRY_LOCK.notifyAll();
+        }
+    }
+
+    private void awaitOlderAttempt(String base, long timeoutMs) throws InterruptedException {
+        long deadline = System.nanoTime() + java.util.concurrent.TimeUnit.MILLISECONDS.toNanos(timeoutMs);
+        synchronized (REGISTRY_LOCK) {
+            while (true) {
+                BaseOperation operation = OPERATIONS.get(base);
+                if (operation == null || operation.attempt == null || operation.sessionId >= sessionId) return;
+                long remaining = deadline - System.nanoTime();
+                if (remaining <= 0) throw new IllegalStateException();
+                java.util.concurrent.TimeUnit.NANOSECONDS.timedWait(REGISTRY_LOCK, remaining);
             }
         }
     }

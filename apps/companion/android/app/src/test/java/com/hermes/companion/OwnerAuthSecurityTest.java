@@ -65,7 +65,8 @@ public class OwnerAuthSecurityTest {
             String value = "B".repeat(43);
             exchange(uri, "code=" + value + "&state=wrong");
             String response = exchange(uri, "code=" + value + "&state=" + attempt.state());
-            assertTrue(response.startsWith("HTTP/1.1 200"));
+            assertTrue(response.startsWith("HTTP/1.1 302"));
+            assertTrue(response.contains("Location: hermes-companion://owner-auth-complete\r\n"));
             assertFalse(response.contains(value));
             assertFalse(response.contains(attempt.state()));
             assertTrue(response.contains("Cache-Control: no-store"));

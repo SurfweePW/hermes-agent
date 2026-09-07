@@ -184,6 +184,40 @@ describe('CompanionStore setup and sessions', () => {
     expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner', error: null })
   })
 
+  it('reconnects a persisted native owner session after a cold restart', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(),
+      ownerStatus: vi.fn(async () => ({ signedIn: true })),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=restart-ticket')
+    }
+
+    const { store, gateways } = harness('https://gateway.test', undefined, undefined, ownerAuth)
+
+    await vi.waitFor(() => expect(store.getSnapshot().phase).toBe('ready'))
+    expect(ownerAuth.ownerSignIn).not.toHaveBeenCalled()
+    expect(gateways).toHaveLength(1)
+    expect(gateways[0].calls[0]).toEqual(['connect', 'wss://gateway.test/api/ws?ticket=restart-ticket'])
+    expect(store.getSnapshot().connectionMode).toBe('owner')
+  })
+
+  it.each([undefined, null, {}, { signedIn: false }])('does not reconnect from an unverified owner status %#', async (status) => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(),
+      ownerStatus: vi.fn(async () => status),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn()
+    }
+
+    const { store, gateways } = harness('https://gateway.test', undefined, undefined, ownerAuth)
+
+    await vi.waitFor(() => expect(ownerAuth.ownerStatus).toHaveBeenCalledTimes(1))
+    expect(store.getSnapshot().phase).toBe('setup')
+    expect(ownerAuth.ownerSignIn).not.toHaveBeenCalled()
+    expect(ownerAuth.ownerWebSocketUrl).not.toHaveBeenCalled()
+    expect(gateways).toHaveLength(0)
+  })
+
   it('validates owner bootstrap URLs before crossing the native boundary', async () => {
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(),
@@ -491,7 +525,9 @@ describe('CompanionStore setup and sessions', () => {
       phase: 'setup', baseUrl: 'https://current-owner.gateway.test', connectionMode: 'shared'
     })
     expect(store.getSnapshot().error).toContain('could not reach the gateway')
-    expect(storage.setItem).not.toHaveBeenCalled()
+    expect(storage.setItem).toHaveBeenCalledWith(
+      'hermes.companion.gatewayBaseUrl', 'https://current-owner.gateway.test'
+    )
     expect(persistedToken).toBe('previous-shared-token')
   })
 

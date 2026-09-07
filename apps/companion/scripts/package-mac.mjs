@@ -1,9 +1,9 @@
-import { mkdtemp, mkdir, readFile, rm, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { spawnSync } from 'node:child_process'
+import { execFileSync, spawnSync } from 'node:child_process'
 import { listPackage } from '@electron/asar'
 
 const ARCH = 'arm64'
@@ -27,6 +27,19 @@ export function assertAsarContents(entries) {
 export function assertPackagedRenderer(entries) {
   if (!entries.includes('/dist/web/index.html')) {
     throw new Error('Packaged renderer HTML is missing from ASAR')
+  }
+}
+
+export function createInstallStamp(packageJson, gitCommit, packagedAt = new Date().toISOString(), dirty = false) {
+  if (!/^[0-9a-f]{40}$/.test(gitCommit)) { throw new Error('Install stamp requires a full Git commit') }
+
+  return {
+    product: requireString(packageJson.productName, 'productName'),
+    version: requireString(packageJson.version, 'version'),
+    gitCommit: dirty ? `${gitCommit}-dirty` : gitCommit,
+    sourceCommit: gitCommit,
+    dirty,
+    packagedAt
   }
 }
 
@@ -132,6 +145,13 @@ export async function packageMac() {
 
   const root = resolve(import.meta.dirname, '..')
   const packageJson = JSON.parse(await readFile(resolve(root, 'package.json'), 'utf8'))
+  const repoRoot = resolve(root, '../..')
+  const gitCommit = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim()
+  const gitStatus = execFileSync('git', ['status', '--porcelain'], { cwd: repoRoot, encoding: 'utf8' }).trim()
+  const dirty = Boolean(gitStatus)
+  if (dirty) {
+    throw new Error('Refusing to package a release from a dirty worktree. Commit the reviewed snapshot first.')
+  }
   const require = createRequire(import.meta.url)
   const builderCli = require.resolve('electron-builder/cli.js')
   const plan = createPackagingPlan({
@@ -155,6 +175,12 @@ export async function packageMac() {
   const asarEntries = listPackage(asarPath)
   assertAsarContents(asarEntries)
   assertPackagedRenderer(asarEntries)
+  const installStamp = createInstallStamp(packageJson, gitCommit, new Date().toISOString(), dirty)
+  await writeFile(
+    resolve(plan.appPath, 'Contents', 'Resources', 'install-stamp.json'),
+    `${JSON.stringify(installStamp, null, 2)}\n`,
+    { mode: 0o644 }
+  )
   run(plan.commands[2], root)
   run(plan.commands[3], root)
   run(plan.commands[4], root)
