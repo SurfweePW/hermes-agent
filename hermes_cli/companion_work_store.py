@@ -69,10 +69,14 @@ def anchored_store_path(path: Path) -> Path:
     symlinked store file or a symlinked profile directory would silently write
     business decisions to an attacker-chosen location.
     """
-    from hermes_constants import get_hermes_home
+    from hermes_constants import get_default_hermes_root
 
     resolved = Path(path).resolve(strict=False)
-    home = Path(get_hermes_home())
+    # A multiplex gateway may run with HERMES_HOME pinned to one named profile
+    # while serving sibling profiles. Anchor all profile-local stores to the
+    # canonical Hermes root, then retain the no-symlink checks below. Anchoring
+    # to the process profile itself incorrectly rejects every legitimate sibling.
+    home = Path(get_default_hermes_root())
     try:
         resolved.relative_to(home.resolve(strict=False))
     except ValueError as exc:

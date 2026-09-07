@@ -32,6 +32,17 @@ def test_store_rejects_symlinked_profile_directory(tmp_path, monkeypatch):
         anchored_store_path(home / 'profiles' / 'worker' / 'companion-work.db')
 
 
+def test_store_accepts_sibling_profile_when_gateway_runs_from_named_profile(tmp_path, monkeypatch):
+    root = tmp_path / '.hermes'
+    atlas = root / 'profiles' / 'atlas'
+    worker = root / 'profiles' / 'worker'
+    atlas.mkdir(parents=True)
+    worker.mkdir()
+    monkeypatch.setenv('HERMES_HOME', str(atlas))
+
+    assert anchored_store_path(worker / 'companion-work.db') == worker / 'companion-work.db'
+
+
 def proposed(store, source='test-source'):
     c = store.upsert(source, PAYLOAD)['item']
     return store.propose(c['id'], c['version'])['item']
