@@ -166,9 +166,9 @@ describe('CompanionStore setup and sessions', () => {
     expect(store.getSnapshot()).toMatchObject({ phase: 'ready', baseUrl: 'https://gateway.test', connectionMode: 'owner' })
   })
 
-  it('reuses a valid native owner session without launching another browser sign-in', async () => {
+  it('explicit setup sign-in reauthenticates without preflighting a saved native session', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true })),
       ownerStatus: vi.fn(async () => ({ signedIn: true })),
       ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket')
@@ -178,8 +178,8 @@ describe('CompanionStore setup and sessions', () => {
 
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
 
-    expect(ownerAuth.ownerStatus).toHaveBeenCalledWith({ baseUrl: 'https://gateway.test' })
-    expect(ownerAuth.ownerSignIn).not.toHaveBeenCalled()
+    expect(ownerAuth.ownerStatus).not.toHaveBeenCalled()
+    expect(ownerAuth.ownerSignIn).toHaveBeenCalledWith({ baseUrl: 'https://gateway.test' })
     expect(gateways[0].calls[0]).toEqual(['connect', 'wss://gateway.test/api/ws?ticket=owner-ticket'])
     expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner', error: null })
   })

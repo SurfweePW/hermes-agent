@@ -904,13 +904,10 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         // system browser so Activity recreation can resume this exact flow.
 
         if (storage) {persistGatewayBaseUrl(storage, { baseUrl: configuration.baseUrl, token: '' })}
-        const ownerStatus = await ownerAuth.ownerStatus({ baseUrl: configuration.baseUrl })
-
-        if (connectionGeneration !== operation || destroyed) {return}
-
-        if (!hasExistingOwnerSession(ownerStatus)) {
-          await ownerAuth.ownerSignIn({ baseUrl: configuration.baseUrl })
-        }
+        // The setup button is an explicit reauthentication request. Persisted
+        // session reuse is handled by cold-start bootstrap below; preflighting
+        // status here can stall on stale macOS safeStorage before browser launch.
+        await ownerAuth.ownerSignIn({ baseUrl: configuration.baseUrl })
 
         if (connectionGeneration !== operation || destroyed) {return}
         const client = await connect('connecting', operation, 'owner')
@@ -1294,7 +1291,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         || snapshot.phase !== 'setup'
         || !hasExistingOwnerSession(status)) {return}
 
-      return api.configureOwner({ baseUrl: bootstrapBaseUrl })
+      return api.connectOwner()
     }).catch(() => undefined)
   }
 

@@ -43,8 +43,8 @@ android {
         applicationId "com.hermes.companion"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 3
-        versionName "0.4.0"
+        versionCode 4
+        versionName "0.4.1"
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         buildConfigField "String", "COMPANION_GIT_COMMIT", "\"${companionGitCommit.replace('\\', '\\\\').replace('"', '\\"')}\""
         aaptOptions {

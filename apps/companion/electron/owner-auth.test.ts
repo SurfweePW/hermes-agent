@@ -155,6 +155,39 @@ describe('native owner login, real loopback and HTTP path', () => {
     await expect(restored.ownerWebSocketUrl({ baseUrl: g.baseUrl })).rejects.toThrow('owner-auth-required')
   })
 
+  it('replaces stale owner storage without decrypting it before browser launch', async () => {
+    let replacementPrepared = false
+
+    const store = {
+      get: vi.fn(() => { throw new Error('stale encrypted owner session') }),
+      set: vi.fn(),
+      reset: vi.fn(),
+      prepareReplacement: vi.fn(() => { replacementPrepared = true })
+    }
+
+    const request = vi.fn(async (url: string) => {
+      if (url.endsWith('/api/status')) { return { auth_flows: ['native_pkce'] } }
+
+      if (url.endsWith('/auth/native/token')) { return tokens() }
+
+      return { ticket: 'single_use_ticket_1' }
+    })
+
+    const auth = new OwnerAuth(store, async input => {
+      expect(replacementPrepared).toBe(true)
+      const url = new URL(input)
+      await fetch(`${url.searchParams.get('redirect_uri')}?code=ok&state=${url.searchParams.get('state')}`)
+    }, request)
+
+    await expect(auth.ownerSignIn({ baseUrl: 'http://127.0.0.1:8642' })).resolves.toEqual({
+      signedIn: true,
+      baseUrl: 'http://127.0.0.1:8642'
+    })
+    expect(store.prepareReplacement).toHaveBeenCalledOnce()
+    expect(store.get).not.toHaveBeenCalled()
+    expect(store.set).toHaveBeenCalledOnce()
+  })
+
   it('shows an explicit setup gate without opening a browser or storing anything', async () => {
     const g = await gateway(); g.disable()
     const s = storage(); const auth = new OwnerAuth(s.owner, g.open)

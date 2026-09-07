@@ -190,7 +190,7 @@ export class OwnerAuth {
   private lifetime = new AbortController()
   private pending?: AbortController
   private queue: Promise<unknown> = Promise.resolve()
-  constructor(private readonly store: Pick<GatewayTokenStore, 'get' | 'set' | 'reset'>,
+  constructor(private readonly store: Pick<GatewayTokenStore, 'get' | 'set' | 'reset'> & Partial<Pick<GatewayTokenStore, 'prepareReplacement'>>,
     private readonly openExternal: (url: string) => Promise<void>,
     private readonly request: JsonRequest = ownerJsonRequest,
     private readonly loginTimeoutMs = 5 * 60_000) {}
@@ -246,12 +246,15 @@ export class OwnerAuth {
     const signal = AbortSignal.any([pending.signal, this.lifetime.signal])
 
     try {
-      // Fail closed on corrupt/unavailable encryption before opening a browser.
-      this.load()
       const status = await this.request(`${baseUrl}/api/status`, undefined, signal)
       signal.throwIfAborted()
 
       if (!statusSupportsNativeFlow(status)) { throw error('owner-auth-setup-required') }
+      // Explicit sign-in replaces an old owner session. Do not decrypt a stale
+      // safeStorage blob first: after a private ad-hoc macOS upgrade that can
+      // block on inaccessible Keychain approval before the browser is opened.
+
+      if (this.store.prepareReplacement) { this.store.prepareReplacement() } else { this.store.reset() }
       const tokens = await ownerBrowserLogin(baseUrl, this.openExternal, this.request, signal)
       signal.throwIfAborted()
       await this.ticket({ baseUrl, tokens }, signal)

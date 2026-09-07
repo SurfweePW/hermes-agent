@@ -71,6 +71,18 @@ describe('GatewayTokenStore', () => {
     expect(store.get()).toBeUndefined()
   })
 
+  it('prepares explicit replacement without decrypting stale ciphertext', () => {
+    const userData = directory()
+    const decryptString = vi.fn(() => { throw new Error('stale Keychain item') })
+    const store = new GatewayTokenStore(userData, { ...crypto, decryptString }, 'owner-session.encrypted')
+    writeFileSync(store.filePath, 'stale-ciphertext', { mode: 0o600 })
+
+    store.prepareReplacement()
+
+    expect(decryptString).not.toHaveBeenCalled()
+    expect(store.get()).toBeUndefined()
+  })
+
   it('rejects a symlinked secure-storage directory', () => {
     const parent = directory()
     const actual = join(parent, 'actual')

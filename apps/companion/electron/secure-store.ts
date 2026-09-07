@@ -96,4 +96,11 @@ export class GatewayTokenStore {
   reset(): void {
     rmSync(this.filePath, { force: true })
   }
+
+  /** Prepare explicit reauthentication without decrypting stale ciphertext. */
+  prepareReplacement(): void {
+    this.reset()
+
+    if (!this.safeStorage.isEncryptionAvailable()) { throw new SecureStorageError() }
+  }
 }
