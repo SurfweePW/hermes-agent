@@ -1,0 +1,7 @@
+name: kanban-intake
+version: 1.0.0
+description: "Token-only service credential for HOFFEE Companion. Reads HERMES_DASHBOARD_KANBAN_INTAKE_SECRET, rejects weak values, grants only kanban:hoffee:create_get, and registers exactly /api/plugins/kanban/companion-intake for bearer auth."
+author: NousResearch
+kind: backend
+requires_env:
+  - HERMES_DASHBOARD_KANBAN_INTAKE_SECRET

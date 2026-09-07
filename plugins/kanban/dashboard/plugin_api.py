@@ -21,12 +21,12 @@ from contextlib import closing, contextmanager
 from dataclasses import asdict
 from functools import partial
 from pathlib import Path
-from typing import Any, Callable, Iterator, Optional
+from typing import Any, Callable, Iterator, Literal, Optional
 
 from fastapi import (
-    APIRouter, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect, status as http_status)
+    APIRouter, File, Form, HTTPException, Query, Request, UploadFile, WebSocket, WebSocketDisconnect, status as http_status)
 from fastapi.responses import FileResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from hermes_cli import kanban_db
 from hermes_cli import kanban_db_connect as kbc
@@ -391,6 +391,122 @@ def create_task(payload: CreateTaskBody, board: Optional[str] = Query(None)):
             except Exception:
                 pass  # probe failure must never block the create itself
         return body
+
+
+# --- POST /companion-intake -------------------------------------------------
+
+_COMPANION_BOARD = "hoffee"
+_COMPANION_SCOPE = "kanban:hoffee:create_get"
+_COMPANION_ASSIGNEE = "hoffeecmo"
+_TASK_ID_RE = re.compile(r"^t_[a-f0-9]{8,}$")
+
+
+class CompanionCreatePayload(BaseModel):
+    """Strict create payload; execution policy fields may only carry their pinned values."""
+    model_config = ConfigDict(extra="forbid")
+
+    title: str
+    body: Optional[str] = None
+    priority: int = 0
+    idempotency_key: Optional[str] = None
+    triage: Literal[True] = True
+    goal_mode: Literal[False] = False
+    assignee: Literal["hoffeecmo"] = "hoffeecmo"
+    tenant: Literal["hoffee"] = "hoffee"
+    workspace_kind: Literal["scratch"] = "scratch"
+
+    @model_validator(mode="after")
+    def _validate_title(self) -> "CompanionCreatePayload":
+        if not self.title.strip():
+            raise ValueError("title is required")
+        return self
+
+
+class CompanionIntakeBody(BaseModel):
+    """Exact HOFFEE client envelope for create/get."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    operation: Literal["create", "get"]
+    payload: Optional[CompanionCreatePayload] = None
+    task_id: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _validate_operation(self) -> "CompanionIntakeBody":
+        if self.operation == "create":
+            if self.payload is None:
+                raise ValueError("payload is required for operation=create")
+            if self.task_id is not None:
+                raise ValueError("task_id is only valid for operation=get")
+        else:
+            if not self.task_id or not _TASK_ID_RE.fullmatch(self.task_id):
+                raise ValueError("task_id must be a t_ id")
+            if self.payload is not None:
+                raise ValueError("payload is only valid for operation=create")
+        return self
+
+
+def _companion_task_dict(task: kanban_db.Task) -> dict[str, Any]:
+    """Stable, intentionally narrow response contract shared by create/get."""
+    return {
+        "id": task.id,
+        "title": task.title,
+        "body": task.body,
+        "status": task.status,
+        "priority": task.priority,
+        "assignee": task.assignee,
+        "tenant": task.tenant,
+        "workspace_kind": task.workspace_kind,
+        "idempotency_key": task.idempotency_key,
+        "created_at": task.created_at,
+        "completed_at": task.completed_at,
+        "result": task.result,
+    }
+
+
+def _require_companion_scope(request: Request) -> None:
+    principal = getattr(request.state, "token_principal", None)
+    if principal is None:
+        raise HTTPException(status_code=401, detail="Bearer token required")
+    if _COMPANION_SCOPE not in tuple(getattr(principal, "scopes", ())):
+        raise HTTPException(status_code=403, detail="Insufficient token scope")
+
+
+@router.post("/companion-intake")
+def companion_intake(payload: CompanionIntakeBody, request: Request):
+    """Create or retrieve one HOFFEE triage task through a scoped service token."""
+    _require_companion_scope(request)
+    with _board_conn(_COMPANION_BOARD) as (board, conn), _value_error_400():
+        if payload.operation == "create":
+            create = payload.payload
+            assert create is not None  # validated by CompanionIntakeBody
+            task_id = kanban_db.create_task(
+                conn,
+                title=create.title,
+                body=create.body,
+                priority=create.priority,
+                idempotency_key=create.idempotency_key,
+                created_by="hoffee-companion",
+                board=board,
+                triage=True,
+                goal_mode=False,
+                assignee=_COMPANION_ASSIGNEE,
+                tenant=_COMPANION_BOARD,
+                workspace_kind="scratch",
+                workspace_path=None,
+                parents=(),
+                max_runtime_seconds=None,
+                skills=None,
+                model_override=None,
+                provider_override=None,
+                reasoning_effort=None,
+                goal_max_turns=None,
+                project_id="",  # explicit empty value prevents board-project inheritance
+            )
+        else:
+            task_id = payload.task_id or ""  # validated above
+        task = _require_task(conn, task_id)
+        return {"ok": True, "operation": payload.operation, "task": _companion_task_dict(task)}
 
 
 # --- Attachments — upload / list / download / delete ------------------------
