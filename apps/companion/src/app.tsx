@@ -32,6 +32,16 @@ function initialScreen(): Screen {
   return view && primaryScreens.has(view) ? view : 'needs'
 }
 
+export function libraryAssetParams(profile: string, reference: string): URLSearchParams {
+  const params = new URLSearchParams()
+  params.set('view', 'library')
+  params.set('libraryProfile', profile)
+  params.set('libraryQ', reference.split('/').at(-1) ?? reference)
+  params.set('libraryOpen', reference)
+
+  return params
+}
+
 export function App({ store = defaultStore }: { store?: CompanionStore }) {
   const companion = useCompanion(store)
   const work = useSyncExternalStore(store.work.subscribe, store.work.getSnapshot, store.work.getSnapshot)
@@ -263,7 +273,7 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
     if (screen === 'needs') {return <>
       {companion.phase !== 'ready' && <button className="button reconnect-button" disabled={companion.phase === 'recovering'} onClick={() => void store.recover()} type="button">Reconnect to verify work</button>}
       <OwnerSignIn baseUrl={companion.baseUrl} onOwnerConnect={store.connectOwner} onOwnerSignOut={store.signOutOwner} ownerConnected={companion.connectionMode === 'owner' && companion.phase === 'ready'} />
-      <WorkInbox {...work} onClose={store.work.close} onComment={store.work.comment} onDecision={store.work.decide} onGroupBy={(groupBy) => void store.work.setGroupBy(groupBy)} onOpen={(profile, id) => void store.work.open(profile, id)} onOpenArtifact={(profile, reference) => {const params = new URLSearchParams(); params.set('view', 'library'); params.set('libraryProfile', profile); params.set('libraryQ', reference); params.set('libraryOpen', reference); navigate('library', params)}} onPriority={store.work.setPriority} onRefresh={() => void store.work.refresh()} onRestorePriority={store.work.restoreRecommended} />
+      <WorkInbox {...work} onClose={store.work.close} onComment={store.work.comment} onDecision={store.work.decide} onGroupBy={(groupBy) => void store.work.setGroupBy(groupBy)} onOpen={(profile, id) => void store.work.open(profile, id)} onOpenArtifact={(profile, reference) => navigate('library', libraryAssetParams(profile, reference))} onPriority={store.work.setPriority} onRefresh={() => void store.work.refresh()} onRestorePriority={store.work.restoreRecommended} />
       <NeedsMe items={companion.attentionItems} onOpen={(item) => { if (companion.phase === 'ready') {void store.openAttention(item).then(() => setScreen('conversation'))} }} onRefresh={() => void store.refreshAttention()} scope={companion.attentionScope} />
     </>}
 

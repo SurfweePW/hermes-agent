@@ -1,7 +1,7 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { App } from './app'
+import { App, libraryAssetParams } from './app'
 import { createFakeGateway } from './fixtures/fake-gateway'
 import { createFakeWorkGateway, FakeWorkGateway } from './fixtures/fake-work-gateway'
 import type { OwnerAuthBridge } from './security/owner-auth'
@@ -25,6 +25,17 @@ async function readyDirectoryStore() {
 const libraryArtifactId = `art_${'a'.repeat(64)}`
 
 describe('App', () => {
+  it('opens a work asset by filename while retaining its full Library reference', () => {
+    const params = libraryAssetParams('hoffeecmo', 'data/cmo/recommendations/a6-report.md')
+
+    expect(Object.fromEntries(params)).toEqual({
+      view: 'library',
+      libraryProfile: 'hoffeecmo',
+      libraryQ: 'a6-report.md',
+      libraryOpen: 'data/cmo/recommendations/a6-report.md'
+    })
+  })
+
   beforeEach(() => window.history.replaceState({}, '', '/'))
   afterEach(() => {vi.useRealTimers(); vi.restoreAllMocks()})
   it('keeps durable work in Needs Me, shows the old-server boundary and preserves runtime attention', async () => {
