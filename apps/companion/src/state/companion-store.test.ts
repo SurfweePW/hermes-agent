@@ -218,6 +218,22 @@ describe('CompanionStore setup and sessions', () => {
     expect(gateways).toHaveLength(0)
   })
 
+  it('keeps a private-network owner bootstrap failure visible', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(),
+      ownerStatus: vi.fn(async () => {throw new Error('Private gateway unavailable. Connect Tailscale, then try again.')}),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn()
+    }
+
+    const { store, gateways } = harness('https://gateway.test', undefined, undefined, ownerAuth)
+
+    await vi.waitFor(() => expect(store.getSnapshot().error).toBe('Private gateway unavailable. Connect Tailscale, then try again.'))
+    expect(store.getSnapshot().phase).toBe('setup')
+    expect(ownerAuth.ownerSignIn).not.toHaveBeenCalled()
+    expect(gateways).toHaveLength(0)
+  })
+
   it('validates owner bootstrap URLs before crossing the native boundary', async () => {
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(),

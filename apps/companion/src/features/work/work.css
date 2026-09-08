@@ -30,6 +30,16 @@
 .work-detail fieldset { border: 1px solid var(--line); border-radius: 10px; margin: 24px 0 0; min-width: 0; }
 .work-scope { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
 .work-boundary { padding: 14px; background: var(--paper2); border-left: 3px solid var(--amber); }
+.work-decision-request, .work-brief { margin: 18px 0; padding: 18px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface); }
+.work-decision-request { border-left: 4px solid var(--signal); }
+.work-decision-request .kicker, .work-decision-request h4, .work-brief h4 { margin-top: 0; }
+.work-boundary-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin: 16px 0; }
+.work-boundary-grid section, .work-not-authorized { padding: 14px; border-radius: 10px; background: var(--paper2); }
+.work-not-authorized { border-left: 3px solid var(--amber); }
+.work-file { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 0; border-bottom: 1px solid var(--line); }
+.work-file > span { display: grid; min-width: 0; gap: 3px; }
+.work-file > span > span, .work-file small { overflow-wrap: anywhere; }
+.work-file button { flex: 0 0 auto; }
 .work-priority-control { margin: 20px 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper2); }
 .work-discussion { padding-left: 24px; }
 .work-discussion li { padding: 12px 0; border-bottom: 1px solid var(--line); }
@@ -37,7 +47,8 @@
 @media (max-width: 640px) {
   .work-inbox, .work-owner-auth { margin: 16px; padding: 16px; }
   .reconnect-button { width: calc(100% - 32px); margin: 16px 16px 0; }
-  .work-scope { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .work-scope, .work-boundary-grid { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .work-file { align-items: stretch; flex-direction: column; }
   .work-inbox .section-heading { flex-wrap: wrap; gap: 12px; }
   .work-actions { flex-direction: column; }
 }

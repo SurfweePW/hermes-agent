@@ -30,6 +30,18 @@ function gateway(overrides: Partial<LibraryGateway> = {}): LibraryGateway {
 }
 
 describe('Library', () => {
+  it('opens a uniquely matched work asset directly from its Library reference', async () => {
+    const onNavigate = vi.fn()
+    const params = new URLSearchParams('libraryProfile=atlas&libraryQ=report.md&libraryOpen=%2Fworkspace%2Freport.md')
+
+    render(<Library gateway={gateway()} onNavigate={onNavigate} params={params} />)
+
+    await waitFor(() => expect(onNavigate).toHaveBeenCalledTimes(1))
+    const next = onNavigate.mock.calls[0][0] as URLSearchParams
+    expect(next.get('libraryArtifact')).toBe(artifactId)
+    expect(next.has('libraryOpen')).toBe(false)
+  })
+
   it('refreshes explicitly and when the lifecycle refresh token changes', async () => {
     const listLibrary = vi.fn().mockResolvedValue(complete())
     const fake = gateway({ listLibrary })

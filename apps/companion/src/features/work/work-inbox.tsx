@@ -48,6 +48,7 @@ export interface WorkInboxProps {
   onRefresh: () => void
   onGroupBy: (groupBy: 'topic' | 'session' | 'project') => void
   onOpen: (profile: string, id: string) => void
+  onOpenArtifact: (profile: string, reference: string) => void
   onClose: () => void
   onDecision: (input: WorkDecisionInput) => Promise<boolean>
   onComment: (body: string) => Promise<boolean>
@@ -65,16 +66,111 @@ export function safeWorkUrl(value?: string): string | undefined {
   } catch {return undefined}
 }
 
-function WorkLinks({ links }: { links: WorkCardView['evidence'] }) {
+interface StructuredWorkBrief {
+  evidenceSummary?: string
+  inference?: string
+  decisionScope?: string
+  costBoundary?: string
+  scopeBoundary?: string
+  forbiddenActions: string[]
+  artifacts: { path: string; sha256?: string }[]
+}
+
+const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
+const text = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim() : undefined
+
+export function parseWorkBrief(value: string): StructuredWorkBrief | null {
+  let parsed: unknown
+
+  try {parsed = JSON.parse(value)} catch {return null}
+
+  if (!record(parsed)) {return null}
+  const evidenceSummary = text(parsed.evidence_summary)
+  const inference = text(parsed.inference)
+  const decisionScope = text(parsed.decision_scope)
+  const costBoundary = text(parsed.cost_boundary)
+  const scopeBoundary = text(parsed.scope_boundary)
+  const forbiddenActions = Array.isArray(parsed.forbidden_actions) ? parsed.forbidden_actions.map(text).filter((entry): entry is string => Boolean(entry)) : []
+
+  const artifacts = Array.isArray(parsed.artifacts) ? parsed.artifacts.flatMap((entry) => {
+    if (!record(entry)) {return []}
+    const path = text(entry.path)
+
+    return path ? [{ path, ...(text(entry.sha256) ? { sha256: text(entry.sha256) } : {}) }] : []
+  }) : []
+
+  if (!evidenceSummary && !inference && !decisionScope && !costBoundary && !scopeBoundary && !forbiddenActions.length && !artifacts.length) {return null}
+
+  return { evidenceSummary, inference, decisionScope, costBoundary, scopeBoundary, forbiddenActions, artifacts }
+}
+
+function workBriefSummary(value: string): string {
+  const brief = parseWorkBrief(value)
+
+  return brief?.evidenceSummary ?? brief?.inference ?? value
+}
+
+function hasControlCharacters(value: string): boolean {
+  return [...value].some((character) => {
+    const code = character.charCodeAt(0)
+
+    return code < 32 || code === 127
+  })
+}
+
+function safeLibraryReference(value?: string): string | undefined {
+  if (!value || value.length > 1_000 || hasControlCharacters(value) || value.includes('\\') || value.startsWith('/') || /^[a-z][a-z0-9+.-]*:/i.test(value)) {return undefined}
+  const parts = value.split('/')
+  const filename = parts.at(-1) ?? ''
+
+  return parts.every((part) => part && part !== '.' && part !== '..')
+    && (parts.length > 1 || (filename.includes('.') && !filename.startsWith('.'))) ? value : undefined
+}
+
+function artifactKind(value: string): string {
+  const extension = value.split(/[?#]/, 1)[0].split('.').at(-1)?.toLocaleLowerCase()
+
+  return ({
+    md: 'Markdown report', markdown: 'Markdown report', pdf: 'PDF report', json: 'Data file', csv: 'Spreadsheet data',
+    xlsx: 'Spreadsheet', png: 'Image asset', jpg: 'Image asset', jpeg: 'Image asset', webp: 'Image asset', gif: 'Image asset',
+    svg: 'Image asset', mp4: 'Video asset', mov: 'Video asset', mp3: 'Audio asset', wav: 'Audio asset', html: 'HTML report', htm: 'HTML report'
+  } as Record<string, string>)[extension ?? ''] ?? 'File'
+}
+
+function WorkLinks({ links, profile, onOpenArtifact }: { links: WorkCardView['evidence']; profile: string; onOpenArtifact: WorkInboxProps['onOpenArtifact'] }) {
   return <ul>{links.map((link, index) => {
     const url = safeWorkUrl(link.url)
+    const reference = safeLibraryReference(link.url)
 
-    return <li key={index}>{url ? <a href={url} rel="noopener noreferrer" target="_blank">{link.label} ↗</a> : <span>{link.label}</span>}</li>
+    return <li className="work-file" key={index}><span><strong>{artifactKind(link.label)}</strong><span>{link.label}</span></span>{url
+      ? <a aria-label={`Open ${link.label}`} href={url} rel="noopener noreferrer" target="_blank">Open source ↗</a>
+      : reference
+        ? <button aria-label={`Open ${link.label} in Library`} onClick={() => onOpenArtifact(profile, reference)} type="button">Open in Library</button>
+        : null}</li>
   })}</ul>
 }
 
-function TrackerStatus({ evidence, heading }: { evidence: TrackerEvidence; heading?: string }) {
-  return <section className="work-tracker-status">{heading && <h4>{heading}</h4>}<p><strong>{evidence.state.replaceAll('_', ' ')}</strong> · Observed {evidence.observed_at}</p>{evidence.blocker && <p><strong>Blocker:</strong> {evidence.blocker}</p>}{evidence.result_evidence?.length ? <p><strong>Result:</strong> {evidence.result_evidence.join(' · ')}</p> : null}<WorkLinks links={evidence.evidence.map((label) => ({ label, url: label }))} /></section>
+function TrackerStatus({ evidence, heading, profile, onOpenArtifact }: { evidence: TrackerEvidence; heading?: string; profile: string; onOpenArtifact: WorkInboxProps['onOpenArtifact'] }) {
+  return <section className="work-tracker-status">{heading && <h4>{heading}</h4>}<p><strong>{evidence.state.replaceAll('_', ' ')}</strong> · Observed {evidence.observed_at}</p>{evidence.blocker && <p><strong>Blocker:</strong> {evidence.blocker}</p>}{evidence.result_evidence?.length ? <p><strong>Result:</strong> {evidence.result_evidence.join(' · ')}</p> : null}<WorkLinks links={evidence.evidence.map((label) => ({ label, url: label }))} onOpenArtifact={onOpenArtifact} profile={profile} /></section>
+}
+
+function WorkBrief({ value, profile, onOpenArtifact }: { value: string; profile: string; onOpenArtifact: WorkInboxProps['onOpenArtifact'] }) {
+  const brief = parseWorkBrief(value)
+
+  if (!brief) {return <section className="work-brief"><h4>What this is about</h4><p className="work-plain-text">{value}</p></section>}
+
+  return <section className="work-brief">
+    <h4>What this is about</h4>
+    <p>{brief.evidenceSummary ?? 'This is a structured preparation request.'}</p>
+    {brief.decisionScope && <p><strong>Decision scope:</strong> {brief.decisionScope.replaceAll('_', ' ')}</p>}
+    {brief.inference && <><h4>Why it is being proposed</h4><p>{brief.inference}</p></>}
+    {(brief.scopeBoundary || brief.costBoundary) && <div className="work-boundary-grid">
+      {brief.scopeBoundary && <section><strong>Authorized scope</strong><p>{brief.scopeBoundary}</p></section>}
+      {brief.costBoundary && <section><strong>Cost and activation boundary</strong><p>{brief.costBoundary}</p></section>}
+    </div>}
+    {brief.forbiddenActions.length > 0 && <section className="work-not-authorized"><strong>Not authorized by this decision</strong><ul>{brief.forbiddenActions.map((action) => <li key={action}>{action.replaceAll('_', ' ')}</li>)}</ul></section>}
+    {brief.artifacts.length > 0 && <><h4>Files named in this brief</h4><ul>{brief.artifacts.map((artifact) => <li className="work-file" key={artifact.path}><span><strong>{artifactKind(artifact.path)}</strong><span>{artifact.path}</span>{artifact.sha256 && <small>SHA-256: {artifact.sha256}</small>}</span>{safeLibraryReference(artifact.path) && <button aria-label={`Open ${artifact.path} in Library`} onClick={() => onOpenArtifact(profile, artifact.path)} type="button">Open in Library</button>}</li>)}</ul></>}
+  </section>
 }
 
 export function WorkInbox(props: WorkInboxProps) {
@@ -120,7 +216,7 @@ export function WorkInbox(props: WorkInboxProps) {
         </header>}
         <button className="work-summary" disabled={props.status !== 'verified' || props.pending} onClick={() => props.onOpen(item.profile, item.id)} type="button">
           <span className="label">{item.profile} · {item.status} · Revision {item.revision}</span>
-          <strong>{item.title}</strong><span>{item.brief}</span>
+          <strong>{item.title}</strong><span>{workBriefSummary(item.brief)}</span>
           {item.priority && <>
             <small><strong>Why here:</strong> {item.priority.why_here}</small>
             <small><strong>Next step:</strong> {item.priority.next_step}</small>
@@ -139,7 +235,7 @@ export function WorkInbox(props: WorkInboxProps) {
   </section>
 }
 
-function WorkDetail({ item, status, pending, priorityWritable, onClose, onDecision, onComment, onPriority, onRestorePriority }: WorkInboxProps & { item: WorkCardView }) {
+function WorkDetail({ item, status, pending, priorityWritable, onClose, onDecision, onComment, onPriority, onRestorePriority, onOpenArtifact }: WorkInboxProps & { item: WorkCardView }) {
   const [comment, setComment] = useState('')
   const [snooze, setSnooze] = useState('')
   const [validation, setValidation] = useState('')
@@ -169,8 +265,10 @@ function WorkDetail({ item, status, pending, priorityWritable, onClose, onDecisi
   return <article aria-labelledby="work-detail-title" className="work-detail">
     <button disabled={pending} onClick={onClose} type="button">Back to work</button>
     <p className="label">{item.profile} · {item.status} · Revision {item.revision}</p>
-    <h3 id="work-detail-title">{item.title}</h3><p className="work-plain-text">{item.brief}</p>
-    <dl><dt>Next action</dt><dd>{item.nextAction || 'Not specified'}</dd><dt>Owner</dt><dd>{item.owner || 'Unassigned'}</dd><dt>Current decision</dt><dd>{item.decision || 'No decision yet'}</dd>{item.snoozedUntil && <><dt>Snoozed until</dt><dd>{item.snoozedUntil}</dd></>}</dl>
+    <h3 id="work-detail-title">{item.title}</h3>
+    <section aria-labelledby="work-decision-request-title" className="work-decision-request"><p className="kicker">Decision requested</p><h4 id="work-decision-request-title">What you are being asked to approve</h4><p>{item.nextAction || 'No action was specified.'}</p><strong>This approves preparation only. It does not activate, publish, send, spend, purchase, or change a live system.</strong></section>
+    <WorkBrief onOpenArtifact={onOpenArtifact} profile={item.profile} value={item.brief} />
+    <dl><dt>Owner</dt><dd>{item.owner || 'Unassigned'}</dd><dt>Current decision</dt><dd>{item.decision || 'No decision yet'}</dd>{item.snoozedUntil && <><dt>Snoozed until</dt><dd>{item.snoozedUntil}</dd></>}</dl>
     {item.preparationStatus && <p className="work-boundary">{item.preparationStatus}</p>}
     {item.priority && <section aria-labelledby="priority-control-title" className="work-priority-control">
       <h4 id="priority-control-title">Priority override</h4>
@@ -184,13 +282,13 @@ function WorkDetail({ item, status, pending, priorityWritable, onClose, onDecisi
       {!priorityWritable && <p>Priority changes require an owner-authenticated connection and a compatible gateway.</p>}
     </section>}
     {item.executionAcknowledgedAt && <p>Tracker handoff acknowledged: {item.executionAcknowledgedAt}</p>}
-    {item.trackerEvidence && <TrackerStatus evidence={item.trackerEvidence} heading="Current tracker evidence" />}
-    {item.completionEvidence?.length ? <><h4>Completion evidence</h4><WorkLinks links={item.completionEvidence.map((label) => ({ label, url: label }))} /></> : null}
+    {item.trackerEvidence && <TrackerStatus evidence={item.trackerEvidence} heading="Current tracker evidence" onOpenArtifact={onOpenArtifact} profile={item.profile} />}
+    {item.completionEvidence?.length ? <><h4>Completion evidence</h4><WorkLinks links={item.completionEvidence.map((label) => ({ label, url: label }))} onOpenArtifact={onOpenArtifact} profile={item.profile} /></> : null}
     <h4>Tracker status history</h4>
-    {item.trackerStatusHistory?.length ? <ol className="work-discussion">{item.trackerStatusHistory.map((entry, index) => <li key={`${entry.observed_at}:${index}`}><TrackerStatus evidence={entry} /></li>)}</ol> : <p>No recorded tracker status.</p>}
-    <h4>Evidence</h4><WorkLinks links={item.evidence} />
+    {item.trackerStatusHistory?.length ? <ol className="work-discussion">{item.trackerStatusHistory.map((entry, index) => <li key={`${entry.observed_at}:${index}`}><TrackerStatus evidence={entry} onOpenArtifact={onOpenArtifact} profile={item.profile} /></li>)}</ol> : <p>No recorded tracker status.</p>}
+    <h4>Evidence, files &amp; reports</h4>{item.evidence.length ? <WorkLinks links={item.evidence} onOpenArtifact={onOpenArtifact} profile={item.profile} /> : <p>No supporting files or links were supplied.</p>}
     <div className="work-scope"><section><h4>Proposed preparation scope</h4><ul>{item.permitted.map((text, i) => <li key={i}>{text}</li>)}</ul></section><section><h4>Excluded scope</h4><ul>{item.excluded.map((text, i) => <li key={i}>{text}</li>)}</ul></section></div>
-    <h4>Previews &amp; links</h4><WorkLinks links={item.previews} />
+    <h4>Previews &amp; links</h4>{item.previews.length ? <WorkLinks links={item.previews} onOpenArtifact={onOpenArtifact} profile={item.profile} /> : <p>No additional previews or links were supplied.</p>}
     <p className="work-boundary">Approval authorizes preparation only. It never authorizes publishing, sending, spending, or permanent tool permissions.</p>
     <h4>Decision history</h4>
     {item.decisionHistory?.length ? <ol className="work-discussion">{item.decisionHistory.map((entry) => <li key={entry.id}><strong>{entry.action.replaceAll('_', ' ')} · Revision {entry.revision}</strong><p>{entry.actor} · {entry.createdAt} · Scope: {entry.scope.replaceAll('_', ' ')}</p>{entry.reason && <p className="work-plain-text">{entry.reason}</p>}{entry.snoozedUntil && <p>Snoozed until: {entry.snoozedUntil}</p>}</li>)}</ol> : <p>No recorded decisions.</p>}

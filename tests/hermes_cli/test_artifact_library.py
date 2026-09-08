@@ -303,6 +303,8 @@ def test_html_preview_returns_sanitized_inert_document_and_download_stays_origin
 
 def test_preview_classification_for_supported_types():
     assert classify_preview("README.md", None, b"# Read me\n")["kind"] == "markdown"
+    assert classify_preview("README.md", "application/octet-stream", b"# Read me\n")["kind"] == "markdown"
+    assert classify_preview("report.json", "application/json", b'{"status":"ready"}\n')["kind"] == "text"
     assert classify_preview("notes.txt", None, b"plain text\n")["kind"] == "text"
     assert classify_preview("photo.png", None, b"\x89PNG\r\n\x1a\nrest")["kind"] == "image"
     assert classify_preview("document.pdf", None, b"%PDF-1.7\n")["kind"] == "pdf"

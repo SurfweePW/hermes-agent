@@ -9,6 +9,16 @@ import java.util.*;
 import java.util.concurrent.*;
 
 public class OwnerAuthSecurityTest {
+    @Test public void ownerFailureExplainsPrivateGatewayDnsWithoutLeakingTheHost() {
+        UnknownHostException dns = new UnknownHostException("private-gateway.example");
+        String message = GatewayTokenPlugin.ownerFailureMessage(new IOException("wrapped", dns));
+
+        assertEquals("Private gateway unavailable. Connect Tailscale, then try again.", message);
+        assertFalse(message.contains("private-gateway.example"));
+        assertEquals("Owner sign-in unavailable, cancelled, or expired. Try signing in again.",
+            GatewayTokenPlugin.ownerFailureMessage(new IOException("other")));
+    }
+
     @Test public void pkceMatchesRfc7636VectorAndRandomStateIsIndependent() throws Exception {
         assertEquals("E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM",
             OwnerAuthPolicy.challenge("dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"));

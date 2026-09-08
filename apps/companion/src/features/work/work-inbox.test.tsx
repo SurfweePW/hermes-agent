@@ -13,7 +13,7 @@ export const card: WorkCardView = {
 
 function props(overrides: Partial<WorkInboxProps> = {}): WorkInboxProps {
   return { items: [card], selected: card, status: 'verified', pending: false, message: null, groupBy: 'topic', priorityWritable: false, sources: [],
-    onOpen: vi.fn(), onClose: vi.fn(), onRefresh: vi.fn(), onGroupBy: vi.fn(), onDecision: vi.fn(async () => true), onComment: vi.fn(async () => true), onPriority: vi.fn(async () => true), onRestorePriority: vi.fn(async () => true), ...overrides }
+    onOpen: vi.fn(), onOpenArtifact: vi.fn(), onClose: vi.fn(), onRefresh: vi.fn(), onGroupBy: vi.fn(), onDecision: vi.fn(async () => true), onComment: vi.fn(async () => true), onPriority: vi.fn(async () => true), onRestorePriority: vi.fn(async () => true), ...overrides }
 }
 
 describe('durable work inbox', () => {
@@ -46,6 +46,47 @@ describe('durable work inbox', () => {
     expect(screen.getByRole('link', { name: /Research/ }).getAttribute('rel')).toBe('noopener noreferrer')
     expect(screen.queryByRole('link', { name: /Unsafe preview/ })).toBeNull()
     expect(screen.queryByRole('button', { name: /Always approve/ })).toBeNull()
+  })
+  it('turns a structured producer brief into an understandable decision summary', () => {
+    const brief = JSON.stringify({
+      evidence_summary: 'Two creative cells are ready for a controlled draft.',
+      inference: 'A local paused draft can now be prepared safely.',
+      decision_scope: 'preparation',
+      cost_boundary: 'No spend is authorized. A later test is capped at 500 PLN.',
+      scope_boundary: 'Local draft preparation only. No activation or publication.',
+      forbidden_actions: ['publish', 'activate paid'],
+      artifacts: [{ path: 'reports/test-summary.md', sha256: 'a'.repeat(64) }]
+    })
+
+    const structuredCard = { ...card, brief }
+    const view = render(<WorkInbox {...props({ items: [structuredCard], selected: structuredCard })} />)
+
+    expect(screen.getByRole('heading', { name: 'What this is about' })).toBeTruthy()
+    expect(screen.getByText('Two creative cells are ready for a controlled draft.')).toBeTruthy()
+    expect(screen.getByText('A local paused draft can now be prepared safely.')).toBeTruthy()
+    expect(screen.getByText((_text, element) => element?.tagName === 'P' && element.textContent === 'Decision scope: preparation')).toBeTruthy()
+    expect(screen.getByText('No spend is authorized. A later test is capped at 500 PLN.')).toBeTruthy()
+    expect(screen.getByText('Local draft preparation only. No activation or publication.')).toBeTruthy()
+    expect(screen.getByText('SHA-256: ' + 'a'.repeat(64))).toBeTruthy()
+    expect(document.body.textContent).not.toContain('"evidence_summary"')
+
+    view.rerender(<WorkInbox {...props({ items: [structuredCard], selected: null })} />)
+    expect(screen.getByRole('button', { name: /Two creative cells are ready for a controlled draft/ })).toBeTruthy()
+    expect(document.body.textContent).not.toContain('"evidence_summary"')
+  })
+  it('opens repository evidence through the authenticated Library route', () => {
+    const onOpenArtifact = vi.fn()
+    const reference = 'data/cmo/audits/paid-growth/report.md'
+    const rootReference = 'summary.pdf'
+
+    render(<WorkInbox {...props({ onOpenArtifact, selected: { ...card, evidence: [{ label: reference, url: reference }, { label: rootReference, url: rootReference }] } })} />)
+    fireEvent.click(screen.getByRole('button', { name: `Open ${reference} in Library` }))
+    fireEvent.click(screen.getByRole('button', { name: `Open ${rootReference} in Library` }))
+
+    expect(onOpenArtifact).toHaveBeenCalledWith(card.profile, reference)
+    expect(onOpenArtifact).toHaveBeenCalledWith(card.profile, rootReference)
+    expect(screen.getByText('Markdown report')).toBeTruthy()
+    expect(screen.getByText('PDF report')).toBeTruthy()
   })
   it('renders tracker blocker, result, completion evidence and observed history', () => {
     render(<WorkInbox {...props({ selected: { ...card,

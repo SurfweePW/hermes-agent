@@ -12,6 +12,7 @@ import android.webkit.WebView;
 import org.json.JSONObject;
 
 import java.net.URI;
+import java.net.UnknownHostException;
 
 @CapacitorPlugin(name = "GatewayToken")
 public final class GatewayTokenPlugin extends Plugin {
@@ -127,10 +128,10 @@ public final class GatewayTokenPlugin extends Plugin {
                         withTrustedCall(call, new String[] {"baseUrl"}, () -> call.resolve(result));
                     } catch (OwnerSession.Unsupported ignored) {
                         call.reject("This gateway has no supported native owner sign-in provider.", "OWNER_UNSUPPORTED");
-                    } catch (Exception ignored) {
-                        Log.w(OWNER_LOG_TAG, operation + " failed: " + safeFailureKind(ignored));
+                    } catch (Exception failure) {
+                        Log.w(OWNER_LOG_TAG, operation + " failed: " + safeFailureKind(failure));
                         // Never forward URLs, response bodies, exception causes, codes, verifiers or bearer credentials.
-                        call.reject("Owner sign-in unavailable, cancelled, or expired. Try signing in again.", "OWNER_AUTH_FAILED");
+                        call.reject(ownerFailureMessage(failure), "OWNER_AUTH_FAILED");
                     } finally {
                         if (ownerLifecycle.finish()) closeOwnerRuntime();
                     }
@@ -163,6 +164,16 @@ public final class GatewayTokenPlugin extends Plugin {
             return "gateway-http-" + ((OwnerHttp.Failure) failure).status;
         }
         return failure.getClass().getSimpleName();
+    }
+
+    static String ownerFailureMessage(Throwable failure) {
+        for (Throwable current = failure; current != null; current = current.getCause()) {
+            if (current instanceof UnknownHostException) {
+                return "Private gateway unavailable. Connect Tailscale, then try again.";
+            }
+        }
+
+        return "Owner sign-in unavailable, cancelled, or expired. Try signing in again.";
     }
 
     @Override

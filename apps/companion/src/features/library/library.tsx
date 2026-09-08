@@ -167,6 +167,7 @@ export function Library({ params, onNavigate, gateway, refreshToken = 0, relatio
   const topic = params.get('libraryTopic') ?? ''
   const session = params.get('librarySession') ?? ''
   const selectedId = params.get('libraryArtifact')
+  const openReference = params.get('libraryOpen') ?? ''
   const selectedVersion = params.get('libraryVersion') ?? ''
   const [result, setResult] = useState<LibraryListResult | null>(null)
   const [profiles, setProfiles] = useState<{ profile: string; configured: boolean }[]>([])
@@ -183,6 +184,7 @@ export function Library({ params, onNavigate, gateway, refreshToken = 0, relatio
   const returnFocus = useRef<string | null>(null)
   const rows = useRef(new Map<string, HTMLButtonElement>())
   const previewRequest = useRef(0)
+  const openedReference = useRef<string | null>(null)
   const detailSelection = `${profile}\u0000${selectedId ?? ''}`
   const detailSelectionRef = useRef(detailSelection)
   detailSelectionRef.current = detailSelection
@@ -245,6 +247,21 @@ export function Library({ params, onNavigate, gateway, refreshToken = 0, relatio
 
     return () => {active = false}
   }, [gateway, options, profile, profiles, refreshToken, retry])
+
+  useEffect(() => {
+    if (!openReference || selectedId || loading || !result || openedReference.current === openReference) {return}
+
+    const filename = openReference.split('/').at(-1) ?? openReference
+    const matches = result.items.filter((item) => item.filename === filename)
+
+    if (matches.length !== 1) {return}
+
+    openedReference.current = openReference
+    const next = new URLSearchParams(params)
+    next.delete('libraryOpen')
+    next.set('libraryArtifact', matches[0].artifact_id)
+    onNavigate(next)
+  }, [loading, onNavigate, openReference, params, result, selectedId])
 
   useEffect(() => {
     let active = true

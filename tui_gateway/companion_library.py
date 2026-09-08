@@ -830,7 +830,10 @@ def _filter_catalog(items: list[dict[str, Any]], params: Mapping[str, Any]) -> l
                     *(link.get("title") for link in links),
                 )
             ).casefold()
-            if query not in haystack:
+            relative_path = str(item.get("relative_path") or "").casefold().strip("/")
+            if query not in haystack and not (
+                relative_path and query.endswith("/" + relative_path)
+            ):
                 continue
         filtered.append(item)
     return sorted(

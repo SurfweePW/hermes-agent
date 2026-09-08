@@ -1292,7 +1292,11 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         || !hasExistingOwnerSession(status)) {return}
 
       return api.connectOwner()
-    }).catch(() => undefined)
+    }).catch((error: unknown) => {
+      if (!destroyed && connectionGeneration === bootstrapGeneration && snapshot.phase === 'setup') {
+        publish({ error: publicError(error) })
+      }
+    })
   }
 
   return api

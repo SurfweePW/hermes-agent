@@ -247,8 +247,15 @@ def classify_preview(
         return controls <= max(1, len(decoded) // 100)
 
     markdown_suffixes = {".md", ".markdown", ".mdown", ".mkd"}
-    if suffix in markdown_suffixes and mime in {"", "text/markdown", "text/x-markdown"} and text_bytes():
+    if suffix in markdown_suffixes and mime in {"", "text/markdown", "text/x-markdown", "application/octet-stream"} and text_bytes():
         return {"kind": "markdown", "preview_available": True}
+    if suffix == ".json" and mime in {"", "application/json", "text/json", "application/octet-stream"} and text_bytes():
+        try:
+            json.loads(content)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            pass
+        else:
+            return {"kind": "text", "preview_available": True}
     if suffix in {".txt", ".log", ".text"} and mime in {"", "text/plain"} and text_bytes():
         return {"kind": "text", "preview_available": True}
     image_signatures = {
@@ -958,7 +965,7 @@ class ArtifactLibrary:
             suffix = Path(relative_path).suffix.lower()
             text_suffixes = {
                 ".md", ".markdown", ".mdown", ".mkd", ".txt", ".log",
-                ".text", ".html", ".htm",
+                ".text", ".json", ".html", ".htm",
             }
             # Text must be validated in full, not merely by a plausible prefix.
             # Files too large for the bounded preview pipeline remain downloadable.

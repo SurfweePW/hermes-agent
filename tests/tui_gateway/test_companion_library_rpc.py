@@ -317,6 +317,7 @@ def test_list_search_filter_detail_and_retained_versions_are_profile_namespaced(
     report.write_text("# Q1\n", encoding="utf-8")
     initial = call(ctx, "list", search="quarterly", type="markdown", limit=1)
     item = initial["items"][0]
+    assert call(ctx, "list", search="data/cmo/quarterly-report.md")["items"] == [item]
     assert initial["coverage"]["status"] == "complete"
     assert initial["profile"] == "atlas"
     assert initial["backend_namespace"] == "library-test-backend"
