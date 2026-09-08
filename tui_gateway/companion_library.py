@@ -6,6 +6,14 @@ profile on every call::
     companion_library:
       profiles:
         atlas:
+          limits:
+            max_file_size: 268435456       # hard ceiling: 256 MiB
+            max_scan_bytes: 2147483648     # hard ceiling: 2 GiB
+            max_scan_files: 100000         # hard ceiling: 100,000
+            max_scan_depth: 64             # hard ceiling: 64
+            max_retained_items: 100000     # hard ceiling: 100,000
+            max_retained_bytes: 2147483648 # hard ceiling: 2 GiB
+            max_html_preview_size: 33554432 # hard ceiling: 32 MiB
           collections:
             operations:
               name: Atlas operations
@@ -33,7 +41,7 @@ import re
 import secrets
 import threading
 import time
-from typing import Any, Mapping
+from typing import Any, Mapping, TypedDict, cast
 
 from hermes_cli.artifact_library import (
     ArtifactError,
@@ -49,6 +57,27 @@ DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
 DEFAULT_CHUNK_SIZE = 64 * 1024
 MAX_CHUNK_SIZE = 256 * 1024
+LIBRARY_LIMIT_CEILINGS = {
+    "max_file_size": 256 * 1024 * 1024,
+    "max_scan_bytes": 2 * 1024 * 1024 * 1024,
+    "max_scan_files": 100_000,
+    "max_scan_depth": 64,
+    "max_retained_items": 100_000,
+    "max_retained_bytes": 2 * 1024 * 1024 * 1024,
+    "max_html_preview_size": 32 * 1024 * 1024,
+}
+
+
+class _ArtifactLibraryLimits(TypedDict, total=False):
+    max_file_size: int
+    max_scan_bytes: int
+    max_scan_files: int
+    max_scan_depth: int
+    max_retained_items: int
+    max_retained_bytes: int
+    max_html_preview_size: int
+
+
 _MAX_CURSOR_BYTES = 1024 * 1024
 _MAX_SNAPSHOT_ITEMS = 10_000
 _MAX_SNAPSHOT_BYTES = 32 * 1024 * 1024
@@ -126,15 +155,37 @@ def _collections_from_mapping(value: Any) -> list[dict[str, Any]]:
     raise CompanionLibraryError("library authorization unavailable", 4403)
 
 
-def _configured_collections(server, profile: str) -> tuple[list[dict[str, Any]] | None, Path]:
-    """Authorize one exact profile and return its configured collection entries."""
+def _limits_from_mapping(value: Any) -> _ArtifactLibraryLimits:
+    """Validate the exact bounded ArtifactLibrary constructor policy surface."""
+    if value is None:
+        return {}
+    if not isinstance(value, Mapping) or set(value) - set(LIBRARY_LIMIT_CEILINGS):
+        raise CompanionLibraryError("library authorization unavailable", 4403)
+    result: dict[str, int] = {}
+    for key, raw in value.items():
+        ceiling = LIBRARY_LIMIT_CEILINGS[key]
+        if (
+            not isinstance(raw, int)
+            or isinstance(raw, bool)
+            or raw <= 0
+            or raw > ceiling
+        ):
+            raise CompanionLibraryError("library authorization unavailable", 4403)
+        result[key] = raw
+    return cast(_ArtifactLibraryLimits, result)
+
+
+def _configured_policy(
+    server, profile: str
+) -> tuple[list[dict[str, Any]] | None, Path, _ArtifactLibraryLimits]:
+    """Authorize one profile and return its collections, home, and bounded limits."""
     launch_home = _launch_home()
     current = _current_profile(server)
     config = _read_config(launch_home)
     if config is None or "companion_library" not in config:
         if profile != current:
             raise CompanionLibraryError("library profile unavailable", 4403)
-        return None, launch_home
+        return None, launch_home, {}
 
     section = config.get("companion_library")
     if not isinstance(section, Mapping):
@@ -158,12 +209,20 @@ def _configured_collections(server, profile: str) -> tuple[list[dict[str, Any]] 
         if not isinstance(selected, Mapping):
             raise CompanionLibraryError("library authorization unavailable", 4403)
         entries = _collections_from_mapping(selected.get("collections"))
-    elif profile == current and "collections" in section:
+        limits = _limits_from_mapping(selected.get("limits"))
+    elif profile == current and ({"collections", "limits"} & set(section)):
         entries = _collections_from_mapping(section.get("collections"))
+        limits = _limits_from_mapping(section.get("limits"))
     else:
-        return None, launch_home
+        return None, launch_home, {}
 
     home = launch_home if profile == current else _resolve_profile_home(server, profile)
+    return entries, home, limits
+
+
+def _configured_collections(server, profile: str) -> tuple[list[dict[str, Any]] | None, Path]:
+    """Backward-compatible collection-only view of the authorized profile policy."""
+    entries, home, _limits = _configured_policy(server, profile)
     return entries, home
 
 
@@ -179,7 +238,7 @@ def _resolve_profile_home(server, profile: str) -> Path:
 
 
 def _authorized_library(server, profile: str) -> tuple[ArtifactLibrary | None, list[dict[str, Any]]]:
-    entries, home = _configured_collections(server, profile)
+    entries, home, limits = _configured_policy(server, profile)
     # An absent policy and an explicitly empty allowlist both authorize no
     # filesystem roots. Avoid constructing ArtifactLibrary in either case:
     # its retained-store initialization is a write and would make an empty
@@ -187,8 +246,10 @@ def _authorized_library(server, profile: str) -> tuple[ArtifactLibrary | None, l
     if not entries:
         return None, []
     try:
-        library = ArtifactLibrary(home, profile=profile, collections=entries)
-    except (ValueError, OSError, ArtifactError) as exc:
+        library = ArtifactLibrary(
+            home, profile=profile, collections=entries, **limits
+        )
+    except (TypeError, ValueError, OSError, ArtifactError) as exc:
         # Collection validation messages can contain IDs and filesystem state;
         # malformed sensitive policy gets one non-enumerating response.
         raise CompanionLibraryError("library authorization unavailable", 4403) from exc

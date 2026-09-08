@@ -21,6 +21,7 @@ export interface PriorityAssessment {
 }
 export interface PriorityOverrideView {
   id: string
+  version?: number
   mode: 'pin_review' | 'set_priority'
   label: string
   actor: string
@@ -30,6 +31,43 @@ export interface PriorityOverrideView {
   review_at: string | null
   active: boolean
 }
+export interface OrganizationCapability {
+  version: number
+  operations: string[]
+  read_only: boolean
+  sort: 'recommended'
+  policy_version: string
+  mutation_methods: string[]
+  record_mutation_methods: string[]
+  owner_authorization: boolean
+  optimistic_concurrency: 'expected_version'
+  idempotency: 'actor_scoped_key'
+  audit: boolean
+}
+export interface PriorityOverrideRecord extends Omit<PriorityOverrideView, 'active'> {
+  target_id: string
+  created_at: string | null
+  created_by: string | null
+  updated_at: string | null
+  updated_by: string | null
+  canonical_id: string
+}
+export interface SetPriorityOverrideParams {
+  profile: string
+  id: string
+  target_id: string
+  mode: 'set_priority'
+  label: string
+  reason: string
+  expires_at: string | null
+  review_id: null
+  review_at: null
+  expected_version: number
+  idempotency_key: string
+}
+export interface RestoreRecommendedParams { profile: string; id: string; expected_version: number; idempotency_key: string }
+export interface SetPriorityOverrideResult { record: PriorityOverrideRecord; idempotent: boolean }
+export interface RestoreRecommendedResult extends SetPriorityOverrideResult { restored: true }
 export interface NeedsMePriorityItem {
   profile: string
   work_id: string
@@ -63,7 +101,10 @@ export interface NeedsMePriorityResult {
   coverage: { work: string; organization: string; authorization_filtered: boolean }
 }
 export interface OrganizationGateway {
+  organizationCapabilities(): Promise<OrganizationCapability>
   listNeedsMePriorities(profile: string, reviewId?: string, groupBy?: NeedsMeGroupBy): Promise<NeedsMePriorityResult>
+  setPriorityOverride(params: SetPriorityOverrideParams): Promise<SetPriorityOverrideResult>
+  restoreRecommendedPriority(params: RestoreRecommendedParams): Promise<RestoreRecommendedResult>
 }
 
 const record = (value: unknown): value is Record<string, unknown> => typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -90,9 +131,41 @@ function override(value: unknown): PriorityOverrideView | null {
   if (!record(value) || !['id', 'label', 'actor', 'reason'].every((key) => text(value[key]))
     || !['pin_review', 'set_priority'].includes(value.mode as string)
     || !nullableText(value.expires_at) || !nullableText(value.review_id) || !nullableText(value.review_at)
+    || (value.version !== undefined && (!Number.isInteger(value.version) || (value.version as number) < 1))
     || typeof value.active !== 'boolean') {return malformed()}
 
   return value as unknown as PriorityOverrideView
+}
+
+export function validateOrganizationCapability(value: unknown): OrganizationCapability {
+  if (!record(value) || !Number.isInteger(value.version) || (value.version as number) < 1
+    || !textArray(value.operations) || typeof value.read_only !== 'boolean' || value.sort !== 'recommended'
+    || !text(value.policy_version) || !textArray(value.mutation_methods) || !textArray(value.record_mutation_methods)
+    || typeof value.owner_authorization !== 'boolean' || value.optimistic_concurrency !== 'expected_version'
+    || value.idempotency !== 'actor_scoped_key' || typeof value.audit !== 'boolean') {return malformed()}
+
+  return value as unknown as OrganizationCapability
+}
+
+function overrideRecord(value: unknown): PriorityOverrideRecord {
+  if (!record(value) || !['id', 'target_id', 'mode', 'label', 'actor', 'reason', 'canonical_id'].every((key) => text(value[key]))
+    || value.mode !== 'set_priority' || !Number.isInteger(value.version) || (value.version as number) < 1
+    || !nullableText(value.expires_at) || !nullableText(value.review_id) || !nullableText(value.review_at)
+    || !nullableText(value.created_at) || !nullableText(value.created_by) || !nullableText(value.updated_at) || !nullableText(value.updated_by)) {return malformed()}
+
+  return value as unknown as PriorityOverrideRecord
+}
+
+export function validateSetPriorityOverride(value: unknown): SetPriorityOverrideResult {
+  if (!record(value) || typeof value.idempotent !== 'boolean') {return malformed()}
+
+  return { record: overrideRecord(value.record), idempotent: value.idempotent }
+}
+
+export function validateRestoreRecommended(value: unknown): RestoreRecommendedResult {
+  if (!record(value) || value.restored !== true || typeof value.idempotent !== 'boolean') {return malformed()}
+
+  return { record: overrideRecord(value.record), restored: true, idempotent: value.idempotent }
 }
 
 function item(value: unknown, profile: string): NeedsMePriorityItem {

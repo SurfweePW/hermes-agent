@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from hermes_cli.companion_organization import (
+    BusinessProject,
     OrganizationError,
     OrganizationStore,
     OutcomeAssessment,
@@ -56,7 +57,8 @@ def _read_organization(home: Path, profile: str) -> list[Any] | None:
             home / "organization.db",
             profile=profile,
             record_types=(
-                "topic", "work_binding", "outcome_assessment", "priority_override"
+                "topic", "business_project", "work_binding", "outcome_assessment",
+                "priority_override",
             ),
         )
     except OrganizationError as exc:
@@ -96,8 +98,11 @@ def _override_for(
     binding: WorkBinding | None,
     assessment: OutcomeAssessment | None,
     overrides: list[PriorityOverride],
+    fallback_target_id: str,
 ) -> PriorityOverride | None:
-    keys = {assessment.action_id} if assessment else set()
+    keys = {fallback_target_id}
+    if assessment:
+        keys.add(assessment.action_id)
     if binding is not None:
         keys.update((binding.source_work_id, binding.id, binding.canonical_id))
     return _latest(value for value in overrides if value.target_id in keys)
@@ -132,6 +137,7 @@ def _override(value: PriorityOverride | None, now: datetime, review_id: str | No
         return None
     return {
         "id": value.id,
+        "version": value.version,
         "mode": value.mode,
         "label": value.label,
         "actor": value.actor,
@@ -149,6 +155,7 @@ def _group_for(
     group_by: str,
     backend: str,
     authorized_profiles: frozenset[str],
+    business_projects: Mapping[str, BusinessProject] | None = None,
 ):
     topic = topics.get(binding.primary_topic_id) if binding and binding.primary_topic_id else None
     if group_by == "topic":
@@ -170,6 +177,20 @@ def _group_for(
             {"kind": "session", "id": session.canonical_id if session else "__none__",
              "name": session.persisted_session_id if session else "No source session",
              "collection": None, "objective": None},
+        )
+    business_projects = business_projects or {}
+    business_project_id = binding.primary_business_project_id if binding else None
+    if business_project_id is None and topic is not None:
+        business_project_id = topic.primary_business_project_id
+    if business_project_id is None and binding and len(binding.related_business_project_ids) == 1:
+        business_project_id = binding.related_business_project_ids[0]
+    business_project = business_projects.get(business_project_id) if business_project_id else None
+    if business_project is not None:
+        return (
+            f"project:{business_project.canonical_id}",
+            {"kind": "project", "id": business_project.canonical_id,
+             "name": business_project.name, "collection": business_project.collection,
+             "objective": business_project.objective},
         )
     project = topic.primary_project if topic else None
     if project is not None and not _source_authorized(
@@ -244,6 +265,9 @@ def execute(
     work_items = _read_work(home, profile)
     records = records or []
     topics = {value.id: value for value in records if isinstance(value, Topic)}
+    business_projects = {
+        value.id: value for value in records if isinstance(value, BusinessProject)
+    }
     bindings = [
         value
         for value in records
@@ -281,18 +305,23 @@ def execute(
             continue
         binding = binding_by_work.get(card["id"])
         assessment = _assessment_for(binding, assessments)
-        override = _override_for(binding, assessment, overrides)
+        fallback_candidate_id = (
+            binding.source_work_id
+            if binding is not None
+            else f"{backend}:{profile}:work:{card['id']}"
+        )
+        override = _override_for(
+            binding, assessment, overrides, fallback_candidate_id
+        )
         candidate_id = (
             assessment.action_id
             if assessment is not None
             else override.target_id
             if override is not None
-            else binding.source_work_id
-            if binding is not None
-            else f"{backend}:{profile}:work:{card['id']}"
+            else fallback_candidate_id
         )
         group_id, group_view = _group_for(
-            binding, topics, group_by, backend, authorized_profiles
+            binding, topics, group_by, backend, authorized_profiles, business_projects
         )
         group_views[group_id] = group_view
         candidate = PriorityCandidate(

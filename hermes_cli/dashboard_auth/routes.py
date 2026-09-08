@@ -389,7 +389,11 @@ class _PasswordLoginBody(BaseModel):
     username: str
     password: str
     next: str = ""
-    flow: str = ""
+    # ``None`` means a pre-flow-field form submitted across an upgrade.  New
+    # browser forms submit ``""`` explicitly, while native forms submit their
+    # broker selector.  Do not collapse these states: the legacy case may read
+    # the unsuffixed migration cookie, but a new browser login must ignore it.
+    flow: str | None = None
 
 
 @router.post("/auth/password-login", name="auth_password_login")
@@ -412,7 +416,16 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
     # The native broker handle also records WHICH provider the flow was started for. Enforce
     # equality BEFORE verifying credentials so a flow started for provider A cannot be completed
     # with provider B's credentials.
-    pkce_raw = read_pkce_cookie(request, selector=body.flow)
+    if body.flow is None:
+        # Compatibility for a password form rendered before the flow field was
+        # deployed.  Such an in-flight native form only has the singleton.
+        pkce_raw = read_pkce_cookie(request)
+    elif body.flow:
+        pkce_raw = read_pkce_cookie(request, selector=body.flow)
+    else:
+        # Every current browser form posts an explicit empty flow.  Ignore an
+        # ambient migration singleton left by a native login in another tab.
+        pkce_raw = None
     pkce_parts = parse_pkce_payload(pkce_raw) if pkce_raw else {}
     broker_state = pkce_parts.get("broker", "")
     if body.flow and broker_state != body.flow:
@@ -439,7 +452,7 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
     if native:
         clear_pkce_cookie(
             resp, use_https=detect_https(request), prefix=_prefix(request),
-            selector=body.flow)
+            selector=body.flow or "")
     else:
         _set_session(resp, request, session)
     return resp
@@ -497,7 +510,8 @@ async def auth_logout(request: Request):
     prefix = _prefix(request)
     resp = RedirectResponse(url=f"{prefix}/login", status_code=302)
     clear_session_cookies(resp, prefix=prefix)
-    clear_pkce_cookie(resp, use_https=detect_https(request), prefix=prefix)
+    clear_pkce_cookie(
+        resp, use_https=detect_https(request), prefix=prefix, request=request)
     return resp
 
 

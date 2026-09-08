@@ -783,7 +783,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     if (!await loadRoster(client, operation)) {return null}
 
     if (!await loadAttention(client, operation)) {return null}
-    await work.attach(client, [...profileIds.values()])
+    await work.attach(client, [...profileIds.values()], mode === 'owner')
     await directory.attach(client, [...profileIds.values()])
 
     if (!isCurrentConnection(client, operation)) {return null}

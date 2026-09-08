@@ -1,4 +1,4 @@
-import { fireEvent, render, screen } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { CompanionProject, CompanionProjectDetail, CompanionSession, CompanionSessionHistoryResult } from '../../gateway/types'
@@ -49,7 +49,7 @@ const snapshot = (change: Partial<DirectorySnapshot> = {}): DirectorySnapshot =>
 
 const props = (params: string, change: Partial<DirectorySnapshot> = {}) => ({
   snapshot: snapshot(change), params: new URLSearchParams(params), onNavigate: vi.fn(), onLoadOlder: vi.fn(),
-  onLoadOlderHistory: vi.fn(), onLoadOlderProjectSessions: vi.fn(), onRefresh: vi.fn(), onBack: vi.fn()
+  onLoadOlderHistory: vi.fn(), onLoadOlderProjectSessions: vi.fn(), onRefresh: vi.fn(), onBack: vi.fn(), onOpenOriginal: vi.fn()
 })
 
 describe('WorkDirectory', () => {
@@ -83,6 +83,82 @@ describe('WorkDirectory', () => {
     expect(screen.getByText('Research complete.')).toBeTruthy()
     expect(screen.getByText(/Viewing history does not resume or activate this session/)).toBeTruthy()
     expect(screen.getByText(/Tool execution/)).toBeTruthy()
+  })
+
+  it('shows authorized live Project topics with their organization namespace and partial coverage', () => {
+    const linkedProject: CompanionProjectDetail = {
+      ...projectDetail,
+      topics: [{ id: 'topic-1', title: 'Companion launch', status: 'active', profile: 'atlas', source: 'organization-db' }],
+      organization_available: true,
+      organization_complete: false,
+      organization_message: 'Some authorized Topic relationships could not be verified.'
+    }
+
+    render(<WorkDirectory {...props('section=projects&focus=project-1&focusProfile=atlas&focusSource=desktop-db&tab=topics', { selectedProject: linkedProject, detailStatus: 'ready' })} />)
+
+    expect(screen.getByText('Companion launch')).toBeTruthy()
+    expect(screen.getByText(/organization-db.*atlas/)).toBeTruthy()
+    expect(screen.getByText('Some authorized Topic relationships could not be verified.')).toBeTruthy()
+  })
+
+  it('offers only a verified current-client original route and otherwise gives a complete fallback', () => {
+    const unsupported = props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=history', { selectedSession: session, history, detailStatus: 'ready' })
+    const { rerender } = render(<WorkDirectory {...unsupported} />)
+
+    expect(screen.queryByRole('button', { name: 'Open original' })).toBeNull()
+    expect(screen.getByText('desktop-db / atlas / session-1')).toBeTruthy()
+    expect(screen.getByText(/Continue this conversation in its existing client/)).toBeTruthy()
+    expect(screen.getByText('Please research launch timing.')).toBeTruthy()
+
+    const routedHistory: CompanionSessionHistoryResult = {
+      ...history,
+      original_route: { verified: true, client: 'hermes-desktop', platform: 'macos', url: 'hermes://session/session-1?profile=atlas' }
+    }
+
+    const routed = props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=history', { selectedSession: session, history: routedHistory, detailStatus: 'ready' })
+    rerender(<WorkDirectory {...routed} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Open original' }))
+    expect(routed.onOpenOriginal).toHaveBeenCalledWith(routedHistory.original_route, 'atlas', 'session-1')
+  })
+
+  it('hides native handoff when the current runtime has no verified opener', () => {
+    const routedHistory: CompanionSessionHistoryResult = {
+      ...history,
+      original_route: { verified: true, client: 'hermes-desktop', platform: 'macos', url: 'hermes://session/session-1?profile=atlas' }
+    }
+
+    const routed = props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=history', {
+      selectedSession: session, history: routedHistory, detailStatus: 'ready'
+    })
+
+    render(<WorkDirectory {...routed} onOpenOriginal={undefined} />)
+
+    expect(screen.queryByRole('button', { name: 'Open original' })).toBeNull()
+    expect(screen.getByText('desktop-db / atlas / session-1')).toBeTruthy()
+  })
+
+  it('awaits native handoff and shows a safe fallback when it fails', async () => {
+    const routedHistory: CompanionSessionHistoryResult = {
+      ...history,
+      original_route: { verified: true, client: 'hermes-desktop', platform: 'macos', url: 'hermes://session/session-1?profile=atlas' }
+    }
+
+    let rejectOpen!: (error: Error) => void
+    const onOpenOriginal = vi.fn(() => new Promise<void>((_resolve, reject) => { rejectOpen = reject }))
+
+    const routed = props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=history', {
+      selectedSession: session, history: routedHistory, detailStatus: 'ready'
+    })
+
+    render(<WorkDirectory {...routed} onOpenOriginal={onOpenOriginal} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Open original' }))
+
+    expect((screen.getByRole('button', { name: 'Opening original…' }) as HTMLButtonElement).disabled).toBe(true)
+    rejectOpen(new Error('secret native detail'))
+
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/could not open/i))
+    expect(document.body.textContent).not.toContain('secret native detail')
+    expect(screen.getByText('desktop-db / atlas / session-1')).toBeTruthy()
   })
 
   it('uses verified entity projections and Library relationship routes in project and session details', () => {

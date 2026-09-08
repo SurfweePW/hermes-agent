@@ -1,3 +1,5 @@
+import type { CompanionOriginalRoute } from './original-route'
+
 export type ApprovalChoice = 'once' | 'session' | 'always' | 'deny'
 
 export interface GatewayProfile {
@@ -165,6 +167,7 @@ export interface CompanionSessionHistoryResult {
   has_more: boolean
   next_cursor: string | null
   coverage: CompanionCoverage
+  original_route?: CompanionOriginalRoute
 }
 
 export interface CompanionProjectDetail {

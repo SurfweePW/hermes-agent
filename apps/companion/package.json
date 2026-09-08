@@ -2,7 +2,7 @@
   "name": "@hermes/companion",
   "productName": "Hermes Companion",
   "private": true,
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Secure native companion shell for Hermes Agent.",
   "author": "Nous Research",
   "type": "module",
@@ -15,7 +15,9 @@
     "android:debug": "npm run android:sync && cd android && ./gradlew assembleDebug",
     "android:release": "node scripts/build-android-release.mjs",
     "build:electron": "node scripts/bundle-electron.mjs",
-    "package:mac": "node scripts/package-mac.mjs",
+    "package:mac": "npm run package:mac:release",
+    "package:mac:release": "node scripts/package-mac.mjs release",
+    "package:mac:dogfood": "node scripts/package-mac.mjs dogfood",
     "test": "vitest run",
     "typecheck": "tsc -p . --noEmit && tsc -p tsconfig.electron.json --noEmit",
     "lint": "eslint src/ electron/"
@@ -72,8 +74,9 @@
     "mac": {
       "category": "public.app-category.productivity",
       "icon": "build/icon.icns",
-      "identity": null,
-      "hardenedRuntime": false,
+      "hardenedRuntime": true,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
       "gatekeeperAssess": false,
       "extendInfo": {
         "CFBundleDisplayName": "Hermes Companion",

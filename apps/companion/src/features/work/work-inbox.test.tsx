@@ -12,8 +12,8 @@ export const card: WorkCardView = {
 }
 
 function props(overrides: Partial<WorkInboxProps> = {}): WorkInboxProps {
-  return { items: [card], selected: card, status: 'verified', pending: false, message: null, groupBy: 'topic', sources: [],
-    onOpen: vi.fn(), onClose: vi.fn(), onRefresh: vi.fn(), onGroupBy: vi.fn(), onDecision: vi.fn(async () => true), onComment: vi.fn(async () => true), ...overrides }
+  return { items: [card], selected: card, status: 'verified', pending: false, message: null, groupBy: 'topic', priorityWritable: false, sources: [],
+    onOpen: vi.fn(), onClose: vi.fn(), onRefresh: vi.fn(), onGroupBy: vi.fn(), onDecision: vi.fn(async () => true), onComment: vi.fn(async () => true), onPriority: vi.fn(async () => true), onRestorePriority: vi.fn(async () => true), ...overrides }
 }
 
 describe('durable work inbox', () => {
@@ -112,6 +112,20 @@ describe('durable work inbox', () => {
   it('blocks duplicate pending controls and read-only work', () => {
     render(<WorkInbox {...props({ pending: true })} />)
     expect(screen.getByRole('group', { name: 'Decision for revision 2' }).hasAttribute('disabled')).toBe(true)
+  })
+  it('sets and restores an owner priority without collecting an actor', async () => {
+    const priority = { profile: 'CMO Exact', work_id: 'work-1', candidate_id: 'candidate-1', eligibility: 'assessed' as const, why_here: 'Deadline', next_step: 'Review', trade_off: 'Defers polish', assessed_at: null, evidence: [], assessment: null, override: { id: 'override-1', version: 2, mode: 'set_priority' as const, label: 'Now', actor: 'owner:server', reason: 'Launch', expires_at: null, review_id: null, review_at: null, active: true }, topicName: 'Launch', groupOrder: 0, itemOrder: 0 }
+    const p = props({ priorityWritable: true, selected: { ...card, priority } }); render(<WorkInbox {...p} />)
+    fireEvent.change(screen.getByLabelText('Priority label'), { target: { value: 'Do first' } })
+    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'Material deadline' } })
+    expect(screen.getByRole('button', { name: 'Set priority' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByText('Choose when this override expires.')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Expires at (required)'), { target: { value: '2099-01-01T00:00' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Set priority' }))
+    await waitFor(() => expect(p.onPriority).toHaveBeenCalledWith({ label: 'Do first', reason: 'Material deadline', expiresAt: new Date('2099-01-01T00:00').toISOString() }))
+    expect(screen.queryByLabelText(/actor/i)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Restore recommended' }))
+    await waitFor(() => expect(p.onRestorePriority).toHaveBeenCalledTimes(1))
   })
   it('rejects executable, local and credential-bearing links', () => {
     for (const url of ['file:///etc/passwd', 'data:text/html,x', 'javascript:alert(1)', 'https://u:p@example.org', '/relative']) {expect(safeWorkUrl(url)).toBeUndefined()}

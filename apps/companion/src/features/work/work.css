@@ -30,6 +30,7 @@
 .work-detail fieldset { border: 1px solid var(--line); border-radius: 10px; margin: 24px 0 0; min-width: 0; }
 .work-scope { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 20px; }
 .work-boundary { padding: 14px; background: var(--paper2); border-left: 3px solid var(--amber); }
+.work-priority-control { margin: 20px 0; padding: 16px; border: 1px solid var(--line); border-radius: 10px; background: var(--paper2); }
 .work-discussion { padding-left: 24px; }
 .work-discussion li { padding: 12px 0; border-bottom: 1px solid var(--line); }
 .work-plain-text { white-space: pre-wrap; }

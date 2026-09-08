@@ -35,6 +35,7 @@ export interface WorkCardView {
 }
 export type WorkDecision = 'approve_preparation' | 'request_changes' | 'snooze' | 'decline'
 export interface WorkDecisionInput { action: WorkDecision; comment?: string; snoozedUntil?: string }
+export interface WorkPriorityInput { label: string; reason: string; expiresAt: string }
 export interface WorkInboxProps {
   items: readonly WorkCardView[]
   selected: WorkCardView | null
@@ -42,6 +43,7 @@ export interface WorkInboxProps {
   pending: boolean
   message: string | null
   groupBy: 'topic' | 'session' | 'project'
+  priorityWritable: boolean
   sources: readonly { profile: string; incomplete: boolean; status: 'verified' | 'unsupported' | 'error'; lastSuccess: string | null; message: string | null }[]
   onRefresh: () => void
   onGroupBy: (groupBy: 'topic' | 'session' | 'project') => void
@@ -49,6 +51,8 @@ export interface WorkInboxProps {
   onClose: () => void
   onDecision: (input: WorkDecisionInput) => Promise<boolean>
   onComment: (body: string) => Promise<boolean>
+  onPriority: (input: WorkPriorityInput) => Promise<boolean>
+  onRestorePriority: () => Promise<boolean>
 }
 
 export function safeWorkUrl(value?: string): string | undefined {
@@ -135,12 +139,16 @@ export function WorkInbox(props: WorkInboxProps) {
   </section>
 }
 
-function WorkDetail({ item, status, pending, onClose, onDecision, onComment }: WorkInboxProps & { item: WorkCardView }) {
+function WorkDetail({ item, status, pending, priorityWritable, onClose, onDecision, onComment, onPriority, onRestorePriority }: WorkInboxProps & { item: WorkCardView }) {
   const [comment, setComment] = useState('')
   const [snooze, setSnooze] = useState('')
   const [validation, setValidation] = useState('')
+  const [priorityLabel, setPriorityLabel] = useState(item.priority?.override?.label ?? '')
+  const [priorityReason, setPriorityReason] = useState(item.priority?.override?.reason ?? '')
+  const [priorityExpiry, setPriorityExpiry] = useState('')
   const verified = status === 'verified' && !pending
   const enabled = verified && item.actionable
+  const priorityExpiryValid = Boolean(priorityExpiry && Number.isFinite(new Date(priorityExpiry).getTime()) && new Date(priorityExpiry).getTime() > Date.now())
 
   const decide = async (action: WorkDecision) => {
     if (!enabled) {return}
@@ -164,6 +172,17 @@ function WorkDetail({ item, status, pending, onClose, onDecision, onComment }: W
     <h3 id="work-detail-title">{item.title}</h3><p className="work-plain-text">{item.brief}</p>
     <dl><dt>Next action</dt><dd>{item.nextAction || 'Not specified'}</dd><dt>Owner</dt><dd>{item.owner || 'Unassigned'}</dd><dt>Current decision</dt><dd>{item.decision || 'No decision yet'}</dd>{item.snoozedUntil && <><dt>Snoozed until</dt><dd>{item.snoozedUntil}</dd></>}</dl>
     {item.preparationStatus && <p className="work-boundary">{item.preparationStatus}</p>}
+    {item.priority && <section aria-labelledby="priority-control-title" className="work-priority-control">
+      <h4 id="priority-control-title">Priority override</h4>
+      <p>Recommended order remains stable while this card is open. The verified order is applied when you return to the list.</p>
+      <label htmlFor="work-priority-label">Priority label</label><input disabled={!verified || !priorityWritable} id="work-priority-label" onChange={(event) => setPriorityLabel(event.target.value)} value={priorityLabel} />
+      <label htmlFor="work-priority-reason">Reason</label><textarea disabled={!verified || !priorityWritable} id="work-priority-reason" onChange={(event) => setPriorityReason(event.target.value)} rows={2} value={priorityReason} />
+      <label htmlFor="work-priority-expiry">Expires at (required)</label><input aria-describedby="work-priority-expiry-help" disabled={!verified || !priorityWritable} id="work-priority-expiry" onChange={(event) => setPriorityExpiry(event.target.value)} required type="datetime-local" value={priorityExpiry} />
+      <small id="work-priority-expiry-help">{priorityExpiry ? 'Choose a future expiration for this override.' : 'Choose when this override expires.'}</small>
+      <div className="work-actions"><button disabled={!verified || !priorityWritable || !priorityLabel.trim() || !priorityReason.trim() || !priorityExpiryValid} onClick={() => void onPriority({ label: priorityLabel.trim(), reason: priorityReason.trim(), expiresAt: new Date(priorityExpiry).toISOString() })} type="button">Set priority</button>
+        <button disabled={!verified || !priorityWritable || !item.priority.override?.active || !item.priority.override.version} onClick={() => void onRestorePriority()} type="button">Restore recommended</button></div>
+      {!priorityWritable && <p>Priority changes require an owner-authenticated connection and a compatible gateway.</p>}
+    </section>}
     {item.executionAcknowledgedAt && <p>Tracker handoff acknowledged: {item.executionAcknowledgedAt}</p>}
     {item.trackerEvidence && <TrackerStatus evidence={item.trackerEvidence} heading="Current tracker evidence" />}
     {item.completionEvidence?.length ? <><h4>Completion evidence</h4><WorkLinks links={item.completionEvidence.map((label) => ({ label, url: label }))} /></> : null}

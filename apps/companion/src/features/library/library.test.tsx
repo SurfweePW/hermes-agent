@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { useLayoutEffect } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
 import { downloadOriginal, Library } from './library'
@@ -29,6 +30,18 @@ function gateway(overrides: Partial<LibraryGateway> = {}): LibraryGateway {
 }
 
 describe('Library', () => {
+  it('refreshes explicitly and when the lifecycle refresh token changes', async () => {
+    const listLibrary = vi.fn().mockResolvedValue(complete())
+    const fake = gateway({ listLibrary })
+    const view = render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams()} refreshToken={0} />)
+    await waitFor(() => expect(listLibrary).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh Library' }))
+    await waitFor(() => expect(listLibrary).toHaveBeenCalledTimes(2))
+    view.rerender(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams()} refreshToken={1} />)
+    await waitFor(() => expect(listLibrary).toHaveBeenCalledTimes(3))
+  })
+
   it('reports an unconfigured backend without claiming the Library is empty', async () => {
     const fake = gateway({ listLibrary: vi.fn().mockResolvedValue({ ...complete([]), collections: [], coverage: { configured: false, status: 'unconfigured', collections: {} }, warnings: ['No Companion Library collections are configured for this profile; no roots were scanned.'] }) })
     render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams()} />)
@@ -68,6 +81,115 @@ describe('Library', () => {
     expect(next.get('libraryVersion')).toBe(versionId)
   })
 
+  it('suppresses stale detail actions when history selects another profile artifact', async () => {
+    const nextArtifactId = `art_${'e'.repeat(64)}`
+    const nextItem = { ...item, artifact_id: nextArtifactId, profile: 'beta', filename: 'next-report.md' }
+    const nextDetail = { ...detail, artifact_id: nextArtifactId, profile: 'beta', filename: nextItem.filename }
+    let resolveNextDetail!: (value: LibraryDetail) => void
+    const delayedNextDetail = new Promise<LibraryDetail>((resolve) => {resolveNextDetail = resolve})
+    const getLibraryArtifact = vi.fn((id: string, requestedProfile?: string) => id === artifactId && requestedProfile === 'atlas' ? Promise.resolve(detail) : delayedNextDetail)
+    const previewLibraryArtifact = vi.fn().mockResolvedValue({ artifact_id: artifactId, version_id: versionId, data_base64: encoded('stale preview'), offset: 0, next_offset: 13, eof: true, size: 13, sha256: item.sha256, filename: item.filename, mime_type: item.mime_type, descriptor: 'stale-transfer', preview: item.preview })
+    const fake = gateway({ getLibraryArtifact, previewLibraryArtifact })
+    const view = render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas`)} />)
+    await screen.findByText(item.filename)
+
+    view.rerender(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${nextArtifactId}&libraryProfile=beta`)} />)
+    const staleLoadAction = screen.queryByRole('button', { name: 'Load safe preview' })
+
+    if (staleLoadAction) {fireEvent.click(staleLoadAction)}
+
+    await waitFor(() => expect(getLibraryArtifact).toHaveBeenCalledWith(nextArtifactId, 'beta'))
+    expect(staleLoadAction).toBeNull()
+    expect(previewLibraryArtifact).not.toHaveBeenCalled()
+    expect(screen.queryByText(item.filename)).toBeNull()
+    expect(screen.queryByText('stale preview')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Mark previewed version reviewed' })).toBeNull()
+
+    resolveNextDetail(nextDetail)
+    expect(await screen.findByText(nextItem.filename)).toBeTruthy()
+  })
+
+  it('suppresses a loaded preview during the render that changes the selected version', async () => {
+    const fake = gateway()
+    const previewVisibleAtCommit: boolean[] = []
+
+    const Harness = ({ params }: { params: URLSearchParams }) => {
+      useLayoutEffect(() => {
+        previewVisibleAtCommit.push(screen.queryByText('# report') !== null)
+      }, [params])
+
+      return <Library gateway={fake} onNavigate={vi.fn()} params={params} />
+    }
+
+    const view = render(<Harness params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas`)} />)
+    await screen.findByText(item.filename)
+    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    expect(await screen.findByText('# report')).toBeTruthy()
+
+    view.rerender(<Harness params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas&libraryVersion=${versionId}`)} />)
+
+    expect(previewVisibleAtCommit.at(-1)).toBe(false)
+    expect(screen.queryByText('# report')).toBeNull()
+  })
+
+  it('revokes each preview object URL exactly once when selection changes and on unmount', async () => {
+    const retainedVersionId = `ver_${'d'.repeat(64)}`
+    const imagePreview = { kind: 'image' as const, preview_available: true }
+    const imageVersion = { ...detail.latest, version_id: retainedVersionId, mime_type: 'image/png', preview: imagePreview }
+    const imageDetail = { ...detail, filename: 'preview.png', versions: [{ ...detail.versions[0], mime_type: 'image/png', preview: imagePreview }, imageVersion], latest: { ...detail.latest, mime_type: 'image/png', preview: imagePreview } }
+    const previewLibraryArtifact = vi.fn(({ version_id }: { version_id?: string }) => Promise.resolve({ artifact_id: artifactId, version_id: version_id ?? versionId, data_base64: encoded('image'), offset: 0, next_offset: 5, eof: true, size: 5, sha256: item.sha256, filename: 'preview.png', mime_type: 'image/png', descriptor: version_id ? 'retained-transfer' : 'latest-transfer', preview: imagePreview }))
+    const fake = gateway({ getLibraryArtifact: vi.fn().mockResolvedValue(imageDetail), previewLibraryArtifact })
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValueOnce('blob:latest').mockReturnValueOnce('blob:retained')
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    const view = render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas`)} />)
+    await screen.findByText('preview.png')
+    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    expect((await screen.findByAltText('Preview of preview.png')).getAttribute('src')).toBe('blob:latest')
+
+    view.rerender(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas&libraryVersion=${retainedVersionId}`)} />)
+    expect(screen.queryByAltText('Preview of preview.png')).toBeNull()
+    await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith('blob:latest'))
+    expect(revokeObjectURL.mock.calls.filter(([url]) => url === 'blob:latest')).toHaveLength(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    expect((await screen.findByAltText('Preview of preview.png')).getAttribute('src')).toBe('blob:retained')
+    view.unmount()
+
+    expect(revokeObjectURL.mock.calls.filter(([url]) => url === 'blob:latest')).toHaveLength(1)
+    expect(revokeObjectURL.mock.calls.filter(([url]) => url === 'blob:retained')).toHaveLength(1)
+    createObjectURL.mockRestore()
+    revokeObjectURL.mockRestore()
+  })
+
+  it('ignores a stale preview response after a version change', async () => {
+    const retainedVersionId = `ver_${'d'.repeat(64)}`
+    const retained = { ...detail.latest, version_id: retainedVersionId }
+    const versionedDetail = { ...detail, versions: [...detail.versions, retained] }
+    let resolveLatest!: (chunk: LibraryChunk) => void
+    let resolveRetained!: (chunk: LibraryChunk) => void
+    const latestResponse = new Promise<LibraryChunk>((resolve) => {resolveLatest = resolve})
+    const retainedResponse = new Promise<LibraryChunk>((resolve) => {resolveRetained = resolve})
+    const previewLibraryArtifact = vi.fn(({ version_id }: { version_id?: string }) => version_id ? retainedResponse : latestResponse)
+    const fake = gateway({ getLibraryArtifact: vi.fn().mockResolvedValue(versionedDetail), previewLibraryArtifact })
+    const view = render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas`)} />)
+    await screen.findByText(item.filename)
+    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    expect(await screen.findByRole('button', { name: 'Loading preview…' })).toBeTruthy()
+
+    view.rerender(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas&libraryVersion=${retainedVersionId}`)} />)
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Load safe preview' }) as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    resolveLatest({ artifact_id: artifactId, version_id: versionId, data_base64: encoded('stale'), offset: 0, next_offset: 5, eof: true, size: 5, sha256: item.sha256, filename: item.filename, mime_type: item.mime_type, descriptor: 'latest-transfer', preview: item.preview })
+
+    await waitFor(() => expect(previewLibraryArtifact).toHaveBeenCalledTimes(2))
+    expect(screen.getByRole('button', { name: 'Loading preview…' })).toBeTruthy()
+    expect(screen.queryByText('stale')).toBeNull()
+
+    resolveRetained({ artifact_id: artifactId, version_id: retainedVersionId, data_base64: encoded('retained'), offset: 0, next_offset: 8, eof: true, size: 8, sha256: item.sha256, filename: item.filename, mime_type: item.mime_type, descriptor: 'retained-transfer', preview: item.preview })
+    expect(await screen.findByText('retained')).toBeTruthy()
+    expect(screen.queryByText('stale')).toBeNull()
+  })
+
   it('pins only the exact descriptor returned by the safe preview', async () => {
     const pinReviewedLibraryArtifact = vi.fn().mockResolvedValue({})
     const fake = gateway({ pinReviewedLibraryArtifact })
@@ -76,6 +198,32 @@ describe('Library', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
     fireEvent.click(await screen.findByRole('button', { name: 'Mark previewed version reviewed' }))
     await waitFor(() => expect(pinReviewedLibraryArtifact).toHaveBeenCalledWith(expect.objectContaining({ profile: 'atlas', artifact_id: artifactId, reviewed_descriptor: 'signed-transfer' })))
+  })
+
+  it.each([
+    ['project', 'libraryProject', { projects: [{ id: 'project-1', title: 'Launch plan', backend_namespace: 'test', profile: 'atlas' }], topics: [], sessions: [] }],
+    ['topic', 'libraryTopic', { projects: [], topics: [{ id: 'topic-1', title: 'Launch topic', backend_namespace: 'test', profile: 'atlas' }], sessions: [] }],
+    ['session', 'librarySession', { projects: [], topics: [], sessions: [{ id: 'session-1', title: 'Launch research', backend_namespace: 'test', profile: 'atlas', relationship: 'primary' as const }] }]
+  ])('retains authorized source-native %s context when pinning a linked artifact', async (_kind, routeKey, relationships) => {
+    const pinReviewedLibraryArtifact = vi.fn().mockResolvedValue({})
+    const fake = gateway({ pinReviewedLibraryArtifact })
+    const linkedId = relationships.projects[0]?.id ?? relationships.topics[0]?.id ?? relationships.sessions[0]?.id
+    const params = new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas&${routeKey}=${linkedId}`)
+    render(<Library gateway={fake} onNavigate={vi.fn()} params={params} relationshipContext={relationships} />)
+    await screen.findByText(item.filename)
+    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark previewed version reviewed' }))
+    await waitFor(() => expect(pinReviewedLibraryArtifact).toHaveBeenCalledWith(expect.objectContaining({ relationships })))
+  })
+
+  it('omits relationship context from a general Library pin', async () => {
+    const pinReviewedLibraryArtifact = vi.fn().mockResolvedValue({})
+    const fake = gateway({ pinReviewedLibraryArtifact })
+    render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas`)} />)
+    await screen.findByText(item.filename)
+    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark previewed version reviewed' }))
+    await waitFor(() => expect(pinReviewedLibraryArtifact.mock.calls[0][0]).not.toHaveProperty('relationships'))
   })
 
   it('renders sanitized HTML only in an inert sandbox', async () => {

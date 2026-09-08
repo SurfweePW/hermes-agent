@@ -1,4 +1,5 @@
 import type { LibraryChunkOptions, LibraryListOptions } from '../features/library/library-types'
+import type { TopicDetail, TopicItem, TopicListResult } from '../gateway/topic-types'
 import type { WorkCard, WorkCommentParams, WorkDecisionParams, WorkDetail } from '../gateway/work-types'
 
 import { FakeCompanionGateway } from './fake-gateway'
@@ -67,6 +68,18 @@ export class FakeWorkGateway extends FakeCompanionGateway {
 
     return structuredClone({ project, sessions, topics: [], needs_me: [], work: [], organization_available: false, organization_complete: false, organization_message: 'Synthetic organization projection unavailable.', membership_has_more: false, membership_next_cursor: null, coverage: { complete: true, freshness: '2026-01-04T00:00:00Z', message: null } })
   }
+  async listCompanionTopics({ profile }: { profile: string }): Promise<TopicListResult> {
+    const items = profile === 'atlas' ? [this.syntheticTopic()] : []
+
+    return structuredClone({ items, total: items.length, has_more: false, next_cursor: null, as_of: '2026-01-04T00:00:00Z', profile, backend_namespace: 'fixture-organization-db', coverage: { configured: true, status: 'complete' as const, population: 'authorized topics', source: 'organization.db', freshness: { as_of: '2026-01-04T00:00:00Z', organization_updated_at: null }, linked_collections: { needs_me: 'unavailable' as const, work_source_records: 'unavailable' as const, files: 'unavailable' as const, source_details: 'unavailable' as const } }, warnings: ['Synthetic QA source.'] })
+  }
+  async getCompanionTopic(profile: string, id: string): Promise<TopicDetail> {
+    const topic = this.syntheticTopic()
+
+    if (profile !== 'atlas' || id !== topic.id) {throw { code: 4404 }}
+
+    return structuredClone({ topic, overview: { objective: topic.objective, next_useful_action: topic.next_useful_action, verified_status: topic.verified_status, coverage: { status: 'complete', authority: 'organization.db' } }, needs_me: { items: null, coverage: { status: 'unavailable' } }, work: { items: [], coverage: { status: 'complete' } }, files: { items: null, coverage: { status: 'unavailable' } }, sources: { items: [], coverage: { status: 'complete' } }, tabs: ['overview', 'needs_me', 'work', 'files', 'sources'], as_of: '2026-01-04T00:00:00Z', profile, backend_namespace: 'fixture-organization-db', coverage: (await this.listCompanionTopics({ profile })).coverage, warnings: [] })
+  }
   async listWork(profile: string) { return structuredClone({ items: [...this.work.values()].filter(({ item }) => item.profile === profile).map(({ item }) => item) }) }
   async getWork(profile: string, id: string) { return structuredClone(this.lookup(profile, id)) }
   async commentWork(params: WorkCommentParams) {
@@ -102,6 +115,9 @@ export class FakeWorkGateway extends FakeCompanionGateway {
     if (!detail || detail.item.profile !== profile) {throw { code: 4404 }}
 
     return detail
+  }
+  private syntheticTopic(): TopicItem {
+    return { id: 'synthetic-topic-1', canonical_id: 'topic:atlas:synthetic-topic-1', collection: 'operations', name: '[SYNTHETIC QA] Companion launch', objective: 'Ship the read-only directory.', lifecycle: 'active', version: 1, created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-04T00:00:00Z', verified_status: { value: 'active', verified: true, authority: 'organization.topic.lifecycle', observed_at: '2026-01-04T00:00:00Z' }, next_useful_action: { availability: 'unknown', coverage: 'unavailable', reason: 'No assessment is available.' }, linked_work: { coverage: 'partial', organization_bindings: 'complete', source_records: 'unavailable', authorization_filtered: false } }
   }
   private async libraryChunk(options: LibraryChunkOptions, preview: boolean) {
     const detail = await this.getLibraryArtifact(options.artifact_id)

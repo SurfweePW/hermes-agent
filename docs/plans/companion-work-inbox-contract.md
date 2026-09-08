@@ -18,10 +18,11 @@ interface WorkCard extends WorkPayload {
   revision: number; version: number; created_at: string; updated_at: string;
   snoozed_until: string|null; attention_due: boolean; attention_key: string;
   approval: null|{revision: number; scope: 'preparation_only'; decision_id: string};
-  preparation_status: 'not_authorized'|'dispatch_pending'|'linked'|'completed';
+  preparation_status: 'not_authorized'|'approved_task_linking_pending'|
+    'linked_awaiting_triage'|'preparing'|'prepared'|'blocked'|'status_unavailable';
   handoff_key: string|null;
   execution_link: null|{execution_ref: string; acknowledged_at: string; handoff_key: string};
-  completion_evidence: string|null;
+  completion_evidence: string[]|null;
 }
 interface WorkComment {
   id: string; card_id: string; revision: number; actor: 'agent'|'human';
@@ -73,18 +74,31 @@ A refreshed evidence filename belongs in payload.evidence under the SAME key.
 
 ## Adapter and execution boundary
 
-CLI: `python -m hermes_cli.companion_work --help` provides upsert, propose,
+WorkStore CLI: `python -m hermes_cli.companion_work --help` provides upsert, propose,
 comment, list, get, preparation, preparation-ack, complete, digest and digest-ack
 using the same store. No decide command or actor flag. Select the profile with
 existing HERMES_HOME/--profile behavior.
 
+The production HOFFEE adapter is `python -m hermes_cli.companion_kanban_bridge`.
+It requires `HERMES_COMPANION_KANBAN_INTAKE_URL` and the separately provisioned
+`HERMES_DASHBOARD_KANBAN_INTAKE_SECRET`. Run it as a single-owner periodic
+one-shot for the `hoffeecmo` profile. The destination endpoint grants only
+`kanban:hoffee:create_get` and pins triage, `hoffeecmo`, tenant `hoffee`, scratch
+workspace, and non-goal execution. The bridge uses `handoff_key` as destination
+idempotency key, reads the returned task back before acknowledging it, and uses
+`kanban:hoffee:<task-id>` as `execution_ref`.
+
 Handoff identity is stable for one decision: `profile:card-id:decision-id`.
-Before dispatch, re-read current approval/revision; search existing Kanban for
-that marker; create only if absent; read back the real task, then preparation-ack.
-A retry after task creation must find that marker instead of creating twice.
-This inbox neither implements that external transaction nor claims to. Adapter
-concurrency/claim policy remains with existing Kanban. `execution_link` is the
-acknowledged reference; payload.execution_ref is only input context.
+Before dispatch, re-read current approval/revision; create/get through destination
+atomic idempotency; read back the real task, then preparation-ack. A timeout after
+task creation records `status_unavailable`; the next run repeats the same
+idempotency key and therefore recovers the same logical task instead of creating
+twice. Kanban triage/todo/scheduled/ready map to `linked_awaiting_triage`,
+running/review to `preparing`, blocked to `blocked`, and done to `prepared` only
+when nonempty result evidence is present. Verified done then closes WorkStore;
+done without evidence remains `status_unavailable`. Adapter concurrency/claim
+policy remains with existing Kanban. `execution_link` is the acknowledged
+reference; payload.execution_ref is only input context.
 Preparation excludes publication, paid activation/spending, and live store
 changes. HOFFEE Kanban remains execution authority; its publication ledger is a
 separate final-write authority and is never altered here.

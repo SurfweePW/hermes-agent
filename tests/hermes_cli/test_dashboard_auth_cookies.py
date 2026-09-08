@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 from hermes_cli.dashboard_auth.cookies import (
-    _MAX_PKCE_FLOW_COOKIES,
+    _pkce_flow_cookie,
     PKCE_COOKIE,
     SESSION_AT_COOKIE,
     SESSION_PROVIDER_COOKIE,
@@ -137,12 +137,12 @@ def test_read_session_cookies_from_request_secure_prefix():
     assert rt == "rt_value"
 
 
-def test_concurrent_pkce_starts_have_a_hard_bounded_cookie_namespace():
-    """Independent responses may all see the same empty cookie snapshot."""
+def test_concurrent_pkce_starts_use_unique_high_entropy_cookie_names():
+    """Independent flows must never collide in a tiny fixed slot namespace."""
     request = Request({"type": "http", "method": "GET", "path": "/", "headers": []})
     names = set()
 
-    for i in range(_MAX_PKCE_FLOW_COOKIES + 4):
+    for i in range(32):
         response = Response()
         set_pkce_cookie(
             response,
@@ -155,7 +155,27 @@ def test_concurrent_pkce_starts_have_a_hard_bounded_cookie_namespace():
             if header == b"set-cookie" and b"_flow_" in value and b"Max-Age=0" not in value:
                 names.add(value.decode().split("=", 1)[0])
 
-    assert len(names) <= _MAX_PKCE_FLOW_COOKIES
+    assert len(names) == 32
+    assert all(len(name.rsplit("_", 1)[1]) == 64 for name in names)
+    assert _pkce_flow_cookie("state;/ hostile") == _pkce_flow_cookie("state;/ hostile")
+    assert "state;/ hostile" not in _pkce_flow_cookie("state;/ hostile")
+
+
+def test_selected_pkce_reader_supports_new_legacy_slot_and_unsuffixed_cookies():
+    """Callbacks survive both sides of rolling upgrades."""
+    import hashlib
+
+    selector = "rolling-upgrade-state"
+    new_name = _pkce_flow_cookie(selector)
+    old_slot = int.from_bytes(hashlib.sha256(selector.encode()).digest()[:8], "big") % 16
+    old_name = f"{PKCE_COOKIE}_flow_{old_slot:02x}"
+
+    for cookie_name in (new_name, old_name, PKCE_COOKIE):
+        request = Request({
+            "type": "http", "method": "GET", "path": "/",
+            "headers": [(b"cookie", f"{cookie_name}=rolling-value".encode())],
+        })
+        assert read_pkce_cookie(request, selector=selector) == "rolling-value"
 
 
 # ---------------------------------------------------------------------------
@@ -552,16 +572,26 @@ def test_clear_session_cookies_prefixed_deletions_carry_secure():
         assert "Max-Age=0" in bare
 
 
-def test_logout_style_pkce_clear_deletes_every_bounded_slot():
+def test_logout_style_pkce_clear_deletes_visible_current_and_legacy_flow_names():
+    selector = "logout-flow"
+    current = _pkce_flow_cookie(selector)
+    request = Request({
+        "type": "http", "method": "POST", "path": "/auth/logout",
+        "headers": [(b"cookie", f"{current}=a; {PKCE_COOKIE}_flow_03=b".encode())],
+    })
     response = Response()
-    clear_pkce_cookie(response, use_https=False)
+    clear_pkce_cookie(response, use_https=False, request=request)
     deleted_names = {
         value.decode().split("=", 1)[0]
         for header, value in response.raw_headers
         if header == b"set-cookie" and b"_flow_" in value and b"Max-Age=0" in value
     }
 
-    assert len(deleted_names) == _MAX_PKCE_FLOW_COOKIES * 3
+    assert current in deleted_names
+    assert f"{PKCE_COOKIE}_flow_03" in deleted_names
+    assert {
+        f"{PKCE_COOKIE}_flow_{slot:02x}" for slot in range(16)
+    }.issubset(deleted_names)
 
 
 def test_cookie_deletions_obey_secure_prefix_contracts():

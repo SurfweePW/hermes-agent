@@ -47,6 +47,29 @@ export function createGatewayTokenBridge(renderer: IpcRendererAdapter) {
   })
 }
 
+type OriginalRouteInput = {
+  route: { verified: true; client: 'hermes-desktop'; platform: 'macos'; url: string }
+  profile: string
+  sessionId: string
+}
+
+export function createOriginalRouteBridge(renderer: IpcRendererAdapter) {
+  return async (input: OriginalRouteInput): Promise<void> => {
+    let response: { ok?: unknown; error?: unknown } | null
+
+    try {
+      response = await renderer.invoke(CHANNELS.openOriginalRoute, input) as typeof response
+    } catch {
+      throw new Error('open-failed')
+    }
+
+    if (response?.ok !== true) {
+      const allowed = new Set(['invalid-request', 'untrusted-renderer', 'unsupported-platform', 'open-failed'])
+      throw new Error(typeof response?.error === 'string' && allowed.has(response.error) ? response.error : 'open-failed')
+    }
+  }
+}
+
 export function createOwnerBridge(renderer: IpcRendererAdapter) {
   const codes = new Set(['invalid-request', 'untrusted-renderer', 'invalid-gateway-url', 'owner-auth-setup-required',
     'owner-auth-required', 'owner-auth-cancelled', 'owner-auth-timeout', 'owner-auth-failed', 'secure-storage-unavailable'])
@@ -127,5 +150,6 @@ export function createOwnerBridge(renderer: IpcRendererAdapter) {
 
 contextBridge.exposeInMainWorld('hermesCompanion', Object.freeze({
   gatewayToken: createGatewayTokenBridge(ipcRenderer),
+  ...(process.platform === 'darwin' ? { openOriginalRoute: createOriginalRouteBridge(ipcRenderer) } : {}),
   ...createOwnerBridge(ipcRenderer)
 }))

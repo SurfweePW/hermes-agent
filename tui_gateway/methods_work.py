@@ -12,6 +12,24 @@ def register(server):
             transport = current_transport()
             authorization = getattr(transport, 'companion_owner_authorization', None)
             try:
+                if isinstance(params, dict) and 'profile' in params:
+                    # An existing sibling is not sufficient authority: Work may
+                    # only address profiles this gateway was configured to serve.
+                    from hermes_cli.profiles import validate_profile_name
+                    from tui_gateway.companion_topics import _owner_authorized_profiles
+
+                    profile = params['profile']
+                    try:
+                        validate_profile_name(profile)
+                    except (TypeError, ValueError):
+                        pass  # execute() returns the canonical parameter error
+                    else:
+                        try:
+                            served_profiles = _owner_authorized_profiles(server)
+                        except Exception as exc:
+                            raise WorkError('work profile unavailable', 4403) from exc
+                        if profile not in served_profiles:
+                            raise WorkError('work profile unavailable', 4403)
                 return server._ok(
                     rid,
                     execute(operation, params, owner_authorization=authorization),

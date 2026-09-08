@@ -4,9 +4,11 @@ All HttpOnly, ``SameSite=Lax`` unless noted, Path = proxy prefix or /: ``hermes_
 (access token; Max-Age = token TTL), ``hermes_session_rt`` (rotating refresh token; written only
 when the provider returned one, always cleared on logout/expiry), ``hermes_session_provider``
 (non-secret routing hint so an RT is not handed to the wrong provider), ``hermes_session_pkce``
-(PKCE state + CSRF nonce + provider hint, 10 min; ``SameSite=None; Secure`` over HTTPS because it
-is set on the /auth/login 302 and must survive the cross-site redirect chain — Chromium drops Lax
-cookies set on such a 302, crbug 40508226), ``hermes_sso_attempt`` (auto-SSO loop guard, 60 s).
+(the rolling-upgrade singleton) plus collision-resistant ``hermes_session_pkce_flow_<sha256>``
+cookies (PKCE state + CSRF nonce + provider hint, 10 min; ``SameSite=None; Secure`` over HTTPS
+because they are set on the /auth/login 302 and must survive the cross-site redirect chain —
+Chromium drops Lax cookies set on such a 302, crbug 40508226), ``hermes_sso_attempt`` (auto-SSO
+loop guard, 60 s).
 ``Secure`` only when ``request.url.scheme`` is https. Cookie-prefix hardening per
 draft-west-cookie-prefixes: bare name over HTTP; ``__Host-`` on gated HTTPS with Path=/;
 ``__Secure-`` behind a proxy prefix (``__Host-`` forbids Path != /). Setters and readers BOTH
@@ -29,11 +31,11 @@ SESSION_AT_COOKIE = "hermes_session_at"
 SESSION_RT_COOKIE = "hermes_session_rt"
 SESSION_PROVIDER_COOKIE = "hermes_session_provider"
 PKCE_COOKIE = "hermes_session_pkce"
-# A deterministic, bounded namespace lets concurrent OAuth transactions keep
-# independent state without allowing unbounded browser-cookie growth. A slot
-# collision safely invalidates the older flow.
-_MAX_PKCE_FLOW_COOKIES = 16
 _PKCE_FLOW_MARKER = f"{PKCE_COOKIE}_flow_"
+_LEGACY_PKCE_FLOW_SLOTS = 16
+_PKCE_FLOW_NAME_RE = re.compile(
+    rf"^{re.escape(_PKCE_FLOW_MARKER)}(?:[0-9a-f]{{64}}|[0-9a-f]{{2}})$"
+)
 SSO_ATTEMPT_COOKIE = "hermes_sso_attempt"
 
 # Name variants a reader may have to try; most strict first.
@@ -135,9 +137,14 @@ def clear_session_cookies(response: Response, *, prefix: str = "") -> None:
 
 
 def _pkce_flow_cookie(selector: str) -> str:
-    """Map opaque OAuth state deterministically into one of 16 slots."""
+    """Map an OAuth selector to a collision-resistant opaque cookie suffix."""
+    return f"{_PKCE_FLOW_MARKER}{hashlib.sha256(selector.encode('utf-8')).hexdigest()}"
+
+
+def _legacy_pkce_flow_cookie(selector: str) -> str:
+    """Cookie name emitted by the short-lived 16-slot implementation."""
     digest = hashlib.sha256(selector.encode("utf-8")).digest()
-    slot = int.from_bytes(digest[:8], "big") % _MAX_PKCE_FLOW_COOKIES
+    slot = int.from_bytes(digest[:8], "big") % _LEGACY_PKCE_FLOW_SLOTS
     return f"{_PKCE_FLOW_MARKER}{slot:02x}"
 
 
@@ -155,9 +162,9 @@ def set_pkce_cookie(
     selector: str = "", request: Optional[Request] = None) -> None:
     """Set migration singleton plus a selector-addressed PKCE cookie.
 
-    ``request`` is accepted for call-site compatibility; the fixed namespace
-    enforces the hard cap even when concurrent responses share a stale cookie
-    snapshot, so request-visible pruning is neither needed nor authoritative.
+    The unsuffixed singleton keeps new writers readable by an old gateway during
+    a rolling upgrade. The selector-addressed cookie uses a SHA-256 suffix so
+    unrelated concurrent flows do not share one of a handful of collision slots.
     """
     del request
     if isinstance(payload, str):
@@ -176,24 +183,37 @@ def set_pkce_cookie(
 
 def clear_pkce_cookie(
     response: Response, *, use_https: bool = False, prefix: str = "",
-    selector: str = "") -> None:
+    selector: str = "", request: Optional[Request] = None) -> None:
     """Delete PKCE state across name variants and current/legacy paths.
 
-    A selector clears that flow and the migration singleton. Without one
-    (logout/selectorless cleanup), every slot is removed. When proxied, root
-    deletions are emitted too so cookies survive neither proxy-path changes nor
-    a previous direct deployment. Prefixed deletion headers remain browser
+    A selector clears that flow, its legacy 16-slot name, and the migration
+    singleton. Without one, logout clears the entire bounded legacy namespace
+    plus every recognised current flow cookie visible on the request. When
+    proxied, root deletions are emitted too so cookies survive neither proxy-path
+    changes nor a previous direct deployment. Prefixed deletion headers remain
     valid: ``Secure`` is always present and ``__Host-`` always uses ``Path=/``.
     """
     prefixes = (prefix, "") if prefix else ("",)
     bare_names = [PKCE_COOKIE]
     if selector:
-        bare_names.append(_pkce_flow_cookie(selector))
+        bare_names.extend((
+            _pkce_flow_cookie(selector), _legacy_pkce_flow_cookie(selector)))
     else:
+        # The retired writer had a fixed namespace, so clear all of it even if
+        # an intermediary omitted Cookie headers. Current high-entropy names
+        # can only be discovered from the request and are removed when visible.
         bare_names.extend(
             f"{_PKCE_FLOW_MARKER}{slot:02x}"
-            for slot in range(_MAX_PKCE_FLOW_COOKIES)
+            for slot in range(_LEGACY_PKCE_FLOW_SLOTS)
         )
+        if request is not None:
+            bare_names.extend(
+                name.removeprefix("__Host-").removeprefix("__Secure-")
+                for name in request.cookies
+                if _PKCE_FLOW_NAME_RE.fullmatch(
+                    name.removeprefix("__Host-").removeprefix("__Secure-"))
+            )
+    bare_names = list(dict.fromkeys(bare_names))
     for cookie_prefix in prefixes:
         bare_attrs = _pkce_attrs(use_https=use_https, prefix=cookie_prefix)
         for bare_name in bare_names:
@@ -222,9 +242,10 @@ def read_session_provider(request: Request) -> Optional[str]:
 
 def read_pkce_cookie(request: Request, *, selector: str = "") -> Optional[str]:
     if selector:
-        selected = _read_with_fallback(request, _pkce_flow_cookie(selector))
-        if selected is not None:
-            return selected
+        for name in (_pkce_flow_cookie(selector), _legacy_pkce_flow_cookie(selector)):
+            selected = _read_with_fallback(request, name)
+            if selected is not None:
+                return selected
     return _read_with_fallback(request, PKCE_COOKIE)
 
 

@@ -1,15 +1,18 @@
-import { type FormEvent, useEffect, useRef, useState, useSyncExternalStore } from 'react'
+import { type FormEvent, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
 import { NeedsMe } from './features/attention/needs-me'
 import { Conversation } from './features/conversation/conversation'
+import { installDirectoryRefreshLifecycle } from './features/directory/directory-refresh'
 import { WorkDirectory } from './features/directory/work-directory'
 import { Library } from './features/library/library'
+import type { LibraryRelationshipContext } from './features/library/library-types'
 import { Recovery } from './features/recovery/recovery'
 import { Roster, type Teammate } from './features/roster/roster'
 import { TeammateDetails } from './features/roster/teammate-details'
 import { OwnerSignIn } from './features/work/owner-sign-in'
 import { WorkInbox } from './features/work/work-inbox'
 import { createFakeWorkGateway } from './fixtures/fake-work-gateway'
+import { hasOriginalRouteCapability, openOriginalRoute } from './gateway/original-route'
 import { type CompanionStore, createCompanionStore } from './state/companion-store'
 import { useCompanion } from './state/use-companion'
 
@@ -35,32 +38,26 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
   const directory = useSyncExternalStore(store.directory.subscribe, store.directory.getSnapshot, store.directory.getSnapshot)
   const [screen, setScreen] = useState<Screen>(initialScreen)
   const [locationSearch, setLocationSearch] = useState(window.location.search)
+  const [libraryRefreshToken, setLibraryRefreshToken] = useState(0)
   const mainRef = useRef<HTMLElement>(null)
   const initialFocus = useRef(true)
   const fixtureStarted = useRef(false)
   const restoredDirectoryFocus = useRef('')
+  const restoredLibraryRelationship = useRef('')
   const selected = companion.teammates.find((teammate) => teammate.id === companion.selectedTeammateId)
   const attentionCount = companion.attentionItems.length + work.items.filter((item) => item.bucket === 'needs_me').length + Number(companion.phase === 'disconnected')
 
   useEffect(() => {
-    let refreshing = false
+    const lifecycle = installDirectoryRefreshLifecycle({
+      isReady: () => store.getSnapshot().phase === 'ready',
+      refreshWork: store.work.refresh,
+      refreshDirectory: store.directory.refresh,
+      refreshAttention: store.refreshAttention,
+      refreshLibrary: () => setLibraryRefreshToken((value) => value + 1)
+    })
 
-    const refresh = () => {
-      if (refreshing || document.visibilityState === 'hidden' || store.getSnapshot().phase !== 'ready') {return}
-      refreshing = true
-      const requests = [store.work.refresh()]
-
-      if (screen === 'work') {requests.push(store.directory.refresh())}
-      void Promise.allSettled(requests).finally(() => {refreshing = false})
-    }
-
-    document.addEventListener('visibilitychange', refresh)
-    window.addEventListener('online', refresh)
-    window.addEventListener('focus', refresh)
-    const interval = window.setInterval(refresh, 30_000)
-
-    return () => {document.removeEventListener('visibilitychange', refresh); window.removeEventListener('online', refresh); window.removeEventListener('focus', refresh); window.clearInterval(interval)}
-  }, [screen, store])
+    return lifecycle.destroy
+  }, [store])
 
   useEffect(() => {
     if (!fixtureMode || store !== defaultStore || fixtureStarted.current) {return}
@@ -108,6 +105,84 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
     const requested = params.get('view') as Screen | null
     navigate(requested && primaryScreens.has(requested) ? requested : screen, params)
   }
+
+  const libraryRelationshipContext = useMemo<LibraryRelationshipContext | undefined>(() => {
+    const params = new URLSearchParams(locationSearch)
+    const profile = params.get('libraryProfile')
+    const projectId = params.get('libraryProject')
+    const topicId = params.get('libraryTopic')
+    const sessionId = params.get('librarySession')
+
+    const projectMatches = projectId ? directory.projects.filter((item) => item.id === projectId && item.profile === profile) : []
+
+    const project = directory.selectedProject?.project.id === projectId && directory.selectedProject.project.profile === profile
+      ? directory.selectedProject.project
+      : projectMatches.length === 1 ? projectMatches[0] : undefined
+
+    if (projectId && project) {
+      return { projects: [{ id: project.id, title: project.title, backend_namespace: project.source, profile: project.profile }], topics: [], sessions: [] }
+    }
+
+    const topicMatches = topicId ? directory.topics.filter((item) => item.id === topicId && item.profile === profile) : []
+
+    const topicDetail = directory.selectedTopic?.topic.id === topicId && directory.selectedTopic.profile === profile
+      ? directory.selectedTopic
+      : undefined
+
+    const topic = topicDetail
+      ? { id: topicDetail.topic.id, title: topicDetail.topic.name, backend_namespace: topicDetail.backend_namespace, profile: topicDetail.profile }
+      : topicMatches.length === 1
+        ? { id: topicMatches[0].id, title: topicMatches[0].name, backend_namespace: topicMatches[0].source, profile: topicMatches[0].profile }
+        : undefined
+
+    if (topicId && topic) {
+      return { projects: [], topics: [topic], sessions: [] }
+    }
+
+    const sessionMatches = sessionId ? directory.sessions.filter((item) => item.id === sessionId && item.profile === profile) : []
+
+    const selectedSession = directory.selectedSession?.id === sessionId && directory.selectedSession.profile === profile
+      ? directory.selectedSession
+      : sessionMatches.length === 1 ? sessionMatches[0] : undefined
+
+    if (sessionId && selectedSession) {
+      return { projects: [], topics: [], sessions: [{ id: selectedSession.id, title: selectedSession.title, backend_namespace: selectedSession.source, profile: selectedSession.profile, relationship: 'primary' }] }
+    }
+
+    if (sessionId && directory.history?.session_id === sessionId && directory.history.profile === profile) {
+      return { projects: [], topics: [], sessions: [{ id: directory.history.session_id, backend_namespace: directory.history.source, profile: directory.history.profile, relationship: 'primary' }] }
+    }
+
+    return undefined
+  }, [directory.history, directory.projects, directory.selectedProject, directory.selectedSession, directory.selectedTopic, directory.sessions, directory.topics, locationSearch])
+
+  useEffect(() => {
+    if (screen !== 'library' || companion.phase !== 'ready') {
+      restoredLibraryRelationship.current = ''
+
+      return
+    }
+
+    const params = new URLSearchParams(locationSearch)
+    const profile = params.get('libraryProfile')
+
+    const relations = [
+      ['project', params.get('libraryProject')],
+      ['topic', params.get('libraryTopic')],
+      ['session', params.get('librarySession')]
+    ].filter((entry): entry is [string, string] => Boolean(entry[1]))
+
+    if (!profile || relations.length !== 1 || libraryRelationshipContext) {return}
+    const [kind, id] = relations[0]
+    const key = JSON.stringify([profile, kind, id])
+
+    if (restoredLibraryRelationship.current === key) {return}
+    restoredLibraryRelationship.current = key
+
+    if (kind === 'project') {void store.directory.openProject(profile, id)}
+    else if (kind === 'topic') {void store.directory.openTopic(profile, id)}
+    else {void store.directory.openSession(profile, id)}
+  }, [companion.phase, libraryRelationshipContext, locationSearch, screen, store])
 
   useEffect(() => {
     if (screen !== 'work' || companion.phase !== 'ready') {
@@ -188,13 +263,13 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
     if (screen === 'needs') {return <>
       {companion.phase !== 'ready' && <button className="button reconnect-button" disabled={companion.phase === 'recovering'} onClick={() => void store.recover()} type="button">Reconnect to verify work</button>}
       <OwnerSignIn baseUrl={companion.baseUrl} onOwnerConnect={store.connectOwner} onOwnerSignOut={store.signOutOwner} ownerConnected={companion.connectionMode === 'owner' && companion.phase === 'ready'} />
-      <WorkInbox {...work} onClose={store.work.close} onComment={store.work.comment} onDecision={store.work.decide} onGroupBy={(groupBy) => void store.work.setGroupBy(groupBy)} onOpen={(profile, id) => void store.work.open(profile, id)} onRefresh={() => void store.work.refresh()} />
+      <WorkInbox {...work} onClose={store.work.close} onComment={store.work.comment} onDecision={store.work.decide} onGroupBy={(groupBy) => void store.work.setGroupBy(groupBy)} onOpen={(profile, id) => void store.work.open(profile, id)} onPriority={store.work.setPriority} onRefresh={() => void store.work.refresh()} onRestorePriority={store.work.restoreRecommended} />
       <NeedsMe items={companion.attentionItems} onOpen={(item) => { if (companion.phase === 'ready') {void store.openAttention(item).then(() => setScreen('conversation'))} }} onRefresh={() => void store.refreshAttention()} scope={companion.attentionScope} />
     </>}
 
-    if (screen === 'work') {return <WorkDirectory onBack={store.directory.clearDetail} onLoadOlder={(kind, profile) => void store.directory.loadOlder(kind, profile)} onLoadOlderHistory={() => void store.directory.loadOlderHistory()} onLoadOlderProjectSessions={() => void store.directory.loadOlderProjectSessions()} onNavigate={navigateParams} onRefresh={() => void store.directory.refresh()} params={new URLSearchParams(locationSearch)} snapshot={directory} />}
+    if (screen === 'work') {return <WorkDirectory {...(hasOriginalRouteCapability() ? { onOpenOriginal: openOriginalRoute } : {})} onBack={store.directory.clearDetail} onLoadOlder={(kind, profile) => void store.directory.loadOlder(kind, profile)} onLoadOlderHistory={() => void store.directory.loadOlderHistory()} onLoadOlderProjectSessions={() => void store.directory.loadOlderProjectSessions()} onNavigate={navigateParams} onRefresh={() => void store.directory.refresh()} params={new URLSearchParams(locationSearch)} snapshot={directory} />}
 
-    if (screen === 'library') {return <Library gateway={store.library} onNavigate={navigateParams} params={new URLSearchParams(locationSearch)} />}
+    if (screen === 'library') {return <Library gateway={store.library} onNavigate={navigateParams} params={new URLSearchParams(locationSearch)} refreshToken={libraryRefreshToken} relationshipContext={libraryRelationshipContext} />}
 
     if (screen === 'details' && selected) {return <TeammateDetails onBack={() => setScreen('teammates')} onMessage={() => setScreen('conversation')} onOpenSession={(id) => { void store.selectTeammate(selected.id, id).then(() => setScreen('conversation')) }} onPin={(id, pinned) => void store.setSessionPinned(id, pinned)} sessions={companion.recentSessions} sessionsLoading={companion.sessionsLoading} teammate={selected} />}
 

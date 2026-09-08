@@ -159,6 +159,51 @@ describe('verified work store', () => {
       groupOrder: 0, itemOrder: 0, why_here: 'Unblocks launch'
     })
   })
+  it('uses the exact owner mutation contract and defers reordered rows until detail closes', async () => {
+    const { gateway, store } = setup()
+    const second = { ...card, id: 'second-id', source_key: 'campaign:2', title: 'Second campaign' }
+    vi.mocked(gateway.listWork).mockResolvedValue({ items: [card, second] })
+    vi.mocked(gateway.getWork).mockResolvedValue({ item: card, comments: [], decisions: [], tracker_status_history: [] })
+    let order = ['stable-id', 'second-id']
+    let overrideVersion = 1
+
+    const priority = (workId: string, itemOrder: number) => ({
+      profile: 'cmo', work_id: workId, candidate_id: `candidate:${workId}`, eligibility: 'assessed' as const,
+      why_here: 'Expected value', next_step: 'Review', trade_off: 'Defers other work', assessed_at: null,
+      evidence: [], assessment: null, override: workId === 'stable-id'
+        ? { id: 'override-1', version: overrideVersion, mode: 'set_priority' as const, label: 'Now', actor: 'owner:server', reason: 'Deadline', expires_at: null, review_id: null, review_at: null, active: true }
+        : null,
+      itemOrder
+    })
+
+    const listNeedsMePriorities = vi.fn(async () => ({ profile: 'cmo', backend_namespace: 'test', sort: 'recommended' as const, policy_version: 'policy-v1', review_id: null, group_by: 'topic' as const, as_of: '2026-09-01T00:00:00Z', coverage: { work: 'complete', organization: 'complete', authorization_filtered: true }, groups: [{ id: 'topic-1', eligibility: 'assessed' as const, eligible_action_count: 2, why_here: 'Highest value', group: { kind: 'topic' as const, id: 'topic-1', name: 'Launch', collection: null, objective: null }, items: order.map(priority) }] }))
+    const organizationCapabilities = vi.fn(async () => ({ version: 2, operations: ['needs_me'], read_only: false, sort: 'recommended' as const, policy_version: 'policy-v1', mutation_methods: ['companion.priorities.override_set', 'companion.priorities.restore_recommended'], record_mutation_methods: [], owner_authorization: true, optimistic_concurrency: 'expected_version' as const, idempotency: 'actor_scoped_key' as const, audit: true }))
+
+    const setPriorityOverride = vi.fn(async (params) => { order = ['second-id', 'stable-id']; overrideVersion = 2
+
+ return { record: { ...params, actor: 'owner:server', version: 2, created_at: '2026-09-08T00:00:00Z', created_by: 'owner:server', updated_at: '2026-09-08T00:00:00Z', updated_by: 'owner:server', canonical_id: 'priority_override:override-1' }, idempotent: false } })
+
+    const restoreRecommendedPriority = vi.fn(async (params) => ({ record: { id: params.id, target_id: 'candidate:stable-id', mode: 'set_priority' as const, label: 'Now', actor: 'owner:server', reason: 'Deadline', expires_at: null, review_id: null, review_at: null, version: 3, created_at: null, created_by: null, updated_at: null, updated_by: null, canonical_id: 'priority_override:override-1' }, restored: true as const, idempotent: false }))
+    await store.attach(Object.assign(gateway, { organizationCapabilities, listNeedsMePriorities, setPriorityOverride, restoreRecommendedPriority }), ['cmo'], true)
+    await store.open('cmo', 'stable-id')
+    expect(store.getSnapshot().priorityWritable).toBe(true)
+    expect(await store.setPriority({ label: 'Do first', reason: 'Material deadline', expiresAt: '2099-01-01T00:00:00Z' })).toBe(true)
+    expect(setPriorityOverride).toHaveBeenCalledWith({ profile: 'cmo', id: 'override-1', target_id: 'candidate:stable-id', mode: 'set_priority', label: 'Do first', reason: 'Material deadline', expires_at: '2099-01-01T00:00:00Z', review_id: null, review_at: null, expected_version: 1, idempotency_key: expect.any(String) })
+    expect(setPriorityOverride.mock.calls[0]?.[0]).not.toHaveProperty('actor')
+    expect(Object.fromEntries(store.getSnapshot().items.map((item) => [item.id, item.priority?.itemOrder]))).toEqual({ 'stable-id': 0, 'second-id': 1 })
+    store.close()
+    expect(Object.fromEntries(store.getSnapshot().items.map((item) => [item.id, item.priority?.itemOrder]))).toEqual({ 'stable-id': 1, 'second-id': 0 })
+    await store.open('cmo', 'stable-id')
+    expect(await store.restoreRecommended()).toBe(true)
+    expect(restoreRecommendedPriority).toHaveBeenCalledWith({ profile: 'cmo', id: 'override-1', expected_version: 2, idempotency_key: expect.any(String) })
+  })
+  it('keeps priority mutations disabled without owner mode even when methods exist', async () => {
+    const { gateway, store } = setup()
+    const organizationCapabilities = vi.fn()
+    await store.attach(Object.assign(gateway, { organizationCapabilities }), ['cmo'], false)
+    expect(store.getSnapshot().priorityWritable).toBe(false)
+    expect(organizationCapabilities).not.toHaveBeenCalled()
+  })
   it('reconnect refreshes selection by stable profile and id', async () => {
     const { gateway, store, revise } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id'); store.disconnect(); revise()
     await store.attach(gateway, ['cmo'])

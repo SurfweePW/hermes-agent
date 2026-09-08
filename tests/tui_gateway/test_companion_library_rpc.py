@@ -38,15 +38,18 @@ def library_context(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(server, "_current_profile_name", lambda: "atlas")
     monkeypatch.setenv("GATEWAY_RELAY_ID", "library-test-backend")
 
-    def configure(collections=None):
+    def configure(collections=None, *, limits=None):
         value = collections if collections is not None else {
             "docs": {"name": "Documents", "root": str(root)},
         }
+        profile_policy = {"collections": value}
+        if limits is not None:
+            profile_policy["limits"] = limits
         (home / "config.yaml").write_text(
             yaml.safe_dump(
                 {
                     "companion_library": {
-                        "profiles": {"atlas": {"collections": value}}
+                        "profiles": {"atlas": profile_policy}
                     }
                 }
             ),
@@ -224,6 +227,85 @@ def test_malformed_config_fails_closed_without_disclosing_parser_or_path(library
     assert list(ctx.home.glob("config.yaml.corrupt.*.bak")) == []
 
 
+def test_profile_resource_limits_are_passed_to_artifact_library(library_context):
+    ctx = library_context
+    limits = {
+        "max_file_size": 1024,
+        "max_scan_bytes": 2048,
+        "max_scan_files": 30,
+        "max_scan_depth": 4,
+        "max_retained_items": 20,
+        "max_retained_bytes": 4096,
+        "max_html_preview_size": 512,
+    }
+    ctx.configure(limits=limits)
+
+    library, _collections = companion_library._authorized_library(server, "atlas")
+
+    assert library is not None
+    assert {key: getattr(library, key) for key in limits} == limits
+
+
+def test_profile_scan_byte_limit_is_enforced_through_rpc(library_context):
+    ctx = library_context
+    (ctx.root / "one.txt").write_bytes(b"abc")
+    (ctx.root / "two.txt").write_bytes(b"def")
+    ctx.configure(limits={"max_scan_bytes": 5})
+
+    denied = rpc_call(ctx, "list")
+
+    assert denied["error"] == {"code": 4504, "message": "artifact unavailable"}
+    assert str(ctx.root) not in json.dumps(denied)
+
+
+@pytest.mark.parametrize(
+    "limits",
+    [
+        [],
+        {"profile_home": 1},
+        {"clock": 1},
+        {"unknown_limit": 1},
+        {"max_scan_bytes": True},
+        {"max_scan_bytes": 1.5},
+        {"max_scan_bytes": "1024"},
+        {"max_scan_bytes": 0},
+        {"max_scan_bytes": -1},
+    ],
+)
+def test_invalid_resource_limit_policy_fails_closed_without_path_disclosure(
+    library_context, limits,
+):
+    ctx = library_context
+    ctx.configure(limits=limits)
+
+    denied = rpc_call(ctx, "list")
+
+    assert denied["error"] == {
+        "code": 4403,
+        "message": "library authorization unavailable",
+    }
+    assert str(ctx.home) not in json.dumps(denied)
+    assert str(ctx.root) not in json.dumps(denied)
+
+
+@pytest.mark.parametrize("limit_name", sorted(companion_library.LIBRARY_LIMIT_CEILINGS))
+def test_resource_limit_policy_rejects_values_above_documented_ceiling(
+    library_context, limit_name,
+):
+    ctx = library_context
+    ctx.configure(
+        limits={limit_name: companion_library.LIBRARY_LIMIT_CEILINGS[limit_name] + 1}
+    )
+
+    denied = rpc_call(ctx, "list")
+
+    assert denied["error"] == {
+        "code": 4403,
+        "message": "library authorization unavailable",
+    }
+    assert str(ctx.home) not in json.dumps(denied)
+
+
 def test_list_search_filter_detail_and_retained_versions_are_profile_namespaced(
     library_context, monkeypatch,
 ):
@@ -351,6 +433,28 @@ def test_relationship_resolution_forwards_the_current_owner_lease(
     assert companion_library._relationship_exists(server, "projects", relationship, profile="atlas", backend="library-test-backend", owner_authorization=ctx.authorization)
     assert companion_library._relationship_exists(server, "topics", relationship, profile="atlas", backend="library-test-backend", owner_authorization=ctx.authorization)
     assert companion_library._relationship_exists(server, "sessions", relationship, profile="atlas", backend="library-test-backend", owner_authorization=ctx.authorization)
+    assert [entry[3] for entry in observed] == [ctx.authorization] * 3
+
+    observed.clear()
+    (ctx.root / "linked-evidence.txt").write_text("reviewed", encoding="utf-8")
+    [item] = call(ctx, "list")['items']
+    preview = call(ctx, "preview", artifact_id=item["artifact_id"], latest=True)
+    relationships = {
+        "projects": [relationship],
+        "topics": [relationship],
+        "sessions": [{**relationship, "relationship": "primary"}],
+    }
+    pinned = call(
+        ctx,
+        "pin_reviewed",
+        artifact_id=item["artifact_id"],
+        reviewed_descriptor=preview["descriptor"],
+        provenance={"review": "linked safe preview"},
+        relationships=relationships,
+    )
+
+    assert pinned["version"]["relationships"] == relationships
+    assert [entry[0] for entry in observed] == ["project", "topic", "session"]
     assert [entry[3] for entry in observed] == [ctx.authorization] * 3
 
 

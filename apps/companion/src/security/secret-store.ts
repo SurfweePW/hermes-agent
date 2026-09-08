@@ -1,3 +1,5 @@
+import type { CompanionOriginalRoute } from '../gateway/original-route'
+
 import { capacitorGatewayTokenBridge } from './capacitor-token-bridge'
 import type { OwnerAuthBridge } from './owner-auth'
 
@@ -15,9 +17,13 @@ export interface GatewayTokenBridge {
   reset(): Promise<void>
 }
 
+export interface OriginalRouteBridge {
+  openOriginalRoute(input: { route: CompanionOriginalRoute; profile: string; sessionId: string }): Promise<void>
+}
+
 declare global {
   interface Window {
-    hermesCompanion?: Readonly<{ gatewayToken: GatewayTokenBridge } & Partial<OwnerAuthBridge>>
+    hermesCompanion?: Readonly<{ gatewayToken: GatewayTokenBridge } & Partial<OwnerAuthBridge & OriginalRouteBridge>>
   }
 }
 

@@ -22,9 +22,11 @@ async function readyDirectoryStore() {
   return store
 }
 
+const libraryArtifactId = `art_${'a'.repeat(64)}`
+
 describe('App', () => {
   beforeEach(() => window.history.replaceState({}, '', '/'))
-  afterEach(() => vi.restoreAllMocks())
+  afterEach(() => {vi.useRealTimers(); vi.restoreAllMocks()})
   it('keeps durable work in Needs Me, shows the old-server boundary and preserves runtime attention', async () => {
     const store = await readyStore()
     render(<App store={store} />)
@@ -59,6 +61,24 @@ describe('App', () => {
     vi.advanceTimersByTime(30_000)
     expect(directoryRefresh).toHaveBeenCalledOnce()
     visibility.mockRestore()
+    vi.useRealTimers()
+  })
+
+  it('refreshes every persisted catalog without moving keyboard focus', async () => {
+    vi.useFakeTimers()
+    const store = await readyDirectoryStore()
+    const workRefresh = vi.spyOn(store.work, 'refresh')
+    const directoryRefresh = vi.spyOn(store.directory, 'refresh')
+    const attentionRefresh = vi.spyOn(store, 'refreshAttention')
+    render(<App store={store} />)
+    const navigation = screen.getAllByRole('button', { name: 'Work' })[0]
+    navigation.focus()
+
+    vi.advanceTimersByTime(30_000)
+    expect(workRefresh).toHaveBeenCalledOnce()
+    expect(directoryRefresh).toHaveBeenCalledOnce()
+    expect(attentionRefresh).toHaveBeenCalledOnce()
+    expect(document.activeElement).toBe(navigation)
     vi.useRealTimers()
   })
 
@@ -335,6 +355,38 @@ describe('App', () => {
 
     await waitFor(() => expect(openSession).toHaveBeenCalledTimes(2))
     expect(store.directory.getSnapshot().history?.session_id).toBe('synthetic-session-1')
+  })
+
+  it.each([
+    ['project', 'libraryProject', 'synthetic-project-1', { projects: [{ id: 'synthetic-project-1', title: '[SYNTHETIC QA] Companion project', backend_namespace: 'fixture-mac-mini', profile: 'atlas' }], topics: [], sessions: [] }],
+    ['topic', 'libraryTopic', 'synthetic-topic-1', { projects: [], topics: [{ id: 'synthetic-topic-1', title: '[SYNTHETIC QA] Companion launch', backend_namespace: 'fixture-organization-db', profile: 'atlas' }], sessions: [] }],
+    ['session', 'librarySession', 'synthetic-session-1', { projects: [], topics: [], sessions: [{ id: 'synthetic-session-1', title: '[SYNTHETIC QA] Desktop research session', backend_namespace: 'fixture-mac-mini', profile: 'atlas', relationship: 'primary' }] }]
+  ])('restores a validated %s relationship when Library is opened by direct URL', async (_kind, routeKey, relationId, relationships) => {
+    window.history.replaceState({}, '', `/?view=library&libraryProfile=atlas&${routeKey}=${relationId}&libraryArtifact=${libraryArtifactId}`)
+    const gateway = new FakeWorkGateway()
+    const pin = vi.spyOn(gateway, 'pinReviewedLibraryArtifact')
+    const store = createCompanionStore({ gatewayFactory: () => gateway, storage: { getItem: () => null, setItem: () => undefined } })
+    await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
+    render(<App store={store} />)
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Load safe preview' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Mark previewed version reviewed' }))
+
+    await waitFor(() => expect(pin).toHaveBeenCalledWith(expect.objectContaining({ relationships })))
+  })
+
+  it('fails closed when a direct Library relationship cannot be validated', async () => {
+    window.history.replaceState({}, '', `/?view=library&libraryProfile=atlas&libraryProject=missing-project&libraryArtifact=${libraryArtifactId}`)
+    const gateway = new FakeWorkGateway()
+    const pin = vi.spyOn(gateway, 'pinReviewedLibraryArtifact')
+    const store = createCompanionStore({ gatewayFactory: () => gateway, storage: { getItem: () => null, setItem: () => undefined } })
+    await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
+    render(<App store={store} />)
+
+    expect((await screen.findByRole('alert')).textContent).toMatch(/relationship.*could not be verified/i)
+    fireEvent.click(await screen.findByRole('button', { name: 'Load safe preview' }))
+    expect((await screen.findByRole('button', { name: 'Mark previewed version reviewed' })).hasAttribute('disabled')).toBe(true)
+    expect(pin).not.toHaveBeenCalled()
   })
 
   it('creates a selected teammate session and operates the fixture conversation', async () => {

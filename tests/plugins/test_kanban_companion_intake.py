@@ -12,6 +12,8 @@ from fastapi.testclient import TestClient
 
 from hermes_cli import kanban_db as kb
 from hermes_cli import kanban_db_connect as kbc
+from hermes_cli.companion_kanban_bridge import CompanionKanbanBridge
+from hermes_cli.companion_work_store import WorkStore
 from hermes_cli.dashboard_auth import TokenPrincipal, clear_providers, register_provider
 from hermes_cli.dashboard_auth import token_auth
 from plugins.dashboard_auth.kanban_intake import KanbanIntakeSecretProvider
@@ -115,6 +117,92 @@ def test_create_is_pinned_restricted_and_idempotent(intake):
         assert count == 1
     with kbc.connect_closing(board="other") as conn:
         assert kb.get_task(conn, task["id"]) is None
+
+
+def test_real_approved_work_bridge_creates_one_task_and_round_trips_completion(intake, tmp_path):
+    client, secret = intake
+
+    class RouteIntake:
+        def create(self, payload):
+            response = client.post(
+                ROUTE, headers=_headers(secret),
+                json={"operation": "create", "payload": payload},
+            )
+            assert response.status_code == 200, response.text
+            return response.json()["task"]
+
+        def get(self, task_id):
+            response = client.post(
+                ROUTE, headers=_headers(secret),
+                json={"operation": "get", "task_id": task_id},
+            )
+            assert response.status_code == 200, response.text
+            return response.json()["task"]
+
+    store = WorkStore(tmp_path / "companion-work.db", "hoffeecmo")
+    item = store.upsert("campaign:bridge-integration", {
+        "title": "Prepare campaign evidence pack",
+        "brief": "Internal preparation only.",
+        "evidence": ["fixture:source"],
+        "next_action": "Prepare the evidence pack; do not publish.",
+        "owner": "hoffeecmo",
+    })["item"]
+    item = store.propose(item["id"], item["version"])["item"]
+    item = store.decide(
+        item["id"], item["version"], item["revision"],
+        "approve_preparation", "integration-owner-decision",
+        human_identity="basic:pawel",
+    )["item"]
+    bridge = CompanionKanbanBridge(store, RouteIntake())
+
+    assert bridge.reconcile_once()["linked"] == 1
+    linked = store.get(item["id"])["item"]
+    assert linked["preparation_status"] == "linked_awaiting_triage"
+    task_id = linked["execution_link"]["execution_ref"].removeprefix("kanban:hoffee:")
+    with kbc.connect_closing(board="hoffee") as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM tasks WHERE idempotency_key = ?",
+            (item["handoff_key"],),
+        ).fetchone()["n"] == 1
+        assert kb.specify_triage_task(conn, task_id)
+        claimed = kb.claim_task(conn, task_id, claimer="companion-integration-test")
+        assert claimed is not None
+
+    assert bridge.reconcile_once()["updated"] == 1
+    preparing = store.get(item["id"])["item"]
+    assert preparing["state"] == "in_progress"
+    assert preparing["preparation_status"] == "preparing"
+    assert bridge.reconcile_once() == {
+        "examined": 1, "linked": 0, "updated": 0, "completed": 0, "errors": 0,
+    }
+
+    reopened = WorkStore(tmp_path / "companion-work.db", "hoffeecmo")
+    assert reopened.get(item["id"])["item"]["preparation_status"] == "preparing"
+    reopened_bridge = CompanionKanbanBridge(reopened, RouteIntake())
+    assert reopened_bridge.reconcile_once() == {
+        "examined": 1, "linked": 0, "updated": 0, "completed": 0, "errors": 0,
+    }
+    with kbc.connect_closing(board="hoffee") as conn:
+        assert kb.complete_task(
+            conn, task_id, result="fixture:prepared-evidence-pack",
+            expected_run_id=claimed.current_run_id,
+        )
+
+    outcome = reopened_bridge.reconcile_once()
+    assert outcome == {"examined": 1, "linked": 0, "updated": 1, "completed": 1, "errors": 0}
+    done = reopened.get(item["id"])["item"]
+    assert done["state"] == "done"
+    assert done["preparation_status"] == "prepared"
+    assert done["completion_evidence"] == ["fixture:prepared-evidence-pack"]
+    assert done["publication_status"] == "not_authorized"
+
+    final_store = WorkStore(tmp_path / "companion-work.db", "hoffeecmo")
+    persisted = final_store.get(item["id"])["item"]
+    assert persisted["state"] == "done"
+    assert persisted["preparation_status"] == "prepared"
+    assert CompanionKanbanBridge(final_store, RouteIntake()).reconcile_once() == {
+        "examined": 0, "linked": 0, "updated": 0, "completed": 0, "errors": 0,
+    }
 
 
 def test_get_uses_same_deterministic_shape(intake):

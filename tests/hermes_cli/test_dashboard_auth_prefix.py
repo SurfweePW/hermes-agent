@@ -48,6 +48,12 @@ HA_INGRESS_DASHBOARD_PREFIX = (
 )
 
 
+@pytest.fixture(autouse=True)
+def _isolate_dashboard_public_url(monkeypatch):
+    """Host configuration must not change request-reconstruction tests."""
+    monkeypatch.delenv("HERMES_DASHBOARD_PUBLIC_URL", raising=False)
+
+
 @pytest.fixture
 def gated_app_proxied():
     """web_server.app configured for gated mode with proxy_headers + a

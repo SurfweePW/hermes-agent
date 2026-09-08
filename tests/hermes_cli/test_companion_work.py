@@ -158,9 +158,26 @@ def test_snooze_due_and_digest_receipts_survive_reopen(tmp_path):
     card = proposed(store)
     consumer = 'daily-cmo'
     receipt = [{'id': card['id'], 'attention_key': card['attention_key']}]
-    assert store.digest(consumer)['items'] == [card]
-    assert store.digest_ack(consumer, receipt) == {'acknowledged': 1}
-    assert store.digest_ack(consumer, receipt) == {'acknowledged': 0}
+    pending = store.digest(consumer)
+    assert pending['items'] == [card]
+    assert pending['batch'] == {
+        'batch_id': pending['batch']['batch_id'],
+        'consumer': consumer,
+        'local_date': '2026-09-05',
+        'state': 'pending',
+        'item_count': 1,
+        'delivery_mode': 'external_receipt_only',
+        'os_notifications': 'unsupported',
+        'grants_authority': False,
+    }
+    acknowledged = store.digest_ack(consumer, receipt, pending['batch']['batch_id'])
+    assert acknowledged['acknowledged'] == 1
+    assert acknowledged['receipt']['batch_id'] == pending['batch']['batch_id']
+    assert acknowledged['receipt']['items'] == receipt
+    assert acknowledged['receipt']['delivery_mode'] == 'external_receipt_only'
+    assert acknowledged['receipt']['os_notifications'] == 'unsupported'
+    assert acknowledged['receipt']['grants_authority'] is False
+    assert store.digest_ack(consumer, receipt, pending['batch']['batch_id']) == acknowledged
     snoozed = decide(store, card, action='snooze', snoozed_until=(now[0] + timedelta(days=1)).isoformat())['item']
     assert not snoozed['attention_due']
     assert store.propose(snoozed['id'], snoozed['version'])['item'] == snoozed
@@ -178,6 +195,74 @@ def test_snooze_due_and_digest_receipts_survive_reopen(tmp_path):
     store.digest_ack(consumer, [{'id': due['id'], 'attention_key': due['attention_key']}])
     assert WorkStore(path, 'hoffeecmo', clock=lambda: now[0]).digest(consumer)['items'] == []
     assert len(store.digest('other-consumer')['items']) == 1
+
+
+def test_digest_reserves_one_stable_batch_per_local_day(tmp_path):
+    now = [datetime(2026, 9, 5, 10, tzinfo=timezone.utc)]
+    store = WorkStore(tmp_path / 'inbox.db', 'hoffeecmo', clock=lambda: now[0], timezone_name='Europe/Warsaw')
+    first = proposed(store, 'report:campaign-health')
+
+    original = store.digest('daily-owner')
+    assert original['items'] == [first]
+    assert store.digest('daily-owner') == original
+
+    # Identity is the profile/consumer/local-day reservation key, not the
+    # mutable set of cards present when a particular store first reserves it.
+    parallel = WorkStore(tmp_path / 'parallel.db', 'hoffeecmo', clock=lambda: now[0], timezone_name='Europe/Warsaw')
+    proposed(parallel, 'report:different-first-card')
+    assert parallel.digest('daily-owner')['batch']['batch_id'] == original['batch']['batch_id']
+
+    # A report-created card that arrives after the day's batch reservation is
+    # not silently folded into a second notification attempt for that day.
+    proposed(store, 'report:new-market')
+    assert store.digest('daily-owner') == original
+
+    receipt_items = [{'id': first['id'], 'attention_key': first['attention_key']}]
+    acknowledged = store.digest_ack(
+        'daily-owner', receipt_items, original['batch']['batch_id'],
+    )
+    reopened = WorkStore(store.path, 'hoffeecmo', clock=lambda: now[0], timezone_name='Europe/Warsaw')
+    assert reopened.digest('daily-owner')['batch']['state'] == 'acknowledged'
+    assert reopened.digest('daily-owner')['items'] == []
+    assert reopened.digest_ack(
+        'daily-owner', receipt_items, original['batch']['batch_id'],
+    ) == acknowledged
+
+    now[0] += timedelta(days=1)
+    tomorrow = reopened.digest('daily-owner')
+    assert tomorrow['batch']['batch_id'] != original['batch']['batch_id']
+    assert {item['source_key'] for item in tomorrow['items']} == {
+        'report:campaign-health', 'report:new-market',
+    }
+
+
+def test_digest_exact_ack_survives_local_midnight(tmp_path):
+    now = [datetime(2026, 9, 5, 21, 59, tzinfo=timezone.utc)]
+    store = WorkStore(
+        tmp_path / 'inbox.db', 'hoffeecmo', clock=lambda: now[0],
+        timezone_name='Europe/Warsaw',
+    )
+    card = proposed(store, 'report:late-delivery')
+    receipt_items = [{'id': card['id'], 'attention_key': card['attention_key']}]
+    yesterday = store.digest('daily-owner')['batch']
+
+    now[0] += timedelta(minutes=2)
+    today = store.digest('daily-owner')['batch']
+    assert today['local_date'] == '2026-09-06'
+    assert today['batch_id'] != yesterday['batch_id']
+
+    acknowledged = store.digest_ack(
+        'daily-owner', receipt_items, yesterday['batch_id'],
+    )
+    assert acknowledged['receipt']['batch_id'] == yesterday['batch_id']
+    assert acknowledged['receipt']['local_date'] == '2026-09-05'
+
+    current = WorkStore(
+        store.path, 'hoffeecmo', clock=lambda: now[0],
+        timezone_name='Europe/Warsaw',
+    ).digest('daily-owner')['batch']
+    assert current['batch_id'] == today['batch_id']
+    assert current['state'] == 'pending'
 
 
 def test_comment_durable_idempotent_no_approval_or_version_mutation(tmp_path):
@@ -259,6 +344,16 @@ def test_work_store_refuses_to_recreate_deleted_profile(tmp_path, monkeypatch):
 
     assert exc.value.code == 4404
     assert not profile_home.exists()
+
+
+def test_work_store_never_creates_a_missing_parent(tmp_path):
+    missing_home = tmp_path / 'missing-profile'
+
+    with pytest.raises(WorkError, match='profile unavailable') as exc:
+        WorkStore(missing_home / 'companion-work.db', 'worker')
+
+    assert exc.value.code == 4404
+    assert not missing_home.exists()
 
 
 def test_open_work_store_stops_writing_after_profile_is_tombstoned(tmp_path, monkeypatch):
@@ -767,7 +862,15 @@ def test_real_two_client_owner_login_rpc_revision_loop(work_transport):
     web, a, b = work_transport
     ta, tb = login_ticket(a), login_ticket(b)
     with a.websocket_connect('wss://work.example.test/api/ws?ticket=' + ta) as one, b.websocket_connect('wss://work.example.test/api/ws?ticket=' + tb) as two:
-        assert rpc(one, 'capabilities')['can_decide'] is True
+        capabilities = rpc(one, 'capabilities')
+        assert capabilities['can_decide'] is True
+        assert capabilities['notifications'] == {
+            'delivery_mode': 'external_receipt_only',
+            'batch_receipts': True,
+            'card_receipts': True,
+            'os_notifications': 'unsupported',
+            'grants_authority': False,
+        }
         c = rpc(one, 'upsert', {'source_key': 'semantic-campaign-key', 'payload': PAYLOAD})['item']
         c = rpc(one, 'propose', {'id': c['id'], 'expected_version': c['version']})['item']
         assert rpc(two, 'get', {'id': c['id']})['item'] == c
@@ -790,7 +893,7 @@ def test_real_two_client_owner_login_rpc_revision_loop(work_transport):
         assert rpc(one, 'get', {'id': c['id']})['item'] == approved['item']
         assert rpc(one, 'digest', {'consumer': 'daily'})['items'] == []
         rpc(two, 'get', {'id': c['id'], 'profile': '../other'}, error=-32602)
-        rpc(two, 'get', {'id': c['id'], 'profile': 'missing-profile'}, error=4404)
+        rpc(two, 'get', {'id': c['id'], 'profile': 'missing-profile'}, error=4403)
     # Reconnect is a fresh ticket, never reuse the consumed admission ticket.
     from starlette.websockets import WebSocketDisconnect
     with pytest.raises(WebSocketDisconnect):
@@ -799,6 +902,42 @@ def test_real_two_client_owner_login_rpc_revision_loop(work_transport):
     ticket = a.post('/api/auth/ws-ticket').json()['ticket']
     with a.websocket_connect('wss://work.example.test/api/ws?ticket=' + ticket) as reopened:
         assert len(rpc(reopened, 'get', {'id': c['id']})['decisions']) == 2
+
+
+def test_work_rpc_rejects_existing_profile_not_served_by_gateway(work_transport, monkeypatch):
+    from tui_gateway import server
+
+    monkeypatch.setattr(server, '_load_cfg', lambda: {})
+    _web, client, _ = work_transport
+    sibling = Path(os.environ['HERMES_HOME']) / 'profiles' / 'sibling'
+    sibling.mkdir(parents=True)
+    ticket = login_ticket(client)
+
+    with client.websocket_connect(
+        'wss://work.example.test/api/ws?ticket=' + ticket
+    ) as ws:
+        rpc(ws, 'list', {'profile': 'sibling'}, error=4403)
+    assert not (sibling / 'companion-work.db').exists()
+
+
+def test_work_rpc_allows_sibling_served_by_multiplex_gateway(work_transport, monkeypatch):
+    from tui_gateway import server
+
+    monkeypatch.setattr(server, '_load_cfg', lambda: {'multiplex_profiles': True})
+    _web, client, _ = work_transport
+    sibling = Path(os.environ['HERMES_HOME']) / 'profiles' / 'sibling'
+    sibling.mkdir(parents=True)
+    Path(os.environ['HERMES_HOME']).joinpath('config.yaml').write_text(
+        'multiplex_profiles: true\n'
+        'dashboard:\n  work_owner_identities: [stub:stub-user-1]\n'
+    )
+    ticket = login_ticket(client)
+
+    with client.websocket_connect(
+        'wss://work.example.test/api/ws?ticket=' + ticket
+    ) as ws:
+        assert rpc(ws, 'list', {'profile': 'sibling'})['items'] == []
+    assert (sibling / 'companion-work.db').is_file()
 
 
 def test_real_owner_logout_revokes_already_open_rpc_authority(work_transport):

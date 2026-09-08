@@ -16,7 +16,15 @@ import {
   validateLibraryProfiles
 } from '../features/library/library-types'
 
-import { validateNeedsMePriorities } from './organization-types'
+import {
+  type RestoreRecommendedParams,
+  type SetPriorityOverrideParams,
+  validateNeedsMePriorities,
+  validateOrganizationCapability,
+  validateRestoreRecommended,
+  validateSetPriorityOverride
+} from './organization-types'
+import { validateOriginalRoute } from './original-route'
 import type { TopicDetail, TopicListOptions, TopicListResult } from './topic-types'
 import { validateTopicDetail, validateTopicList } from './topic-validation'
 import type {
@@ -323,6 +331,7 @@ export function validateCompanionSessionHistory(value: unknown, profile: string,
   })
 
   const warningList = warnings(value.warnings, method)
+  const originalRoute = validateOriginalRoute(value.original_route, profile, id)
 
   return {
     session_id: id,
@@ -333,7 +342,8 @@ export function validateCompanionSessionHistory(value: unknown, profile: string,
     linked_work_available: false,
     has_more: value.has_more as boolean,
     next_cursor: optionalCursor(value, method),
-    coverage: { complete: value.coverage === 'complete', freshness: timestamp(value.as_of, method), message: warningList.join(' ') || null }
+    coverage: { complete: value.coverage === 'complete', freshness: timestamp(value.as_of, method), message: warningList.join(' ') || null },
+    ...(originalRoute ? { original_route: originalRoute } : {})
   }
 }
 
@@ -682,8 +692,20 @@ export class CompanionClient {
     return this.gateway.request<unknown>('work.capabilities', { profile }).then(validateWorkCapability)
   }
 
+  organizationCapabilities() {
+    return this.gateway.request<unknown>('companion.organization.capabilities', {}).then(validateOrganizationCapability)
+  }
+
   listNeedsMePriorities(profile: string, reviewId?: string, groupBy: 'topic' | 'session' | 'project' = 'topic') {
     return this.gateway.request<unknown>('companion.organization.needs_me', { profile, group_by: groupBy, ...(reviewId ? { review_id: reviewId } : {}) }).then((value) => validateNeedsMePriorities(value, profile))
+  }
+
+  setPriorityOverride(params: SetPriorityOverrideParams) {
+    return this.gateway.request<unknown>('companion.priorities.override_set', { ...params }).then(validateSetPriorityOverride)
+  }
+
+  restoreRecommendedPriority(params: RestoreRecommendedParams) {
+    return this.gateway.request<unknown>('companion.priorities.restore_recommended', { ...params }).then(validateRestoreRecommended)
   }
 
   listWork(profile: string) {

@@ -11,12 +11,14 @@ import pytest
 from hermes_cli.dashboard_auth.ws_tickets import OwnerAuthorizationLease
 from hermes_cli.companion_organization import (
     Benefit,
+    BusinessProject,
     Burden,
     Confidence,
     CostOfDelay,
     DependencyUnblocking,
     OrganizationStore,
     OutcomeAssessment,
+    PriorityOverride,
     Reversibility,
     SourceNamespace,
     SourceProjectRef,
@@ -632,3 +634,66 @@ def test_priority_project_group_uses_only_authorized_nested_reference():
     assert group_id == f"project:{authorized.canonical_id}"
     assert group["id"] == authorized.canonical_id
     assert "foreign-project-secret" not in json.dumps(group)
+
+
+def test_priority_projection_preserves_override_version_and_finds_unbound_target():
+    override = PriorityOverride(
+        id="override-unbound",
+        target_id="topics-test-backend:atlas:work:card-unbound",
+        mode="set_priority",
+        label="Do first",
+        actor="human:owner",
+        reason="Deadline",
+        expires_at="2099-01-01T00:00:00+00:00",
+        version=3,
+    )
+
+    found = companion_priorities._override_for(
+        None, None, [override], override.target_id
+    )
+
+    assert found is override
+    assert companion_priorities._override(found, NOW, None)["version"] == 3
+
+
+def test_priority_project_group_uses_explicit_business_project_assignment():
+    namespace = SourceNamespace("topics-test-backend", "atlas")
+    business = BusinessProject(
+        id="business-1",
+        collection="hoffee",
+        name="Launch",
+        objective="Ship the launch",
+    )
+    topic = Topic(
+        id="topic",
+        collection="hoffee",
+        name="Conversion",
+        objective="Improve demand",
+        primary_business_project_id=business.id,
+    )
+    binding = WorkBinding(
+        id="binding",
+        source_namespace=namespace,
+        work_kind="card",
+        source_work_id="card",
+        primary_topic_id=topic.id,
+        attributed_by="human:owner",
+    )
+
+    group_id, group = companion_priorities._group_for(
+        binding,
+        {topic.id: topic},
+        "project",
+        "topics-test-backend",
+        frozenset({"atlas"}),
+        {business.id: business},
+    )
+
+    assert group_id == f"project:{business.canonical_id}"
+    assert group == {
+        "kind": "project",
+        "id": business.canonical_id,
+        "name": "Launch",
+        "collection": "hoffee",
+        "objective": "Ship the launch",
+    }

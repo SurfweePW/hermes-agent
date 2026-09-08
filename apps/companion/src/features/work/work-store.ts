@@ -1,7 +1,7 @@
 import type { OrganizationGateway } from '../../gateway/organization-types'
 import type { WorkCapability, WorkCard, WorkDetail, WorkGateway } from '../../gateway/work-types'
 
-import type { WorkCardView, WorkDecisionInput, WorkInboxProps } from './work-inbox'
+import type { WorkCardView, WorkDecisionInput, WorkInboxProps, WorkPriorityInput } from './work-inbox'
 
 export interface WorkSnapshot {
   items: readonly WorkCardView[]
@@ -10,13 +10,14 @@ export interface WorkSnapshot {
   pending: boolean
   message: string | null
   groupBy: 'topic' | 'session' | 'project'
+  priorityWritable: boolean
   sources: readonly WorkSourceState[]
 }
 export interface WorkSourceState { profile: string; incomplete: boolean; status: 'verified' | 'unsupported' | 'error'; lastSuccess: string | null; message: string | null }
 export interface WorkStore {
   getSnapshot(): WorkSnapshot
   subscribe(listener: () => void): () => void
-  attach(gateway: Partial<WorkGateway & OrganizationGateway>, profiles: string[]): Promise<void>
+  attach(gateway: Partial<WorkGateway & OrganizationGateway>, profiles: string[], ownerAuthorized?: boolean): Promise<void>
   disconnect(): void
   reset(): void
   refresh(): Promise<void>
@@ -25,8 +26,11 @@ export interface WorkStore {
   close(): void
   decide(input: WorkDecisionInput): Promise<boolean>
   comment(text: string): Promise<boolean>
+  setPriority(input: WorkPriorityInput): Promise<boolean>
+  restoreRecommended(): Promise<boolean>
 }
 const key = (profile: string, id: string) => JSON.stringify([profile, id])
+type PriorityView = NonNullable<WorkCardView['priority']>
 
 function errorCode(error: unknown): number | undefined {
   return typeof error === 'object' && error !== null && 'code' in error ? Number(error.code) : undefined
@@ -70,14 +74,16 @@ function view(card: WorkCard, capability: WorkCapability | undefined, detail?: W
 
 /** In-memory verified projection only. Server owns all business state. */
 export function createWorkStore(): WorkStore {
-  let snapshot: WorkSnapshot = { items: [], selected: null, status: 'loading', pending: false, message: null, groupBy: 'topic', sources: [] }
+  let snapshot: WorkSnapshot = { items: [], selected: null, status: 'loading', pending: false, message: null, groupBy: 'topic', priorityWritable: false, sources: [] }
   const listeners = new Set<() => void>()
   let gateway: (WorkGateway & Partial<OrganizationGateway>) | null = null
   let profiles: string[] = []
   let epoch = 0
   let cards = new Map<string, WorkCard>()
-  let priorities = new Map<string, WorkCardView['priority']>()
+  let priorities = new Map<string, PriorityView>()
+  let latestPriorities = new Map<string, PriorityView>()
   let capabilities = new Map<string, WorkCapability>()
+  let priorityWritable = false
   let detail: WorkDetail | null = null
   let selection: { profile: string; id: string } | null = null
   let sourceStates = new Map<string, WorkSourceState>()
@@ -95,9 +101,10 @@ export function createWorkStore(): WorkStore {
 
   const purgeUnauthorized = () => {
     ++epoch; gateway = null; profiles = []
-    cards.clear(); priorities.clear(); capabilities.clear(); sourceStates.clear()
+    cards.clear(); priorities.clear(); latestPriorities.clear(); capabilities.clear(); sourceStates.clear()
+    priorityWritable = false
     detail = null; selection = null
-    publish({ items: [], selected: null, status: 'error', pending: false, sources: [], message: 'This connection is not authorized to access work. Reconnect with a human-authenticated dashboard login.' })
+    publish({ items: [], selected: null, status: 'error', pending: false, priorityWritable: false, sources: [], message: 'This connection is not authorized to access work. Reconnect with a human-authenticated dashboard login.' })
   }
 
   const refresh = async (afterMutation = false): Promise<void> => {
@@ -142,12 +149,38 @@ export function createWorkStore(): WorkStore {
         if (JSON.parse(existingKey)[0] === response.profile) {cards.delete(existingKey)}
       }
 
-      for (const existingKey of [...priorities.keys()]) {
-        if (JSON.parse(existingKey)[0] === response.profile) {priorities.delete(existingKey)}
+      for (const existingKey of [...latestPriorities.keys()]) {
+        if (JSON.parse(existingKey)[0] === response.profile) {latestPriorities.delete(existingKey)}
       }
 
+      const incoming = new Map<string, PriorityView>()
+
       for (const card of response.list.items) {cards.set(key(card.profile, card.id), card)}
-      response.recommended?.groups.forEach((group, groupOrder) => group.items.forEach((item, itemOrder) => priorities.set(key(item.profile, item.work_id), { ...item, topicName: group.group.name, ...(group.group.collection ? { topicCollection: group.group.collection } : {}), groupOrder, itemOrder })))
+      response.recommended?.groups.forEach((group, groupOrder) => group.items.forEach((item, itemOrder) => incoming.set(key(item.profile, item.work_id), { ...item, topicName: group.group.name, ...(group.group.collection ? { topicCollection: group.group.collection } : {}), groupOrder, itemOrder })))
+
+      for (const [priorityKey, priority] of incoming) {latestPriorities.set(priorityKey, priority)}
+
+      if (selection) {
+        for (const existingKey of [...priorities.keys()]) {
+          if (JSON.parse(existingKey)[0] === response.profile && !incoming.has(existingKey)) {priorities.delete(existingKey)}
+        }
+
+        for (const [priorityKey, priority] of incoming) {
+          const displayed = priorities.get(priorityKey)
+          priorities.set(priorityKey, displayed ? {
+            ...priority,
+            groupOrder: displayed.groupOrder,
+            itemOrder: displayed.itemOrder
+          } : priority)
+        }
+      } else {
+        for (const existingKey of [...priorities.keys()]) {
+          if (JSON.parse(existingKey)[0] === response.profile) {priorities.delete(existingKey)}
+        }
+
+        for (const [priorityKey, priority] of incoming) {priorities.set(priorityKey, priority)}
+      }
+
       capabilities.set(response.profile, response.capability)
       sourceStates.set(response.profile, { profile: response.profile, incomplete: false, status: 'verified', lastSuccess: refreshedAt, message: null })
     }
@@ -173,7 +206,80 @@ export function createWorkStore(): WorkStore {
     if (detail) {cards.set(key(detail.item.profile, detail.item.id), detail.item)}
     const reasons = [...new Set(successful.filter(({ capability }) => !capability.can_decide).map(({ capability }) => capability.reason || 'Human-authenticated dashboard login is required for business decisions.'))]
     const status = successful.length ? 'verified' : failed.every(({ error }) => errorCode(error) === -32601) ? 'unsupported' : 'error'
-    publish({ ...projection(), status, sources: profiles.map((profile) => sourceStates.get(profile)!).filter(Boolean), message: reasons.join(' ') || null })
+    publish({ ...projection(), status, priorityWritable, sources: profiles.map((profile) => sourceStates.get(profile)!).filter(Boolean), message: reasons.join(' ') || null })
+  }
+
+  const mutatePriority = async (input?: WorkPriorityInput): Promise<boolean> => {
+    const client = gateway
+    const current = detail?.item
+    const currentPriority = current && priorities.get(key(current.profile, current.id))
+    const existing = currentPriority?.override
+
+    if (!client || !current || !currentPriority || !priorityWritable || snapshot.status !== 'verified' || snapshot.pending
+      || !client.setPriorityOverride || !client.restoreRecommendedPriority) {return false}
+
+    if (input && (!input.label.trim() || !input.reason.trim() || !input.expiresAt)) {return false}
+
+    if (!input && (!existing?.active || !existing.version)) {return false}
+
+    const generation = ++epoch
+    publish({ pending: true, message: null })
+
+    try {
+      const result = input
+        ? await client.setPriorityOverride({
+            profile: current.profile,
+            id: existing?.id ?? crypto.randomUUID(),
+            target_id: currentPriority.candidate_id,
+            mode: 'set_priority',
+            label: input.label.trim(),
+            reason: input.reason.trim(),
+            expires_at: input.expiresAt,
+            review_id: null,
+            review_at: null,
+            expected_version: existing?.version ?? 0,
+            idempotency_key: crypto.randomUUID()
+          })
+        : await client.restoreRecommendedPriority({ profile: current.profile, id: existing!.id, expected_version: existing!.version!, idempotency_key: crypto.randomUUID() })
+
+      if (generation !== epoch || gateway !== client) {return false}
+      const priorityKey = key(current.profile, current.id)
+      const displayed = priorities.get(priorityKey)
+
+      if (displayed) {
+        priorities.set(priorityKey, {
+          ...displayed,
+          override: {
+            id: result.record.id, version: result.record.version, mode: result.record.mode,
+            label: result.record.label, actor: result.record.actor, reason: result.record.reason,
+            expires_at: result.record.expires_at, review_id: result.record.review_id,
+            review_at: result.record.review_at, active: Boolean(input)
+          }
+        })
+      }
+
+      await refresh(true)
+
+      if (gateway !== client) {return false}
+      publish({ pending: false })
+
+      if (snapshot.status !== 'verified') {return false}
+      publish({ message: input ? 'Priority saved and verified from the server.' : 'Recommended priority restored and verified from the server.' })
+
+      return true
+    } catch (error) {
+      if (generation !== epoch || gateway !== client) {return false}
+      publish({ pending: false })
+
+      if (errorCode(error) === 4403) {purgeUnauthorized()} else if (errorCode(error) === 4090) {
+        await refresh()
+        publish({ message: 'This priority changed. The latest verified version was loaded; nothing was automatically retried.' })
+      } else {
+        publish({ status: 'error', message: 'Priority save could not be verified. Refresh before trying again; it may already have reached the server.' })
+      }
+
+      return false
+    }
   }
 
   const mutate = async (input: WorkDecisionInput | { text: string }): Promise<boolean> => {
@@ -231,7 +337,7 @@ export function createWorkStore(): WorkStore {
     subscribe(listener) {listeners.add(listener);
 
  return () => {listeners.delete(listener)}},
-    async attach(candidate, nextProfiles) {
+    async attach(candidate, nextProfiles, ownerAuthorized = false) {
       ++epoch
       profiles = [...new Set(nextProfiles)]
 
@@ -243,11 +349,22 @@ export function createWorkStore(): WorkStore {
       }
 
       gateway = candidate as WorkGateway & Partial<OrganizationGateway>
-      publish({ pending: false })
+      priorityWritable = false
+
+      if (ownerAuthorized && candidate.organizationCapabilities && candidate.setPriorityOverride && candidate.restoreRecommendedPriority) {
+        try {
+          const capability = await candidate.organizationCapabilities()
+          priorityWritable = capability.owner_authorization && !capability.read_only
+            && capability.mutation_methods.includes('companion.priorities.override_set')
+            && capability.mutation_methods.includes('companion.priorities.restore_recommended')
+        } catch { priorityWritable = false }
+      }
+
+      publish({ pending: false, priorityWritable })
       await refresh()
     },
     disconnect() {++epoch; gateway = null; publish({ status: 'offline', pending: false })},
-    reset() {++epoch; gateway = null; cards.clear(); priorities.clear(); capabilities.clear(); sourceStates.clear(); detail = null; selection = null; publish({ items: [], selected: null, status: 'loading', pending: false, message: null, groupBy: 'topic', sources: [] })},
+    reset() {++epoch; gateway = null; cards.clear(); priorities.clear(); latestPriorities.clear(); capabilities.clear(); sourceStates.clear(); priorityWritable = false; detail = null; selection = null; publish({ items: [], selected: null, status: 'loading', pending: false, message: null, groupBy: 'topic', priorityWritable: false, sources: [] })},
     refresh,
     async setGroupBy(groupBy) {
       if (snapshot.groupBy === groupBy || snapshot.pending) {return}
@@ -264,8 +381,10 @@ export function createWorkStore(): WorkStore {
       publish({ selected: null })
       await refresh()
     },
-    close() {if (snapshot.pending) {return}; selection = null; detail = null; ++epoch; publish({ selected: null }); void refresh()},
+    close() {if (snapshot.pending) {return}; selection = null; detail = null; ++epoch; priorities = new Map(latestPriorities); publish({ ...projection(), selected: null }); void refresh()},
     decide: (input) => mutate(input),
-    comment: (text) => mutate({ text })
+    comment: (text) => mutate({ text }),
+    setPriority: (input) => mutatePriority(input),
+    restoreRecommended: () => mutatePriority()
   }
 }

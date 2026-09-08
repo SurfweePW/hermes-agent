@@ -207,6 +207,35 @@ def test_native_authorize_rejects_non_loopback_redirect(gated_client):
     assert "loopback" in r.json()["detail"].lower()
 
 
+def test_oauth_callback_accepts_legacy_slotted_cookie(gated_client):
+    """A flow emitted by the retired 16-slot writer survives an upgrade."""
+    import hashlib
+
+    from hermes_cli.dashboard_auth.cookies import PKCE_COOKIE
+
+    start = gated_client.get("/auth/login", params={"provider": "stub"})
+    callback_params = parse_qs(urlparse(start.headers["location"]).query)
+    state = callback_params["state"][0]
+    legacy_value = start.cookies.get(f"__Host-{PKCE_COOKIE}")
+    assert legacy_value
+    old_slot = int.from_bytes(hashlib.sha256(state.encode()).digest()[:8], "big") % 16
+    old_name = f"__Host-{PKCE_COOKIE}_flow_{old_slot:02x}"
+    gated_client.cookies.clear()
+    gated_client.cookies.set(old_name, legacy_value, path="/")
+
+    callback = gated_client.get(
+        "/auth/callback",
+        params={
+            "code": callback_params["code"][0],
+            "state": state,
+        },
+    )
+
+    assert callback.status_code == 302, callback.text
+    assert callback.headers["location"] == "/"
+    assert "hermes_session_at" in callback.headers.get("set-cookie", "")
+
+
 # ---------------------------------------------------------------------------
 # Empty-provider auto-select (the desktop omits ``provider``; the gateway
 # picks when there is exactly one brokerable candidate) — regression #78906
@@ -458,6 +487,28 @@ def test_native_authorize_password_provider_redirects_to_login(
     assert "broker" in parse_pkce_payload(wire_value)
 
 
+def test_native_password_login_page_preserves_flow_selector(pw_gated_client):
+    """The rendered form must submit the exact native flow it was opened for."""
+    _verifier, challenge = _make_pkce()
+    start = pw_gated_client.get(
+        "/auth/native/authorize",
+        params={
+            "provider": "testpw",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "redirect_uri": "http://127.0.0.1:53999/cb",
+            "state": "desk-state",
+        },
+    )
+    flow = parse_qs(urlparse(start.headers["location"]).query)["flow"][0]
+
+    login = pw_gated_client.get(start.headers["location"], cookies=start.cookies)
+
+    assert login.status_code == 200
+    assert f'name="flow" value="{flow}"' in login.text
+    assert "flow: (form.querySelector('input[name=flow]')" in login.text
+
+
 def _start_native_password_login(client, *, challenge, state="desk-state"):
     r = client.get(
         "/auth/native/authorize",
@@ -621,6 +672,97 @@ def test_password_login_without_broker_still_mints_cookies(pw_gated_client):
     assert r.json()["next"] == "/"
     set_cookie = r.headers.get("set-cookie", "")
     assert "hermes_session_at" in set_cookie
+
+
+def test_browser_password_login_ignores_ambient_native_migration_cookie(
+    pw_gated_client,
+):
+    """A new browser form is not reclassified by a concurrent native flow.
+
+    New forms always submit the hidden ``flow`` field, including its empty
+    value.  Only old forms that omit the field may use the unsuffixed migration
+    cookie, which keeps an in-flight pre-upgrade native login working without
+    letting it hijack a new browser login in another tab.
+    """
+    verifier, challenge = _make_pkce()
+    native_start = pw_gated_client.get(
+        "/auth/native/authorize",
+        params={
+            "provider": "testpw",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "redirect_uri": "http://127.0.0.1:53999/cb",
+            "state": "concurrent-native",
+        },
+    )
+    flow = parse_qs(urlparse(native_start.headers["location"]).query)["flow"][0]
+
+    browser = pw_gated_client.post(
+        "/auth/password-login",
+        json={
+            "provider": "testpw",
+            "username": "admin",
+            "password": "hunter2",
+            "flow": "",
+        },
+    )
+
+    assert browser.status_code == 200, browser.text
+    assert browser.json()["next"] == "/"
+    assert "hermes_session_at" in browser.headers.get("set-cookie", "")
+
+    native = pw_gated_client.post(
+        "/auth/password-login",
+        json={
+            "provider": "testpw",
+            "username": "admin",
+            "password": "hunter2",
+            "flow": flow,
+        },
+    )
+    assert native.status_code == 200, native.text
+    result = parse_qs(urlparse(native.json()["next"]).query)
+    assert result["state"] == ["concurrent-native"]
+    token = pw_gated_client.post(
+        "/auth/native/token",
+        json={"code": result["code"][0], "code_verifier": verifier},
+    )
+    assert token.status_code == 200, token.text
+
+
+def test_legacy_unsuffixed_native_password_cookie_survives_upgrade(pw_gated_client):
+    """A password flow started before rollout remains completable after it."""
+    from hermes_cli.dashboard_auth.cookies import PKCE_COOKIE
+
+    verifier, challenge = _make_pkce()
+    start = pw_gated_client.get(
+        "/auth/native/authorize",
+        params={
+            "provider": "testpw",
+            "code_challenge": challenge,
+            "code_challenge_method": "S256",
+            "redirect_uri": "http://127.0.0.1:53999/cb",
+            "state": "legacy-desktop",
+        },
+    )
+    legacy_value = start.cookies.get(f"__Host-{PKCE_COOKIE}")
+    assert legacy_value
+    pw_gated_client.cookies.clear()
+    pw_gated_client.cookies.set(f"__Host-{PKCE_COOKIE}", legacy_value, path="/")
+
+    response = pw_gated_client.post(
+        "/auth/password-login",
+        json={"provider": "testpw", "username": "admin", "password": "hunter2"},
+    )
+
+    assert response.status_code == 200, response.text
+    result = parse_qs(urlparse(response.json()["next"]).query)
+    assert result["state"] == ["legacy-desktop"]
+    token = pw_gated_client.post(
+        "/auth/native/token",
+        json={"code": result["code"][0], "code_verifier": verifier},
+    )
+    assert token.status_code == 200, token.text
 
 
 # ---------------------------------------------------------------------------

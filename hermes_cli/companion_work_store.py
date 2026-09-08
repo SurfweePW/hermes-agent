@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from datetime import datetime, timezone
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -15,7 +16,7 @@ import sqlite3
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from hermes_constants import mkdir_under_hermes_home
+from hermes_constants import assert_named_profile_home_live
 
 STATES = frozenset({'ideas', 'in_progress', 'needs_me', 'done', 'declined'})
 ACTIONS = frozenset({'approve_preparation', 'request_changes', 'snooze', 'decline'})
@@ -198,11 +199,17 @@ class WorkStore:
             db.execute('''CREATE TABLE IF NOT EXISTS work_digest_receipts (
                 consumer TEXT NOT NULL, card_id TEXT NOT NULL, attention_key TEXT NOT NULL,
                 PRIMARY KEY(consumer, card_id, attention_key))''')
+            db.execute('''CREATE TABLE IF NOT EXISTS work_digest_batches (
+                consumer TEXT NOT NULL, local_date TEXT NOT NULL, batch_id TEXT UNIQUE NOT NULL,
+                items TEXT NOT NULL, created_at TEXT NOT NULL, acknowledged_at TEXT,
+                PRIMARY KEY(consumer, local_date))''')
         self.path.chmod(0o600)
 
     def _ensure_profile_available(self):
         try:
-            mkdir_under_hermes_home(self.path.parent)
+            assert_named_profile_home_live(self.path.parent)
+            if not self.path.parent.is_dir():
+                raise FileNotFoundError(self.path.parent)
         except FileNotFoundError as exc:
             raise WorkError('profile unavailable', 4404) from exc
 
@@ -523,17 +530,128 @@ class WorkStore:
                        (self._now(), canonical(tracker['result_evidence']), card_id))
             return {'item': self._card(self._row(db, card_id))}
 
-    def digest(self, consumer):
-        text(consumer, 'consumer', 200)
-        with self._tx() as db:
-            cards = [self._card(r) for r in db.execute("SELECT * FROM work_cards WHERE state='needs_me' ORDER BY updated_at, id")]
-            items = [c for c in cards if c['attention_due'] and not db.execute(
-                'SELECT 1 FROM work_digest_receipts WHERE consumer=? AND card_id=? AND attention_key=?',
-                (consumer, c['id'], c['attention_key'].split(':', 1)[0])).fetchone()]
-            return {'items': items}
+    def _local_date(self):
+        return str(self.clock().astimezone(self.timezone).date())
 
-    def digest_ack(self, consumer, items):
-        text(consumer, 'consumer', 200)
+    def _digest_cards(self, db, consumer):
+        cards = [self._card(r) for r in db.execute(
+            "SELECT * FROM work_cards WHERE state='needs_me' ORDER BY updated_at, id"
+        )]
+        return [c for c in cards if c['attention_due'] and not db.execute(
+            'SELECT 1 FROM work_digest_receipts WHERE consumer=? AND card_id=? AND attention_key=?',
+            (consumer, c['id'], c['attention_key'].split(':', 1)[0]),
+        ).fetchone()]
+
+    @staticmethod
+    def _digest_refs(cards):
+        return sorted(
+            ({'id': card['id'], 'attention_key': card['attention_key']} for card in cards),
+            key=lambda item: (item['id'], item['attention_key']),
+        )
+
+    def _digest_batch_id(self, consumer, local_date):
+        payload = canonical({
+            'profile': self.profile,
+            'consumer': consumer,
+            'local_date': local_date,
+        })
+        return 'digest_' + hashlib.sha256(payload.encode('utf-8')).hexdigest()
+
+    @staticmethod
+    def _batch_projection(row, state, item_count):
+        result = {
+            'batch_id': row['batch_id'],
+            'consumer': row['consumer'],
+            'local_date': row['local_date'],
+            'state': state,
+            'item_count': item_count,
+            'delivery_mode': 'external_receipt_only',
+            'os_notifications': 'unsupported',
+            'grants_authority': False,
+        }
+        if row['acknowledged_at']:
+            result['acknowledged_at'] = row['acknowledged_at']
+        return result
+
+    def _receipt(self, row, items):
+        return {
+            **self._batch_projection(row, 'acknowledged', len(items)),
+            'items': items,
+        }
+
+    def _current_batch_cards(self, db, refs):
+        cards = []
+        for item in refs:
+            try:
+                card = self._card(self._row(db, item['id']))
+            except WorkError:
+                return None
+            if (not card['attention_due'] or
+                    card['attention_key'] != item['attention_key']):
+                return None
+            cards.append(card)
+        return cards
+
+    def _acknowledgeable_batch_cards(self, db, refs, local_date):
+        cards = []
+        for item in refs:
+            try:
+                row = self._row(db, item['id'])
+            except WorkError:
+                return None
+            card = self._card(row)
+            expected_key = f"{local_date}:{row['revision']}:{row['attention_generation']}"
+            if not card['attention_due'] or item['attention_key'] != expected_key:
+                return None
+            cards.append(card)
+        return cards
+
+    def digest(self, consumer):
+        consumer = text(consumer, 'consumer', 200)
+        local_date = self._local_date()
+        with self._tx() as db:
+            row = db.execute(
+                'SELECT * FROM work_digest_batches WHERE consumer=? AND local_date=?',
+                (consumer, local_date),
+            ).fetchone()
+            if row is None:
+                cards = self._digest_cards(db, consumer)
+                if not cards:
+                    return {'items': [], 'batch': None}
+                refs = self._digest_refs(cards)
+                db.execute(
+                    'INSERT INTO work_digest_batches VALUES (?,?,?,?,?,NULL)',
+                    (consumer, local_date, self._digest_batch_id(consumer, local_date),
+                     canonical(refs), self._now()),
+                )
+                row = db.execute(
+                    'SELECT * FROM work_digest_batches WHERE consumer=? AND local_date=?',
+                    (consumer, local_date),
+                ).fetchone()
+                by_id = {card['id']: card for card in cards}
+                cards = [by_id[item['id']] for item in refs]
+            else:
+                refs = json.loads(row['items'])
+                if row['acknowledged_at']:
+                    return {
+                        'items': [],
+                        'batch': self._batch_projection(row, 'acknowledged', len(refs)),
+                    }
+                cards = self._current_batch_cards(db, refs)
+                if cards is None:
+                    return {
+                        'items': [],
+                        'batch': self._batch_projection(row, 'stale', len(refs)),
+                    }
+            return {
+                'items': cards,
+                'batch': self._batch_projection(row, 'pending', len(refs)),
+            }
+
+    def digest_ack(self, consumer, items, batch_id=None):
+        consumer = text(consumer, 'consumer', 200)
+        if batch_id is not None:
+            batch_id = text(batch_id, 'batch_id', 100)
         if not isinstance(items, list) or len(items) > 1000:
             raise WorkError('items must be an array (max 1000)', -32602)
         checked_items = []
@@ -544,12 +662,59 @@ class WorkStore:
                 'id': text(item['id'], 'id', 100),
                 'attention_key': text(item['attention_key'], 'attention_key', 200),
             })
+        checked_items.sort(key=lambda item: (item['id'], item['attention_key']))
+        local_date = self._local_date()
         with self._tx() as db:
-            acknowledged = 0
-            for item in checked_items:
-                card = self._card(self._row(db, item['id']))
-                if not card['attention_due'] or card['attention_key'] != item['attention_key']:
-                    raise WorkError('stale digest attention key')
-                acknowledged += db.execute('INSERT OR IGNORE INTO work_digest_receipts VALUES (?,?,?)',
-                                           (consumer, card['id'], card['attention_key'].split(':', 1)[0])).rowcount
-            return {'acknowledged': acknowledged}
+            if batch_id is None:
+                row = db.execute(
+                    'SELECT * FROM work_digest_batches WHERE consumer=? AND local_date=?',
+                    (consumer, local_date),
+                ).fetchone()
+            else:
+                row = db.execute(
+                    'SELECT * FROM work_digest_batches WHERE consumer=? AND batch_id=?',
+                    (consumer, batch_id),
+                ).fetchone()
+                if row is None:
+                    row = db.execute(
+                        'SELECT * FROM work_digest_batches WHERE consumer=? AND local_date=?',
+                        (consumer, local_date),
+                    ).fetchone()
+            if row is None:
+                if not checked_items:
+                    raise WorkError('cannot acknowledge an empty digest batch', -32602)
+                generated = self._digest_batch_id(consumer, local_date)
+                if batch_id is not None and batch_id != generated:
+                    raise WorkError('digest batch receipt does not match the reserved batch')
+                db.execute(
+                    'INSERT INTO work_digest_batches VALUES (?,?,?,?,?,NULL)',
+                    (consumer, local_date, generated, canonical(checked_items), self._now()),
+                )
+                row = db.execute(
+                    'SELECT * FROM work_digest_batches WHERE consumer=? AND local_date=?',
+                    (consumer, local_date),
+                ).fetchone()
+            refs = json.loads(row['items'])
+            if batch_id is not None and batch_id != row['batch_id']:
+                raise WorkError('digest batch receipt does not match the reserved batch')
+            if refs != checked_items:
+                raise WorkError('stale digest receipt items do not match the reserved batch')
+            if row['acknowledged_at']:
+                return {'acknowledged': len(refs), 'receipt': self._receipt(row, refs)}
+            if self._acknowledgeable_batch_cards(db, refs, row['local_date']) is None:
+                raise WorkError('stale digest attention key')
+            for item in refs:
+                db.execute(
+                    'INSERT OR IGNORE INTO work_digest_receipts VALUES (?,?,?)',
+                    (consumer, item['id'], item['attention_key'].split(':', 1)[0]),
+                )
+            acknowledged_at = self._now()
+            db.execute(
+                'UPDATE work_digest_batches SET acknowledged_at=? WHERE consumer=? AND batch_id=?',
+                (acknowledged_at, consumer, row['batch_id']),
+            )
+            row = db.execute(
+                'SELECT * FROM work_digest_batches WHERE consumer=? AND batch_id=?',
+                (consumer, row['batch_id']),
+            ).fetchone()
+            return {'acknowledged': len(refs), 'receipt': self._receipt(row, refs)}

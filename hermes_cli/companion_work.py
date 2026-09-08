@@ -27,12 +27,12 @@ FIELDS = {
     'preparation.list': set(),
     'preparation.ack': {'id', 'expected_version', 'revision', 'handoff_key', 'execution_ref', 'idempotency_key'},
     'digest': {'consumer'},
-    'digest.ack': {'consumer', 'items'},
+    'digest.ack': {'consumer', 'items', 'batch_id'},
 }
 
 
 def resolve_store(profile=None):
-    from hermes_constants import get_hermes_home
+    from hermes_constants import get_hermes_home, mkdir_under_hermes_home
     from hermes_cli.profiles import (
         get_active_profile_name,
         get_profile_dir,
@@ -56,6 +56,9 @@ def resolve_store(profile=None):
         raise WorkError('profile unavailable', 4404)
     if selected != current:
         home = get_profile_dir(selected)
+    # Store construction is deliberately non-creating. Only this profile-aware
+    # boundary may materialize a custom/default home after validation above.
+    mkdir_under_hermes_home(home)
     # Fail closed on redirect attacks at the production entry point: a
     # symlinked store file or profile directory must not relocate business
     # decisions outside the Hermes home. Only profile-derived paths reach
@@ -111,7 +114,17 @@ def execute(operation, params, *, owner_authorization=None):
     # revoked without waiting for that lease to end.
     owner = owner_identity(human_identity)
     if operation == 'capabilities':
-        return {'can_decide': bool(owner), 'reason': None if owner else DECISION_AUTH_REASON}
+        return {
+            'can_decide': bool(owner),
+            'reason': None if owner else DECISION_AUTH_REASON,
+            'notifications': {
+                'delivery_mode': 'external_receipt_only',
+                'batch_receipts': True,
+                'card_receipts': True,
+                'os_notifications': 'unsupported',
+                'grants_authority': False,
+            },
+        }
     if operation == 'decide' and not owner:
         raise WorkError(DECISION_AUTH_REASON, 4403)
     store = resolve_store(params.get('profile'))
@@ -140,7 +153,7 @@ def execute(operation, params, *, owner_authorization=None):
         if operation == 'digest':
             return store.digest(p['consumer'])
         if operation == 'digest.ack':
-            return store.digest_ack(p['consumer'], p['items'])
+            return store.digest_ack(p['consumer'], p['items'], p.get('batch_id'))
     except (KeyError, TypeError) as exc:
         raise WorkError('missing or invalid work parameters', -32602) from exc
 

@@ -156,6 +156,24 @@ export interface LibraryPinOptions {
   reviewed_descriptor: string
   provenance: Record<string, unknown> | string
   title?: string
+  relationships?: LibraryRelationshipContext
+}
+
+export interface LibraryRelationshipRef {
+  id: string
+  title?: string
+  backend_namespace: string
+  profile: string
+}
+
+export interface LibrarySessionRelationshipRef extends LibraryRelationshipRef {
+  relationship: 'primary' | 'related'
+}
+
+export interface LibraryRelationshipContext {
+  projects: LibraryRelationshipRef[]
+  topics: LibraryRelationshipRef[]
+  sessions: LibrarySessionRelationshipRef[]
 }
 
 export interface LibraryGateway {

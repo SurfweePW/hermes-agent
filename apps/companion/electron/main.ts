@@ -48,6 +48,7 @@ function isNoPayload(payload: unknown[]): boolean {
 }
 
 type GatewayTokenIpc = Pick<typeof ipcMain, 'handle'>
+type OriginalRouteIpc = Pick<typeof ipcMain, 'handle'>
 
 export interface RendererTarget {
   kind: 'file' | 'url'
@@ -133,6 +134,64 @@ export function registerGatewayTokenIpc(store: GatewayTokenStore, trustedRendere
   })
 }
 
+type OpenOriginalRouteDependencies = {
+  platform: NodeJS.Platform
+  openExternal(url: string): Promise<void>
+}
+
+/** Revalidate the complete route in the main process; renderer validation is not an authority boundary. */
+export function validateOriginalRouteRequest(value: unknown): string | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) { return undefined }
+  const input = value as Record<string, unknown>
+
+  if (Object.keys(input).length !== 3
+    || typeof input.profile !== 'string' || input.profile.length === 0
+    || typeof input.sessionId !== 'string' || input.sessionId.length === 0
+    || !input.route || typeof input.route !== 'object' || Array.isArray(input.route)) { return undefined }
+
+  const route = input.route as Record<string, unknown>
+
+  if (Object.keys(route).length !== 4 || route.verified !== true
+    || route.client !== 'hermes-desktop' || route.platform !== 'macos'
+    || typeof route.url !== 'string') { return undefined }
+
+  try {
+    const url = new URL(route.url)
+
+    if (url.protocol !== 'hermes:' || url.hostname !== 'session'
+      || url.pathname !== `/${encodeURIComponent(input.sessionId)}`
+      || url.username || url.password || url.hash || url.searchParams.size !== 1
+      || url.searchParams.get('profile') !== input.profile) { return undefined }
+
+    return route.url
+  } catch {
+    return undefined
+  }
+}
+
+export function registerOriginalRouteIpc(trustedRenderer: string, dependencies: OpenOriginalRouteDependencies = {
+  platform: process.platform,
+  openExternal: (url) => shell.openExternal(url)
+}, ipc: OriginalRouteIpc = ipcMain): void {
+  ipc.handle(CHANNELS.openOriginalRoute, async (event, ...payload) => {
+    if (!isTrustedSender(event, trustedRenderer)) { return fail('untrusted-renderer') }
+
+    if (dependencies.platform !== 'darwin') { return { ok: false as const, error: 'unsupported-platform' as const } }
+
+    const url = payload.length === 1 ? validateOriginalRouteRequest(payload[0]) : undefined
+
+    if (!url) { return fail('invalid-request') }
+
+    try {
+      await dependencies.openExternal(url)
+
+      return { ok: true as const }
+    } catch {
+      return { ok: false as const, error: 'open-failed' as const }
+    }
+  })
+}
+
 export function createCompanionWindow(target?: RendererTarget): BrowserWindow {
   const directory = dirname(fileURLToPath(import.meta.url))
   const window = new BrowserWindow(browserWindowOptions(join(directory, 'electron-preload.cjs')))
@@ -176,6 +235,7 @@ if (app?.whenReady) {
 
     app.setAsDefaultProtocolClient(PROTOCOL)
     registerGatewayTokenIpc(new GatewayTokenStore(app.getPath('userData'), safeStorage), rendererTarget.trusted)
+    registerOriginalRouteIpc(rendererTarget.trusted)
 
     const owner = new OwnerAuth(new GatewayTokenStore(app.getPath('userData'), safeStorage, 'owner-session.encrypted'),
       (url) => shell.openExternal(url))

@@ -23,7 +23,7 @@ from hermes_constants import get_hermes_home
 
 POLICY_VERSION = "policy-v1"
 CANONICAL_ID_VERSION = "v1"
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 class OrganizationError(ValueError):
@@ -349,6 +349,7 @@ class Topic(_MutableMetadata):
     objective: str = ""
     primary_project: SourceProjectRef | None = None
     lifecycle: str = "active"
+    primary_business_project_id: str | None = None
 
     def __post_init__(self):
         _validate_mutable(self)
@@ -358,6 +359,15 @@ class Topic(_MutableMetadata):
         object.__setattr__(self, "objective", _text(self.objective, "objective", 4_000))
         if self.primary_project is not None and not isinstance(self.primary_project, SourceProjectRef):
             raise OrganizationError("primary_project must be a SourceProjectRef")
+        object.__setattr__(
+            self,
+            "primary_business_project_id",
+            _optional_text(
+                self.primary_business_project_id,
+                "primary_business_project_id",
+                200,
+            ),
+        )
         if self.lifecycle not in {"active", "completed", "archived"}:
             raise OrganizationError("invalid topic lifecycle")
 
@@ -417,6 +427,8 @@ class WorkBinding(_MutableMetadata):
     related_topic_ids: tuple[str, ...] = ()
     source_projects: tuple[SourceProjectRef, ...] = ()
     attributed_by: str = ""
+    primary_business_project_id: str | None = None
+    related_business_project_ids: tuple[str, ...] = ()
 
     def __post_init__(self):
         _validate_mutable(self)
@@ -438,6 +450,29 @@ class WorkBinding(_MutableMetadata):
         object.__setattr__(self, "source_projects", _dedupe_refs(projects))
         object.__setattr__(self, "related_topic_ids", tuple(sorted(set(_tuple_text(self.related_topic_ids, "related_topic_ids")))))
         object.__setattr__(self, "attributed_by", _text(self.attributed_by, "attributed_by", 500))
+        object.__setattr__(
+            self,
+            "primary_business_project_id",
+            _optional_text(
+                self.primary_business_project_id,
+                "primary_business_project_id",
+                200,
+            ),
+        )
+        object.__setattr__(
+            self,
+            "related_business_project_ids",
+            tuple(
+                sorted(
+                    set(
+                        _tuple_text(
+                            self.related_business_project_ids,
+                            "related_business_project_ids",
+                        )
+                    )
+                )
+            ),
+        )
 
     @property
     def canonical_id(self):
@@ -457,6 +492,7 @@ class WorkBinding(_MutableMetadata):
             "related_sessions": [value.to_dict() for value in self.related_sessions],
             "related_topic_ids": list(self.related_topic_ids),
             "source_projects": [value.to_dict() for value in self.source_projects],
+            "related_business_project_ids": list(self.related_business_project_ids),
         })
 
     @classmethod
@@ -467,6 +503,9 @@ class WorkBinding(_MutableMetadata):
         data["related_sessions"] = tuple(SourceSessionRef.from_dict(item) for item in data.get("related_sessions", ()))
         data["related_topic_ids"] = tuple(data.get("related_topic_ids", ()))
         data["source_projects"] = tuple(SourceProjectRef.from_dict(item) for item in data.get("source_projects", ()))
+        data["related_business_project_ids"] = tuple(
+            data.get("related_business_project_ids", ())
+        )
         return cls(**data)
 
 
@@ -957,7 +996,25 @@ class OrganizationStore:
         return value.astimezone(timezone.utc).isoformat()
 
     def _connect(self) -> sqlite3.Connection:
-        db = sqlite3.connect(self.path, timeout=15, isolation_level=None)
+        absolute = Path(os.path.abspath(os.fspath(self.path)))
+        if absolute.parent.resolve(strict=True) != absolute.parent:
+            raise OrganizationError("organization database parent is not a safe canonical directory")
+        try:
+            info = os.lstat(absolute)
+        except FileNotFoundError:
+            info = None
+        if info is not None and (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+        ):
+            raise OrganizationError("organization database is not a safe regular file")
+        db = sqlite3.connect(
+            f"{absolute.as_uri()}?nofollow=1",
+            uri=True,
+            timeout=15,
+            isolation_level=None,
+        )
         db.row_factory = sqlite3.Row
         db.execute("PRAGMA foreign_keys=ON")
         db.execute("PRAGMA busy_timeout=15000")
@@ -1092,6 +1149,17 @@ class OrganizationStore:
                 """CREATE INDEX IF NOT EXISTS idx_organization_audit_record
                     ON organization_audit(canonical_id, sequence)""",
             ),
+            2: (
+                """CREATE TABLE IF NOT EXISTS organization_idempotency (
+                    actor TEXT NOT NULL,
+                    idempotency_key TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    request_json TEXT NOT NULL,
+                    record_type TEXT NOT NULL,
+                    response_json TEXT NOT NULL,
+                    PRIMARY KEY(actor, idempotency_key)
+                )""",
+            ),
         }
         try:
             with self._tx() as db:
@@ -1150,7 +1218,67 @@ class OrganizationStore:
             return record.canonical_id
         return record.id
 
-    def _create(self, record_type: str, record: T, actor: str, *, idempotent: bool = False) -> T:
+    @staticmethod
+    def _idempotency_replay(
+        db: sqlite3.Connection,
+        *,
+        actor: str,
+        operation: str,
+        key: str,
+        request: Mapping[str, Any],
+        record_type: str,
+    ) -> Any | None:
+        key = _text(key, "idempotency_key", 200, exact=True)
+        request_json = canonical_json(request)
+        row = db.execute(
+            "SELECT * FROM organization_idempotency WHERE actor=? AND idempotency_key=?",
+            (actor, key),
+        ).fetchone()
+        if row is None:
+            return None
+        if (
+            row["operation"] != operation
+            or row["request_json"] != request_json
+            or row["record_type"] != record_type
+        ):
+            raise OrganizationError("idempotency key reused with different request")
+        try:
+            return _RECORD_TYPES[record_type].from_dict(json.loads(row["response_json"]))
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise OrganizationError("invalid organization idempotency receipt") from exc
+
+    @staticmethod
+    def _idempotency_remember(
+        db: sqlite3.Connection,
+        *,
+        actor: str,
+        operation: str,
+        key: str,
+        request: Mapping[str, Any],
+        record_type: str,
+        record: Any,
+    ) -> None:
+        db.execute(
+            "INSERT INTO organization_idempotency VALUES(?,?,?,?,?,?)",
+            (
+                actor,
+                _text(key, "idempotency_key", 200, exact=True),
+                operation,
+                canonical_json(request),
+                record_type,
+                canonical_json(record.to_dict()),
+            ),
+        )
+
+    def _create(
+        self,
+        record_type: str,
+        record: T,
+        actor: str,
+        *,
+        idempotent: bool = False,
+        idempotency_request: tuple[str, str, Mapping[str, Any]] | None = None,
+    ) -> T | tuple[T, bool]:
         actor = _text(actor, "actor", 500)
         now = self._now()
         if record_type in _MUTABLE_TYPES:
@@ -1162,6 +1290,14 @@ class OrganizationStore:
         payload = canonical_json(record.to_dict())
         canonical_id = getattr(record, "canonical_id")
         with self._tx() as db:
+            if idempotency_request is not None:
+                operation, key, request = idempotency_request
+                replay = self._idempotency_replay(
+                    db, actor=actor, operation=operation, key=key,
+                    request=request, record_type=record_type,
+                )
+                if replay is not None:
+                    return replay, True
             existing = db.execute(
                 "SELECT * FROM organization_records WHERE canonical_id=?", (canonical_id,)
             ).fetchone()
@@ -1199,7 +1335,12 @@ class OrganizationStore:
                 "VALUES(?,?,?,?,?,?,?)",
                 (canonical_id, record_type, "create", actor, now, version, payload),
             )
-        return record
+            if idempotency_request is not None:
+                self._idempotency_remember(
+                    db, actor=actor, operation=operation, key=key, request=request,
+                    record_type=record_type, record=record,
+                )
+        return (record, False) if idempotency_request is not None else record
 
     def _get(self, record_type: str, local_id: str) -> Any:
         local_id = _text(local_id, "id", 2_000)
@@ -1212,11 +1353,27 @@ class OrganizationStore:
             raise OrganizationError(f"{record_type} not found")
         return self._decode(row)
 
-    def _update(self, record_type: str, record: T, expected_version: int, actor: str) -> T:
+    def _update(
+        self,
+        record_type: str,
+        record: T,
+        expected_version: int,
+        actor: str,
+        *,
+        idempotency_request: tuple[str, str, Mapping[str, Any]] | None = None,
+    ) -> T | tuple[T, bool]:
         if type(expected_version) is not int:
             raise OrganizationError("expected_version must be an integer")
         actor = _text(actor, "actor", 500)
         with self._tx() as db:
+            if idempotency_request is not None:
+                operation, key, request = idempotency_request
+                replay = self._idempotency_replay(
+                    db, actor=actor, operation=operation, key=key,
+                    request=request, record_type=record_type,
+                )
+                if replay is not None:
+                    return replay, True
             row = db.execute(
                 "SELECT * FROM organization_records WHERE record_type=? AND local_id=?",
                 (record_type, self._local_id(record)),
@@ -1255,16 +1412,35 @@ class OrganizationStore:
                 "VALUES(?,?,?,?,?,?,?)",
                 (current.canonical_id, record_type, "update", actor, now, updated.version, payload),
             )
-        return updated
+            if idempotency_request is not None:
+                self._idempotency_remember(
+                    db, actor=actor, operation=operation, key=key, request=request,
+                    record_type=record_type, record=updated,
+                )
+        return (updated, False) if idempotency_request is not None else updated
 
     def _delete(
-        self, record_type: str, local_id: str, expected_version: int, actor: str
+        self,
+        record_type: str,
+        local_id: str,
+        expected_version: int,
+        actor: str,
+        *,
+        idempotency_request: tuple[str, str, Mapping[str, Any]] | None = None,
     ) -> Any:
         if type(expected_version) is not int:
             raise OrganizationError("expected_version must be an integer")
         local_id = _text(local_id, "id", 2_000)
         actor = _text(actor, "actor", 500)
         with self._tx() as db:
+            if idempotency_request is not None:
+                operation, key, request = idempotency_request
+                replay = self._idempotency_replay(
+                    db, actor=actor, operation=operation, key=key,
+                    request=request, record_type=record_type,
+                )
+                if replay is not None:
+                    return replay, True
             row = db.execute(
                 "SELECT * FROM organization_records WHERE record_type=? AND local_id=?",
                 (record_type, local_id),
@@ -1301,7 +1477,12 @@ class OrganizationStore:
                     deleted.version, payload,
                 ),
             )
-        return deleted
+            if idempotency_request is not None:
+                self._idempotency_remember(
+                    db, actor=actor, operation=operation, key=key, request=request,
+                    record_type=record_type, record=deleted,
+                )
+        return (deleted, False) if idempotency_request is not None else deleted
 
     @staticmethod
     def _decode(row: Mapping[str, Any]) -> Any:
@@ -1404,6 +1585,92 @@ class OrganizationStore:
         if value.actor != actor:
             raise OrganizationError("priority override actor must match authenticated actor")
         return self._update("priority_override", value, expected_version, actor)
+
+    def owner_mutation(
+        self,
+        operation: str,
+        value: (
+            Topic
+            | BusinessProject
+            | SourceProjectRef
+            | SourceSessionRef
+            | Capture
+            | WorkBinding
+            | PriorityOverride
+        ),
+        *,
+        expected_version: int,
+        idempotency_key: str,
+        request: Mapping[str, Any],
+        actor: str,
+    ) -> tuple[
+        Topic
+        | BusinessProject
+        | SourceProjectRef
+        | SourceSessionRef
+        | Capture
+        | WorkBinding
+        | PriorityOverride,
+        bool,
+    ]:
+        """Atomically apply one owner RPC mutation and its replay receipt."""
+        record_types = {
+            Topic: "topic",
+            BusinessProject: "business_project",
+            SourceProjectRef: "source_project",
+            SourceSessionRef: "source_session",
+            Capture: "capture",
+            WorkBinding: "work_binding",
+            PriorityOverride: "priority_override",
+        }
+        record_type = record_types[type(value)]
+        if isinstance(value, PriorityOverride) and value.actor != actor:
+            raise OrganizationError("priority override actor must match authenticated actor")
+        receipt = (operation, idempotency_key, request)
+        if isinstance(value, Capture) and expected_version != 0:
+            raise OrganizationError("expected_version must be 0 for immutable capture")
+        if expected_version == 0:
+            result = self._create(
+                record_type, value, actor, idempotency_request=receipt
+            )
+        else:
+            result = self._update(
+                record_type,
+                value,
+                expected_version,
+                actor,
+                idempotency_request=receipt,
+            )
+        assert isinstance(result, tuple)
+        return result
+
+    def owner_remove(
+        self,
+        operation: str,
+        record_type: str,
+        record_id: str,
+        *,
+        expected_version: int,
+        idempotency_key: str,
+        request: Mapping[str, Any],
+        actor: str,
+    ) -> tuple[SourceProjectRef | SourceSessionRef | WorkBinding | PriorityOverride, bool]:
+        if record_type not in {
+            "source_project",
+            "source_session",
+            "work_binding",
+            "priority_override",
+        }:
+            raise OrganizationError("invalid removable organization record type")
+        result = self._delete(
+            record_type,
+            record_id,
+            expected_version,
+            actor,
+            idempotency_request=(operation, idempotency_key, request),
+        )
+        assert isinstance(result, tuple)
+        return result
 
     def restore_recommended(
         self, record_id: str, *, expected_version: int, actor: str

@@ -106,6 +106,57 @@ function harness(): {
 }
 
 describe('CompanionClient RPC domain methods', () => {
+  it('accepts only a verified allowlisted original-session route', async () => {
+    const { client, connect } = harness(); const socket = await connect()
+    const request = client.getCompanionSessionHistory('atlas', 'stored-1')
+    socket.respond({
+      identity: { profile: 'atlas', backend_namespace: 'desktop-db', root_id: 'stored-1' },
+      items: [], has_more: false, next_cursor: null, as_of: 1, coverage: 'complete', warnings: [],
+      original_route: { verified: true, client: 'hermes-desktop', platform: 'macos', url: 'hermes://session/stored-1?profile=atlas' }
+    })
+    await expect(request).resolves.toMatchObject({ original_route: { verified: true, client: 'hermes-desktop' } })
+
+    const unsafe = client.getCompanionSessionHistory('atlas', 'stored-1')
+    socket.respond({
+      identity: { profile: 'atlas', backend_namespace: 'desktop-db', root_id: 'stored-1' },
+      items: [], has_more: false, next_cursor: null, as_of: 1, coverage: 'complete', warnings: [],
+      original_route: { verified: true, client: 'hermes-desktop', platform: 'macos', url: 'https://attacker.invalid/session' }
+    })
+    await expect(unsafe).rejects.toThrow(/Malformed companion\.sessions\.history response/)
+  })
+
+  it('uses typed owner priority RPCs without accepting an actor', async () => {
+    const { client, connect } = harness(); const socket = await connect()
+    const capability = client.organizationCapabilities()
+    expect(socket.frame()).toEqual(expect.objectContaining({ method: 'companion.organization.capabilities', params: {} }))
+    socket.respond({ version: 2, operations: ['needs_me'], read_only: false, sort: 'recommended', policy_version: 'policy-v1', mutation_methods: ['companion.priorities.override_set', 'companion.priorities.restore_recommended'], record_mutation_methods: [], owner_authorization: true, optimistic_concurrency: 'expected_version', idempotency: 'actor_scoped_key', audit: true })
+    await expect(capability).resolves.toMatchObject({ version: 2, owner_authorization: true })
+
+    const params = { profile: 'CMO Exact', id: 'override-1', target_id: 'stable:01', mode: 'set_priority' as const, label: 'Do first', reason: 'Material deadline', expires_at: '2099-01-01T00:00:00Z', review_id: null, review_at: null, expected_version: 0 as const, idempotency_key: 'priority-set-1' }
+    const set = client.setPriorityOverride(params)
+    expect(socket.frame()).toMatchObject({ method: 'companion.priorities.override_set', params })
+    expect(socket.frame().params).not.toHaveProperty('actor')
+    const record = { ...params, actor: 'owner:server', version: 1, created_at: '2026-01-01T00:00:00Z', created_by: 'owner:server', updated_at: '2026-01-01T00:00:00Z', updated_by: 'owner:server', canonical_id: 'priority-override:override-1' }
+    socket.respond({ record, idempotent: false }); await expect(set).resolves.toMatchObject({ record: { version: 1, actor: 'owner:server' } })
+
+    const restoreParams = { profile: 'CMO Exact', id: 'override-1', expected_version: 1, idempotency_key: 'priority-restore-1' }
+    const restore = client.restoreRecommendedPriority(restoreParams)
+    expect(socket.frame()).toMatchObject({ method: 'companion.priorities.restore_recommended', params: restoreParams })
+    socket.respond({ record: { ...record, version: 2 }, restored: true, idempotent: false })
+    await expect(restore).resolves.toMatchObject({ restored: true, record: { version: 2 } })
+    client.close()
+  })
+
+  it('rejects malformed priority capabilities and mutation records', async () => {
+    const { client, connect } = harness(); const socket = await connect()
+    const capability = client.organizationCapabilities(); socket.respond({ version: 2, mutation_methods: [] })
+    await expect(capability).rejects.toThrow('Malformed companion.organization.needs_me response')
+    const set = client.setPriorityOverride({ profile: 'cmo', id: 'o', target_id: 'w', mode: 'set_priority', label: 'Now', reason: 'Deadline', expires_at: null, review_id: null, review_at: null, expected_version: 0, idempotency_key: 'k' })
+    socket.respond({ record: { version: '1' }, idempotent: false })
+    await expect(set).rejects.toThrow('Malformed companion.organization.needs_me response')
+    client.close()
+  })
+
   it('uses exact durable work frames without runtime approval semantics', async () => {
     const { client, connect } = harness()
     const socket = await connect()
