@@ -97,6 +97,30 @@ def _counted_invoke_reserved_session_create(reserved, *, rid=None):
 
 server._invoke_reserved_session_create = _counted_invoke_reserved_session_create
 
+_claim_active_session_slot = server._claim_active_session_slot
+
+
+def _counted_claim_active_session_slot(*args, **kwargs):
+    lease, refusal = _claim_active_session_slot(*args, **kwargs)
+    if kwargs.get("strict_reservation") and lease is not None:
+        _record("reservation_acquired", str(getattr(lease, "session_id", "")))
+    return lease, refusal
+
+
+server._claim_active_session_slot = _counted_claim_active_session_slot
+
+_rollback_creation_reservation = server._rollback_creation_reservation
+
+
+def _counted_rollback_creation_reservation(lease):
+    result = _rollback_creation_reservation(lease)
+    if result is None:
+        _record("reservation_released", str(getattr(lease, "session_id", "")))
+    return result
+
+
+server._rollback_creation_reservation = _counted_rollback_creation_reservation
+
 _submit_prompt = server._methods["prompt.submit"]
 
 

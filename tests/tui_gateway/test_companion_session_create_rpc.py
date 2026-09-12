@@ -1,13 +1,12 @@
 """Public durable Companion creation saga through registered RPC handlers."""
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 import json
 import os
 from pathlib import Path
 import shutil
-import threading
+import sqlite3
 
 import pytest
 
@@ -34,7 +33,6 @@ RECEIPT_KEYS = {
     "client_request_id", "project_id", "stored_session_id", "row_state",
     "operation_status", "runtime_session_id",
 }
-REAL_THREAD = threading.Thread
 
 
 class OwnerTransport(Transport):
@@ -411,57 +409,158 @@ def test_owner_is_revalidated_at_every_gate_before_submit(
     assert submits == []
 
 
-def test_concurrent_duplicate_has_one_reservation_runtime_and_submit(create_env, monkeypatch):
-    counts = {"submit": 0}
-    lock = threading.Lock()
+def test_identical_bind_loser_releases_its_proposed_reservation(create_env, monkeypatch):
+    real_bind = companion_creation._creation_request_index
 
-    def submit(_rid, value):
-        with lock:
-            counts["submit"] += 1
-        claim = companion_creation  # keep closure deterministic; admission is an external boundary here
-        del claim, value
-        return {"result": {"status": "streaming"}}
+    def lose_bind(db, **kwargs):
+        winner = {
+            **kwargs,
+            "stored_id": "winner-stored-key",
+        }
+        _index, inserted = real_bind(db, **winner)
+        assert inserted is True
+        return real_bind(db, **kwargs)
 
-    monkeypatch.setitem(server._methods, "prompt.submit", submit)
-    monkeypatch.setattr(server.threading, "Thread", REAL_THREAD)
+    monkeypatch.setattr(companion_creation, "_creation_request_index", lose_bind)
 
-    def concurrent_call():
-        token = bind_transport(
-            OwnerTransport(OwnerAuthorizationLease(OWNER, float("inf")))
+    receipt = assert_private_receipt(call())
+
+    assert receipt["stored_session_id"] == "winner-stored-key"
+    assert len(create_env["claims"]) == 1
+    loser_lease = create_env["claims"][0]
+    assert loser_lease.session_id != receipt["stored_session_id"]
+    assert loser_lease.release_calls == 1
+    assert loser_lease.released is True
+    with server._lifecycle_reservation_lock:
+        tracked = tuple(server._inflight_creation_reservations.values())
+    assert all(entry[0] is not loser_lease for entry in tracked)
+    assert server._sessions == {}
+
+
+def test_identical_bind_loser_release_failure_stays_tracked_and_returns_4091(
+    create_env, monkeypatch
+):
+    real_bind = companion_creation._creation_request_index
+
+    def lose_bind(db, **kwargs):
+        winner = {**kwargs, "stored_id": "winner-stored-key"}
+        _index, inserted = real_bind(db, **winner)
+        assert inserted is True
+        return real_bind(db, **kwargs)
+
+    def fail_release(lease):
+        lease.release_calls += 1
+        raise OSError("PRIVATE")
+
+    monkeypatch.setattr(companion_creation, "_creation_request_index", lose_bind)
+    monkeypatch.setattr(Lease, "release", fail_release)
+
+    response = call()
+
+    assert response["error"] == {
+        "code": 4091,
+        "message": "session capacity or ownership reservation unavailable",
+    }
+    loser_lease = create_env["claims"][0]
+    assert loser_lease.release_calls == 3
+    with server._lifecycle_reservation_lock:
+        assert server._inflight_creation_reservations[id(loser_lease)] == (
+            loser_lease,
+            loser_lease.session_id,
+            server._inflight_creation_reservations[id(loser_lease)][2],
+            True,
         )
-        try:
-            return call()
-        finally:
-            reset_transport(token)
-
-    with ThreadPoolExecutor(max_workers=2) as pool:
-        responses = list(pool.map(lambda _: concurrent_call(), range(2)))
-    receipts = [assert_private_receipt(response) for response in responses]
-    assert len(create_env["claims"]) == 1
-    assert len(server._sessions) == 1
-    assert counts["submit"] == 1
-    assert {r["stored_session_id"] for r in receipts} == {receipts[0]["stored_session_id"]}
 
 
-def test_conflicting_replay_fails_closed_without_second_side_effect(create_env):
-    first = assert_private_receipt(call())
-    response = call(text="different private request")
+def test_conflicting_bind_loser_releases_its_reservation_without_second_side_effect(
+    create_env, monkeypatch
+):
+    real_bind = companion_creation._creation_request_index
+
+    def conflicting_bind(db, **kwargs):
+        winner = {
+            **kwargs,
+            "stored_id": "winner-stored-key",
+            "payload_digest": "0" * 64,
+        }
+        _index, inserted = real_bind(db, **winner)
+        assert inserted is True
+        return real_bind(db, **kwargs)
+
+    monkeypatch.setattr(companion_creation, "_creation_request_index", conflicting_bind)
+
+    response = call()
+
     assert response["error"]["code"] == 4090
-    assert "different private request" not in json.dumps(response)
     assert len(create_env["claims"]) == 1
-    assert len(server._sessions) == 1
-    assert first["stored_session_id"] in {s["session_key"] for s in server._sessions.values()}
+    conflict_lease = create_env["claims"][0]
+    assert conflict_lease.session_id != "winner-stored-key"
+    assert conflict_lease.release_calls == 1
+    assert conflict_lease.released is True
+    assert server._sessions == {}
 
 
-def test_capacity_refusal_has_no_row_runtime_submit_and_keeps_registry_bytes(create_env, monkeypatch):
+def test_bind_storage_failure_with_proven_absence_releases_and_returns_5072(
+    create_env, monkeypatch
+):
+    monkeypatch.setattr(
+        companion_creation,
+        "_creation_request_index",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("PRIVATE")),
+    )
+
+    response = call()
+
+    assert response["error"] == {
+        "code": 5072,
+        "message": "creation storage unavailable",
+    }
+    assert len(create_env["claims"]) == 1
+    assert create_env["claims"][0].release_calls == 1
+    request_key = companion_sessions._continuity_v3_key(OWNER, REQUEST)
+    assert create_env["db"].get_meta(request_key) is None
+    assert server._sessions == {}
+
+
+def test_ambiguous_committed_bind_releases_then_reconciles_without_second_key(
+    create_env, monkeypatch
+):
+    real_bind = companion_creation._creation_request_index
+
+    def commit_then_raise(db, **kwargs):
+        _index, inserted = real_bind(db, **kwargs)
+        assert inserted is True
+        raise OSError("PRIVATE")
+
+    monkeypatch.setattr(companion_creation, "_creation_request_index", commit_then_raise)
+
+    receipt = assert_private_receipt(call())
+
+    assert receipt["stored_session_id"] == create_env["claims"][0].session_id
+    assert receipt["row_state"] == "absent"
+    assert len(create_env["claims"]) == 1
+    assert create_env["claims"][0].release_calls == 1
+    assert create_env["claims"][0].released is True
+    assert server._sessions == {}
+
+
+def test_capacity_refusal_is_4091_with_no_index_row_runtime_or_submit(create_env, monkeypatch):
     registry_before = json.dumps(server._inflight_creation_reservations, default=repr, sort_keys=True)
     submitted = []
     monkeypatch.setattr(server, "_claim_active_session_slot", lambda *_a, **_k: (None, object()))
     monkeypatch.setitem(server._methods, "prompt.submit", lambda *_a: submitted.append(True))
-    receipt = assert_private_receipt(call())
+
+    response = call()
+
     registry_after = json.dumps(server._inflight_creation_reservations, default=repr, sort_keys=True)
-    assert receipt["operation_status"] == "not_admitted"
-    assert create_env["db"].get_session(receipt["stored_session_id"]) is None
+    assert response["error"] == {
+        "code": 4091,
+        "message": "session capacity or ownership reservation unavailable",
+    }
+    request_key = companion_sessions._continuity_v3_key(OWNER, REQUEST)
+    assert create_env["db"].get_meta(request_key) is None
+    with sqlite3.connect(create_env["home"] / "state.db") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM sessions").fetchone()[0] == 0
     assert server._sessions == {}
     assert submitted == []
     assert registry_after == registry_before

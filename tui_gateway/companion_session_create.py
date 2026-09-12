@@ -334,23 +334,6 @@ def _create_session_in_workspace(
     operation_id = new_operation_id()
     creator = _snapshot_creation_creator()
     _require_owner(owner_authorization)
-    index, inserted = _creation_request_index(
-        ledger,
-        owner=owner,
-        client_request_id=params["client_request_id"],
-        payload_digest=digest,
-        backend=backend,
-        profile=profile,
-        stored_id=stored_id,
-        project_id=params["project_id"],
-        operation_id=operation_id,
-        creator_pid=creator["creator_pid"],
-        creator_started=creator["creator_started"],
-        creator_token=creator["creator_token"],
-        bound_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-    )
-    if not inserted:
-        return _replay_receipt(server, params, owner_authorization)
     lease, refusal = server._claim_active_session_slot(
         stored_id,
         live_session_id=runtime_id,
@@ -358,24 +341,75 @@ def _create_session_in_workspace(
         config=workspace["config"],
         strict_reservation=True,
     )
-    if lease is None or refusal is not None:
+    if lease is None:
+        raise CompanionSessionsError(
+            "session capacity or ownership reservation unavailable", 4091
+        )
+    if refusal is not None:
+        server._rollback_creation_reservation(lease)
+        raise CompanionSessionsError(
+            "session capacity or ownership reservation unavailable", 4091
+        )
+
+    index = None
+    try:
+        _require_owner(owner_authorization)
+        index, inserted = _creation_request_index(
+            ledger,
+            owner=owner,
+            client_request_id=params["client_request_id"],
+            payload_digest=digest,
+            backend=backend,
+            profile=profile,
+            stored_id=stored_id,
+            project_id=params["project_id"],
+            operation_id=operation_id,
+            creator_pid=creator["creator_pid"],
+            creator_started=creator["creator_started"],
+            creator_token=creator["creator_token"],
+            bound_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
+    except CompanionSessionsError as bind_error:
+        release_error = server._rollback_creation_reservation(lease)
+        if release_error is not None and bind_error.code == 4090:
+            raise CompanionSessionsError(
+                "session capacity or ownership reservation unavailable", 4091
+            ) from None
+        raise
+    except Exception as exc:
+        # Once the binding write was attempted, do not continue creation unless
+        # that call returned its unambiguous inserter result. Stop this invocation,
+        # release its exact proposed lease, then reconcile the owner/request key.
         try:
-            index = _close_index(
+            existing = _existing_index(
                 ledger,
                 owner=owner,
                 request_id=params["client_request_id"],
-                index=index,
-                outcome="not_admitted",
+                digest=digest,
+                backend=backend,
+                profile=profile,
+                project_id=params["project_id"],
             )
-            return _project_receipt(
-                server,
-                ledger=ledger,
-                owner=owner,
-                request_id=params["client_request_id"],
-                index=index,
-            )
-        except Exception as exc:
+        except CompanionSessionsError as reconcile_error:
+            if server._rollback_creation_reservation(lease) is not None:
+                raise CompanionSessionsError(
+                    "session capacity or ownership reservation unavailable", 4091
+                ) from exc
+            raise reconcile_error from exc
+        except Exception:
+            server._rollback_creation_reservation(lease)
             raise CompanionSessionsError(_CREATE_UNKNOWN, 5066) from exc
+        if server._rollback_creation_reservation(lease) is not None:
+            raise CompanionSessionsError(_CREATE_UNKNOWN, 5066) from exc
+        if existing is None:
+            raise CompanionSessionsError("creation storage unavailable", 5072) from exc
+        return _replay_receipt(server, params, owner_authorization)
+    if not inserted:
+        if server._rollback_creation_reservation(lease) is not None:
+            raise CompanionSessionsError(
+                "session capacity or ownership reservation unavailable", 4091
+            )
+        return _replay_receipt(server, params, owner_authorization)
 
     claim = None
     runtime_published = False

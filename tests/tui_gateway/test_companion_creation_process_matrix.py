@@ -16,7 +16,9 @@ from typing import Any
 
 import pytest
 
+from hermes_cli import active_sessions
 from hermes_cli import projects_db as pdb
+from tui_gateway import companion_sessions
 from tests.tui_gateway.test_companion_transport_integration import (
     BACKEND,
     PROFILE,
@@ -121,6 +123,15 @@ def _session_rows(home: Path) -> list[str]:
         connection.close()
 
 
+def _registry_session_ids(home: Path) -> set[str]:
+    registry = home / "runtime" / "active_sessions.json"
+    if not registry.exists():
+        return set()
+    value = json.loads(registry.read_text(encoding="utf-8"))
+    entries = value.get("entries", []) if isinstance(value, dict) else value
+    return {str(entry["session_id"]) for entry in entries}
+
+
 def _shared_env(monkeypatch: pytest.MonkeyPatch, events: Path) -> None:
     monkeypatch.setenv("HERMES_COMPANION_TEST_EVENTS_FILE", str(events))
 
@@ -177,6 +188,20 @@ def test_duplicate_create_from_two_processes_yields_one_session_and_one_dispatch
     assert _count(recorded, "create_entry") == 1, recorded
     assert _count(recorded, "agent_build") == 1, recorded
     assert len(rows) == 1, rows
+    acquired = {
+        line.split(" ", 1)[1]
+        for line in recorded
+        if line.startswith("reservation_acquired ")
+    }
+    released = {
+        line.split(" ", 1)[1]
+        for line in recorded
+        if line.startswith("reservation_released ")
+    }
+    assert rows[0] in acquired, recorded
+    loser_keys = acquired - {rows[0]}
+    assert loser_keys <= released, recorded
+    assert loser_keys.isdisjoint(_registry_session_ids(home))
 
     receipts: list[dict[str, Any]] = []
     for outcome in outcomes.values():
@@ -197,6 +222,57 @@ def test_duplicate_create_from_two_processes_yields_one_session_and_one_dispatch
     assert any(receipt["stored_session_id"] == rows[0] for receipt in receipts), outcomes
     runtimes = {receipt["runtime_session_id"] for receipt in receipts} - {None}
     assert len(runtimes) <= 1, runtimes
+
+
+def test_capacity_refusal_has_no_durable_creation_effects(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A real full registry returns 4091 before coordinator, row, runtime, or dispatch mutation."""
+    home, _project, project_id = _seed(tmp_path, "capacity-refusal")
+    (home / "config.yaml").write_text(
+        "model: synthetic-heavy\ncompression:\n  enabled: false\nmax_concurrent_sessions: 1\n",
+        encoding="utf-8",
+    )
+    events = tmp_path / "capacity-refusal" / "events.log"
+    _shared_env(monkeypatch, events)
+    request_id = str(uuid.uuid4())
+    blocker, refusal = active_sessions.try_acquire_active_session(
+        session_id="capacity-blocker",
+        surface="companion",
+        config={"max_concurrent_sessions": 1},
+        registry_home=home,
+        track_liveness=True,
+    )
+    assert blocker is not None and refusal is None
+
+    client = StdioRpcClient(home)
+    try:
+        response = client.call(
+            "capacity-refused",
+            "companion.sessions.create",
+            _create_params(request_id, project_id, _turn()),
+        )
+    finally:
+        client.close()
+
+    try:
+        assert response["error"] == {
+            "code": 4091,
+            "message": "session capacity or ownership reservation unavailable",
+        }
+        assert _events(events) == []
+        assert _session_rows(home) == []
+        request_key = companion_sessions._continuity_v3_key(
+            "basic:transport-test-owner", request_id
+        )
+        with sqlite3.connect(home / "state.db") as connection:
+            found = connection.execute(
+                "SELECT 1 FROM state_meta WHERE key = ?", (request_key,)
+            ).fetchone()
+        assert found is None
+        assert _registry_session_ids(home) == {"capacity-blocker"}
+    finally:
+        blocker.release()
 
 
 def test_crash_before_submit_entry_recovers_as_not_admitted_with_zero_dispatch(
