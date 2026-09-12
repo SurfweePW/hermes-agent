@@ -131,6 +131,7 @@ const pendingCoverage = (profile: string): SourceCoverage => ({
 
 const failureStatus = (error: unknown): DirectoryStatus => unsupported(error) ? 'unsupported' : 'error'
 const failureCopy = (kind: 'Sessions' | 'Projects', error: unknown) => `${kind} ${unsupported(error) ? 'require a backend update.' : 'could not be verified.'}`
+const UNAUTHORIZED_SOURCE_MESSAGE = 'This source is not authorized.'
 
 /** Feature-owned, read-only projection. Gateway responses remain authoritative. */
 export function createDirectoryStore(): DirectoryStore {
@@ -180,12 +181,41 @@ export function createDirectoryStore(): DirectoryStore {
     }
   }
 
-  const purgeUnauthorized = () => {
-    ++epoch; gateway = null; profiles = []; selection = null; refreshInFlight = null
-    sessions.clear(); projects.clear(); topics.clear(); coverage.clear(); topicCoverage.clear()
-    snapshot = { ...initialSnapshot(), detailStatus: 'error', detailMessage: 'Owner authorization expired. Sign in again to view persisted work.' }
+  const dropProfileRows = (profile: string) => {
+    for (const [key, item] of sessions) {if (item.profile === profile) {sessions.delete(key)}}
 
-    for (const listener of listeners) {listener()}
+    for (const [key, item] of projects) {if (item.profile === profile) {projects.delete(key)}}
+
+    for (const [key, item] of topics) {if (item.profile === profile) {topics.delete(key)}}
+  }
+
+  /**
+   * A gateway serves only the profiles it is configured for, so authorization is a
+   * property of ONE source. Purge just that profile's rows and keep every other
+   * profile's verified data (purging them all left the owner with an unusable client
+   * whenever a single stale profile stayed on the roster).
+   */
+  const markUnauthorized = (profile: string) => {
+    dropProfileRows(profile)
+    coverage.set(profile, {
+      ...pendingCoverage(profile),
+      status: 'error',
+      sessionStatus: 'error',
+      projectStatus: 'error',
+      message: UNAUTHORIZED_SOURCE_MESSAGE
+    })
+    const droppedSelection = selection?.profile === profile
+
+    if (droppedSelection) {selection = null}
+
+    publish(droppedSelection
+      ? { ...projection(), selectedProject: null, selectedSession: null, selectedTopic: null, entityProjection: null, topicSourceDetails: [], history: null, detailStatus: 'error', detailMessage: UNAUTHORIZED_SOURCE_MESSAGE }
+      : projection())
+  }
+
+  const markTopicsUnauthorized = (profile: string) => {
+    topicCoverage.set(profile, { profile, status: 'error', coverage: null, message: UNAUTHORIZED_SOURCE_MESSAGE, cursor: null, hasMore: false, loaded: 0, total: null, backendNamespace: null })
+    publish(projection())
   }
 
   const loadTopics = async (client: DirectoryGateway, profile: string, generation: number, append = false) => {
@@ -222,7 +252,7 @@ export function createDirectoryStore(): DirectoryStore {
       if (generation !== epoch || gateway !== client) { return }
 
       if (errorCode(error) === 4403) {
-        purgeUnauthorized()
+        markTopicsUnauthorized(profile)
 
         return
       }
@@ -260,7 +290,7 @@ export function createDirectoryStore(): DirectoryStore {
     const projectError = projectSettled.status === 'rejected' ? projectSettled.reason : null
 
     if (errorCode(sessionError) === 4403 || errorCode(projectError) === 4403) {
-      purgeUnauthorized()
+      markUnauthorized(profile)
 
       return
     }
@@ -552,7 +582,7 @@ export function createDirectoryStore(): DirectoryStore {
       if (generation !== epoch || gateway !== client) { return }
 
       if (errorCode(error) === 4403) {
-        purgeUnauthorized()
+        publish({ entityProjection: { status: 'error', complete: false, work: [], needsMe: [], message: UNAUTHORIZED_SOURCE_MESSAGE }, topicSourceDetails: [] })
 
         return
       }
@@ -581,7 +611,7 @@ export function createDirectoryStore(): DirectoryStore {
     } catch (error) {
       if (generation === epoch && gateway === client) {
         if (errorCode(error) === 4403) {
-          purgeUnauthorized()
+          publish({ detailStatus: 'error', detailMessage: UNAUTHORIZED_SOURCE_MESSAGE })
 
           return
         }
@@ -637,7 +667,7 @@ export function createDirectoryStore(): DirectoryStore {
     } catch (error) {
       if (generation === epoch && gateway === client) {
         if (errorCode(error) === 4403) {
-          purgeUnauthorized()
+          publish({ detailStatus: 'error', detailMessage: UNAUTHORIZED_SOURCE_MESSAGE })
 
           return
         }
@@ -668,7 +698,7 @@ export function createDirectoryStore(): DirectoryStore {
     } catch (error) {
       if (generation === epoch && gateway === client) {
         if (errorCode(error) === 4403) {
-          purgeUnauthorized()
+          publish({ detailStatus: 'error', detailMessage: UNAUTHORIZED_SOURCE_MESSAGE })
 
           return
         }
@@ -805,7 +835,7 @@ export function createDirectoryStore(): DirectoryStore {
       } catch (error) {
         if (generation === epoch && gateway === client) {
           if (errorCode(error) === 4403) {
-            purgeUnauthorized()
+            publish({ detailStatus: 'error', detailMessage: UNAUTHORIZED_SOURCE_MESSAGE })
 
             return
           }
@@ -844,7 +874,7 @@ export function createDirectoryStore(): DirectoryStore {
       } catch (error) {
         if (generation === epoch && gateway === client) {
           if (errorCode(error) === 4403) {
-            purgeUnauthorized()
+            publish({ detailStatus: 'error', detailMessage: UNAUTHORIZED_SOURCE_MESSAGE })
 
             return
           }

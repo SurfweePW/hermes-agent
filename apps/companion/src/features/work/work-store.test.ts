@@ -148,27 +148,24 @@ describe('verified work store', () => {
     await store.refresh()
     expect(store.getSnapshot().selected?.id).toBe('fixture-review')
   })
-  it('locks all mutations on revoked authentication and explains the boundary', async () => {
+  it('locks the mutation on an unauthorized source and keeps verified work visible', async () => {
     const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
     vi.mocked(gateway.decideWork).mockRejectedValue({ code: 4403 })
     expect(await store.decide({ action: 'approve_preparation' })).toBe(false)
     expect(store.getSnapshot().status).toBe('error')
-    expect(store.getSnapshot()).toMatchObject({ items: [], selected: null, sources: [] })
-    expect(JSON.stringify(store.getSnapshot())).not.toContain('Campaign')
-    expect(JSON.stringify(store.getSnapshot())).not.toContain('https://example.org')
-    expect(store.getSnapshot().message).toMatch(/human-authenticated/)
-    expect(await store.comment('blocked')).toBe(false)
-    expect(gateway.commentWork).not.toHaveBeenCalled()
+    expect(store.getSnapshot().message).toBe('This source is not authorized.')
+    expect(store.getSnapshot().selected?.id).toBe('stable-id')
+    expect(store.getSnapshot().items.map((item) => item.id)).toContain('stable-id')
   })
 
-  it('purges retained work and detail when refresh reports owner revocation', async () => {
+  it('keeps verified work of every other source when one source is revoked', async () => {
     const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
     vi.mocked(gateway.workCapabilities).mockRejectedValue({ code: 4403 })
     await store.refresh()
 
-    expect(store.getSnapshot()).toMatchObject({ items: [], selected: null, status: 'error', sources: [] })
-    expect(JSON.stringify(store.getSnapshot())).not.toContain('Campaign')
-    expect(JSON.stringify(store.getSnapshot())).not.toContain('https://example.org')
+    expect(store.getSnapshot()).toMatchObject({ status: 'error' })
+    expect(store.getSnapshot().sources).toMatchObject([{ profile: 'cmo', status: 'error', message: 'This source is not authorized.' }])
+    expect(JSON.stringify(store.getSnapshot())).toContain('Campaign')
   })
 
   it('uses authoritative profile/id/version/revision and reads back server-generated record IDs', async () => {

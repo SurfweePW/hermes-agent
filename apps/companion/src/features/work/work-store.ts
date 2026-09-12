@@ -41,6 +41,7 @@ export function verifiedWorkProfiles(snapshot: Pick<WorkSnapshot, 'status' | 'so
 }
 
 const key = (profile: string, id: string) => JSON.stringify([profile, id])
+const UNAUTHORIZED_SOURCE_MESSAGE = 'This source is not authorized.'
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 type PriorityView = NonNullable<WorkCardView['priority']>
 
@@ -181,14 +182,6 @@ export function createWorkStore(): WorkStore {
     selected: detail ? view(detail.item, capabilities.get(detail.item.profile), detail, priorities.get(key(detail.item.profile, detail.item.id))) : null
   })
 
-  const purgeUnauthorized = () => {
-    ++epoch; gateway = null; profiles = []
-    cards.clear(); priorities.clear(); latestPriorities.clear(); capabilities.clear(); sourceStates.clear()
-    priorityWritable = false
-    detail = null; selection = null
-    publish({ items: [], selected: null, status: 'error', pending: false, priorityWritable: false, sources: [], message: 'This connection is not authorized to access work. Reconnect with a human-authenticated dashboard login.' })
-  }
-
   const refresh = async (afterMutation = false): Promise<void> => {
     if (!gateway || (snapshot.pending && !afterMutation)) {return}
     const client = gateway
@@ -219,12 +212,6 @@ export function createWorkStore(): WorkStore {
     const successful = responses.filter((response): response is Extract<(typeof responses)[number], { ok: true }> => response.ok)
     const failed = responses.filter((response): response is Extract<(typeof responses)[number], { ok: false }> => !response.ok)
     const refreshedAt = new Date().toISOString()
-
-    if (failed.some(({ error }) => errorCode(error) === 4403)) {
-      purgeUnauthorized()
-
-      return
-    }
 
     for (const response of successful) {
       for (const existingKey of [...cards.keys()]) {
@@ -282,17 +269,12 @@ export function createWorkStore(): WorkStore {
 
     for (const response of failed) {
       const unsupported = errorCode(response.error) === -32601
-      sourceStates.set(response.profile, { profile: response.profile, incomplete: true, status: unsupported ? 'unsupported' : 'error', lastSuccess: sourceStates.get(response.profile)?.lastSuccess ?? null, message: unsupported ? 'Durable Work is unsupported by this source.' : errorCode(response.error) === 4403 ? 'This source is not authorized.' : 'Refresh failed; the last verified view is retained.' })
+      sourceStates.set(response.profile, { profile: response.profile, incomplete: true, status: unsupported ? 'unsupported' : 'error', lastSuccess: sourceStates.get(response.profile)?.lastSuccess ?? null, message: unsupported ? 'Durable Work is unsupported by this source.' : errorCode(response.error) === 4403 ? UNAUTHORIZED_SOURCE_MESSAGE : 'Refresh failed; the last verified view is retained.' })
     }
 
     try {
       detail = selection && successful.some(({ profile }) => profile === selection?.profile) ? await client.getWork(selection.profile, selection.id) : detail
-    } catch (error) {
-      if (errorCode(error) === 4403) {
-        purgeUnauthorized()
-
-        return
-      }
+    } catch {
       // Keep the last verified detail; source coverage already communicates an incomplete refresh.
     }
 
@@ -366,7 +348,7 @@ export function createWorkStore(): WorkStore {
       if (generation !== epoch || gateway !== client) {return false}
       publish({ pending: false })
 
-      if (errorCode(error) === 4403) {purgeUnauthorized()} else if (errorCode(error) === 4090) {
+      if (errorCode(error) === 4403) {publish({ status: 'error', message: UNAUTHORIZED_SOURCE_MESSAGE })} else if (errorCode(error) === 4090) {
         await refresh()
         publish({ message: 'This priority changed. The latest verified version was loaded; nothing was automatically retried.' })
       } else {
@@ -444,7 +426,7 @@ export function createWorkStore(): WorkStore {
         await refresh()
         publish({ message: 'This card changed or the decision is no longer valid. The latest revision was requested; review it before deciding again. Nothing was automatically retried.' })
       } else if (errorCode(error) === 4403) {
-        purgeUnauthorized()
+        publish({ message: UNAUTHORIZED_SOURCE_MESSAGE })
       } else {
         publish({ message: 'Save could not be verified. Refresh before trying again; it may already have reached the server.' })
       }

@@ -310,15 +310,44 @@ describe('createDirectoryStore', () => {
     expect(store.getSnapshot().coverage[0]).toMatchObject({ status: 'ready', complete: true, message: null })
   })
 
-  it('purges retained directory rows and history on owner revocation', async () => {
+  it('drops only the revoked source and keeps every other profile verified', async () => {
+    const client = gateway()
+    const other = 'mentor'
+    const otherSession = { ...session('other-session'), profile: other }
+    const store = createDirectoryStore()
+    vi.mocked(client.listCompanionSessions).mockResolvedValue({ sessions: [otherSession], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } })
+    vi.mocked(client.listCompanionProjects).mockResolvedValue({ projects: [], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } })
+    await store.attach(client, [profile, other])
+    await store.openSession(other, 'other-session', source)
+    vi.mocked(client.listCompanionSessions).mockImplementation(async ({ profile: requested }) => {
+      if (requested === profile) {throw { code: 4403 }}
+
+      return { sessions: [otherSession], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } }
+    })
+    vi.mocked(client.listCompanionProjects).mockImplementation(async ({ profile: requested }) => {
+      if (requested === profile) {throw { code: 4403 }}
+
+      return { projects: [], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } }
+    })
+    await store.refresh()
+
+    const snapshot = store.getSnapshot()
+
+    expect(snapshot.sessions.map((item) => item.profile)).toEqual([other])
+    expect(snapshot.coverage.find((item) => item.profile === profile)).toMatchObject({ status: 'error', message: 'This source is not authorized.' })
+    expect(snapshot.coverage.find((item) => item.profile === other)).toMatchObject({ status: 'ready' })
+    expect(snapshot.selectedSession?.profile).toBe(other)
+    expect(snapshot.history?.session_id).toBe('other-session')
+  })
+
+  it('drops the open detail of a revoked source without touching other profiles', async () => {
     const client = gateway(); const store = createDirectoryStore()
     await store.attach(client, [profile]); await store.openSession(profile, 'one', source)
     vi.mocked(client.listCompanionSessions).mockRejectedValue({ code: 4403 })
     await store.refresh()
 
-    expect(store.getSnapshot()).toMatchObject({ sessions: [], projects: [], topics: [], selectedProject: null, selectedSession: null, selectedTopic: null, history: null, detailStatus: 'error' })
-    expect(store.getSnapshot().coverage).toEqual([])
-    expect(store.getSnapshot().topicCoverage).toEqual([])
+    expect(store.getSnapshot()).toMatchObject({ sessions: [], selectedSession: null, history: null, detailStatus: 'error', detailMessage: 'This source is not authorized.' })
+    expect(store.getSnapshot().coverage).toMatchObject([{ profile, status: 'error', message: 'This source is not authorized.' }])
     expect(JSON.stringify(store.getSnapshot())).not.toContain('one-message')
   })
 
