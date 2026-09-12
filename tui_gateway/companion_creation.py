@@ -570,7 +570,9 @@ def _reconcile_creation_recovery(
         "completed", "failed", "cancelled", "not_admitted",
         "interrupted_outcome_unknown",
     }
-    if state == "claimed" and snapshot["phase"] in {"prepared", "dispatching"}:
+    if state == "claimed" and snapshot["phase"] in {
+        "preparing", "prepared", "dispatching",
+    }:
         try:
             record = settle_turn(
                 target_db,

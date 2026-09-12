@@ -144,6 +144,49 @@ def _unreachable_call(client: StdioRpcClient, request_id: str, params: dict[str,
     return str(failure.value)
 
 
+def _crash_at(
+    home: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    events: Path,
+    *,
+    point: str,
+    params: dict[str, Any],
+) -> list[str]:
+    monkeypatch.setenv("HERMES_COMPANION_TEST_HALT_AT", point)
+    rigged = StdioRpcClient(home)
+    try:
+        _unreachable_call(rigged, f"create-{point}", params)
+        assert rigged.process.wait(timeout=30) == 9, rigged.process.returncode
+    finally:
+        rigged.close()
+        monkeypatch.delenv("HERMES_COMPANION_TEST_HALT_AT", raising=False)
+    recorded = _events(events)
+    assert ["halt", point] in [line.split()[:2] for line in recorded], recorded
+    return recorded
+
+
+def _reconcile(home: Path, request_id: str) -> dict[str, Any]:
+    fresh = StdioRpcClient(home)
+    try:
+        response = fresh.call(
+            f"reconcile-{request_id}",
+            "companion.sessions.reconcile",
+            _reconcile_params(request_id),
+        )
+        assert "result" in response, response
+        return response["result"]
+    finally:
+        fresh.close()
+
+
+def _retry_create(home: Path, request_id: str, params: dict[str, Any]) -> dict[str, Any]:
+    fresh = StdioRpcClient(home)
+    try:
+        return fresh.call(f"retry-{request_id}", "companion.sessions.create", params)
+    finally:
+        fresh.close()
+
+
 def test_duplicate_create_from_two_processes_yields_one_session_and_one_dispatch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -484,3 +527,176 @@ def test_death_before_the_trusted_create_leaves_no_row_and_no_dispatch(
     final = _events(events)
     assert _count(final, "submit_entry") == 0, final
     assert _count(final, "agent_build") == 0, final
+
+
+def test_death_after_reservation_before_binding_is_cleaned_and_not_found(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§4.3/248: a rowless dead reservation is not a session or a request binding."""
+    home, _project, project_id = _seed(tmp_path, "crash-reserved")
+    (home / "config.yaml").write_text(
+        "model: synthetic-heavy\ncompression:\n  enabled: false\nmax_concurrent_sessions: 1\n",
+        encoding="utf-8",
+    )
+    events = tmp_path / "crash-reserved" / "events.log"
+    _shared_env(monkeypatch, events)
+    request_id = str(uuid.uuid4())
+    params = _create_params(request_id, project_id, _turn())
+
+    recorded = _crash_at(
+        home, monkeypatch, events, point="reservation_acquired", params=params
+    )
+    acquired = [
+        line.split(" ", 1)[1]
+        for line in recorded
+        if line.startswith("reservation_acquired ")
+    ]
+    assert len(acquired) == 1, recorded
+    abandoned_key = acquired[0]
+    assert _session_rows(home) == []
+    assert _count(recorded, "create_entry") == 0
+    assert _count(recorded, "submit_entry") == 0
+    assert _count(recorded, "agent_build") == 0
+
+    receipt = _reconcile(home, request_id)
+    assert receipt["operation_status"] == "not_found", receipt
+    assert receipt["stored_session_id"] is None, receipt
+    assert receipt["row_state"] == "absent", receipt
+
+    # A later real reservation pass performs dead-process cleanup. It can use the only
+    # slot, while the abandoned key never becomes a row or request binding.
+    replacement_request = str(uuid.uuid4())
+    replacement = _retry_create(
+        home,
+        replacement_request,
+        _create_params(replacement_request, project_id, _turn()),
+    )
+    assert "result" in replacement, replacement
+    assert replacement["result"]["stored_session_id"] != abandoned_key
+    assert abandoned_key not in _registry_session_ids(home)
+    assert abandoned_key not in _session_rows(home)
+
+
+def test_death_after_turn_pair_before_coordinator_prepared_settles_without_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§4.3/254: stale preparing C plus complete claimed T settles; it never dispatches."""
+    home, _project, project_id = _seed(tmp_path, "crash-turn-prepared")
+    events = tmp_path / "crash-turn-prepared" / "events.log"
+    _shared_env(monkeypatch, events)
+    request_id = str(uuid.uuid4())
+    params = _create_params(request_id, project_id, _turn())
+
+    recorded = _crash_at(home, monkeypatch, events, point="turn_prepared", params=params)
+    rows_before = _session_rows(home)
+    assert len(rows_before) == 1
+    assert _count(recorded, "turn_prepared") == 1
+    assert _count(recorded, "submit_entry") == 0
+    assert _count(recorded, "agent_build") == 0
+
+    receipt = _reconcile(home, request_id)
+    assert receipt["operation_status"] == "not_admitted", receipt
+    assert receipt["row_state"] == "present", receipt
+    assert receipt["stored_session_id"] == rows_before[0]
+    before_retry = _events(events)
+    retry = _retry_create(home, request_id, params)
+    assert retry["result"]["operation_status"] == "not_admitted", retry
+    assert retry["result"]["stored_session_id"] == rows_before[0], retry
+    assert _session_rows(home) == rows_before
+    after_retry = _events(events)
+    assert _count(after_retry, "submit_entry") == _count(before_retry, "submit_entry") == 0
+    assert _count(after_retry, "agent_build") == _count(before_retry, "agent_build") == 0
+
+
+def test_death_inside_submit_before_admission_settles_without_build(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§4.3/257: submit entered but durable admission did not; recovery is not_admitted."""
+    home, _project, project_id = _seed(tmp_path, "crash-inside-submit")
+    events = tmp_path / "crash-inside-submit" / "events.log"
+    _shared_env(monkeypatch, events)
+    request_id = str(uuid.uuid4())
+    params = _create_params(request_id, project_id, _turn())
+
+    recorded = _crash_at(
+        home, monkeypatch, events, point="inside_submit_before_admit", params=params
+    )
+    rows_before = _session_rows(home)
+    assert len(rows_before) == 1
+    assert _count(recorded, "submit_entry") == 1
+    assert _count(recorded, "inside_submit_before_admit") == 1
+    assert _count(recorded, "turn_admitted") == 0
+    assert _count(recorded, "agent_build") == 0
+
+    receipt = _reconcile(home, request_id)
+    assert receipt["operation_status"] == "not_admitted", receipt
+    assert receipt["row_state"] == "present", receipt
+    assert receipt["stored_session_id"] == rows_before[0]
+    before_retry = _events(events)
+    retry = _retry_create(home, request_id, params)
+    assert retry["result"]["operation_status"] == "not_admitted", retry
+    assert _session_rows(home) == rows_before
+    after_retry = _events(events)
+    assert _count(after_retry, "submit_entry") == _count(before_retry, "submit_entry") == 1
+    assert _count(after_retry, "agent_build") == _count(before_retry, "agent_build") == 0
+
+
+def test_death_after_admit_commit_never_retries_pipeline_or_reports_rejection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§4.3/258: an ambiguous admit commit is read exactly and consumed permanently."""
+    home, _project, project_id = _seed(tmp_path, "crash-admit-commit")
+    events = tmp_path / "crash-admit-commit" / "events.log"
+    _shared_env(monkeypatch, events)
+    request_id = str(uuid.uuid4())
+    params = _create_params(request_id, project_id, _turn(duration=30.0))
+
+    recorded = _crash_at(home, monkeypatch, events, point="turn_admitted", params=params)
+    rows_before = _session_rows(home)
+    assert len(rows_before) == 1
+    assert _count(recorded, "submit_entry") == 1
+    assert _count(recorded, "turn_admitted") == 1
+    assert _count(recorded, "agent_build") == 0
+
+    receipt = _reconcile(home, request_id)
+    assert receipt["operation_status"] == "interrupted_outcome_unknown", receipt
+    assert receipt["operation_status"] != "not_admitted"
+    assert receipt["row_state"] == "present", receipt
+    assert receipt["stored_session_id"] == rows_before[0]
+    before_retry = _events(events)
+    retry = _retry_create(home, request_id, params)
+    assert retry["result"]["operation_status"] == "interrupted_outcome_unknown", retry
+    assert _session_rows(home) == rows_before
+    after_retry = _events(events)
+    assert _count(after_retry, "submit_entry") == _count(before_retry, "submit_entry") == 1
+    assert _count(after_retry, "agent_build") == _count(before_retry, "agent_build") == 0
+
+
+def test_death_after_agent_build_before_running_write_is_unknown_and_not_replayed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§4.3/260: a built worker with no running write is interrupted, never replayed."""
+    home, _project, project_id = _seed(tmp_path, "crash-agent-built")
+    events = tmp_path / "crash-agent-built" / "events.log"
+    _shared_env(monkeypatch, events)
+    request_id = str(uuid.uuid4())
+    params = _create_params(request_id, project_id, _turn(duration=30.0))
+
+    recorded = _crash_at(home, monkeypatch, events, point="agent_built", params=params)
+    rows_before = _session_rows(home)
+    assert len(rows_before) == 1
+    assert _count(recorded, "turn_admitted") == 1
+    assert _count(recorded, "agent_build") == 1
+    assert _count(recorded, "agent_built") == 1
+
+    receipt = _reconcile(home, request_id)
+    assert receipt["operation_status"] == "interrupted_outcome_unknown", receipt
+    assert receipt["row_state"] == "present", receipt
+    assert receipt["stored_session_id"] == rows_before[0]
+    before_retry = _events(events)
+    retry = _retry_create(home, request_id, params)
+    assert retry["result"]["operation_status"] == "interrupted_outcome_unknown", retry
+    assert _session_rows(home) == rows_before
+    after_retry = _events(events)
+    assert _count(after_retry, "submit_entry") == _count(before_retry, "submit_entry") == 1
+    assert _count(after_retry, "agent_build") == _count(before_retry, "agent_build") == 1

@@ -5,7 +5,7 @@ import os
 from typing import Any
 
 from hermes_cli.dashboard_auth.ws_tickets import OwnerAuthorizationLease
-from tui_gateway import companion_library, entry, server
+from tui_gateway import companion_library, companion_turns, entry, server
 from tui_gateway.transport import Transport
 
 
@@ -103,7 +103,9 @@ _claim_active_session_slot = server._claim_active_session_slot
 def _counted_claim_active_session_slot(*args, **kwargs):
     lease, refusal = _claim_active_session_slot(*args, **kwargs)
     if kwargs.get("strict_reservation") and lease is not None:
-        _record("reservation_acquired", str(getattr(lease, "session_id", "")))
+        detail = str(getattr(lease, "session_id", ""))
+        _record("reservation_acquired", detail)
+        _halt_if("reservation_acquired", detail)
     return lease, refusal
 
 
@@ -120,6 +122,49 @@ def _counted_rollback_creation_reservation(lease):
 
 
 server._rollback_creation_reservation = _counted_rollback_creation_reservation
+
+_prepare_created_session = companion_turns.prepare_created_session
+
+
+def _halting_prepare_created_session(*args, **kwargs):
+    claim = _prepare_created_session(*args, **kwargs)
+    if claim.operation_kind == "create":
+        detail = str(claim.lineage_root_id)
+        _record("turn_prepared", detail)
+        _halt_if("turn_prepared", detail)
+    return claim
+
+
+companion_turns.prepare_created_session = _halting_prepare_created_session
+
+_admit_turn = companion_turns.admit_turn
+
+
+def _halting_admit_turn(*args, **kwargs):
+    result = _admit_turn(*args, **kwargs)
+    claim = args[1] if len(args) > 1 else kwargs.get("claim")
+    if getattr(claim, "operation_kind", None) == "create":
+        detail = str(getattr(claim, "lineage_root_id", ""))
+        _record("turn_admitted", detail)
+        _halt_if("turn_admitted", detail)
+    return result
+
+
+companion_turns.admit_turn = _halting_admit_turn
+
+_lock_in_submit_turn = getattr(server, "_lock_in_submit_turn")
+
+
+def _halting_lock_in_submit_turn(*args, **kwargs):
+    result = _lock_in_submit_turn(*args, **kwargs)
+    error, _fields = result
+    if error is None:
+        _record("inside_submit_before_admit")
+        _halt_if("inside_submit_before_admit")
+    return result
+
+
+setattr(server, "_lock_in_submit_turn", _halting_lock_in_submit_turn)
 
 _submit_prompt = server._methods["prompt.submit"]
 
@@ -138,7 +183,10 @@ _agent_factory = server._make_agent
 def _counted_make_agent(*args, **kwargs):
     _record("agent_build")
     _halt_if("agent_build")
-    return _agent_factory(*args, **kwargs)
+    agent = _agent_factory(*args, **kwargs)
+    _record("agent_built")
+    _halt_if("agent_built")
+    return agent
 
 
 server._make_agent = _counted_make_agent
