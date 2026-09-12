@@ -108,12 +108,26 @@ client-incomplete; O4 is defect 3 above; O5 is intentional exception preservatio
 path); O6 confirmed a tool-output redaction artefact — the file contains `= None`, the bytes
 `***` do not appear in it.
 
-## Still not covered (needs the phone, or a second real client)
+## Independent re-audit gate — FAIL (2026-09-12, frozen tree `a542da9f5b`)
 
-- Two *real* clients (Android + Mac) on one candidate session: the matrix uses two protocol
-  clients on one backend; the human-visible acceptance (MC-16 new session visible on Desktop,
-  MC-14 disconnect does not interrupt) is not covered here.
-- The mobile client does not yet call `companion.sessions.create` (verified: `apps/companion`
-  contains no such RPC; new conversations still go through the generic `session.create` +
-  `prompt.submit` "Bot Chat" path), so the durability proven here is not yet reachable from
-  the app. This is the largest remaining product gap.
+Full report: `reaudit-2026-09-12/report-reaudit-sol.md`. The auditor re-ran the gates itself:
+matrix 11/11, `tests/tui_gateway` 1 796/0, vitest 574/0, `tsc` clean, eslint 0 errors.
+
+Closed and independently verified: **D1** (capacity reserved before the index is bound), **D2**
+(the mobile first-send path uses `companion.sessions.create`/`continue`/`reconcile`), **D3**
+(degraded receipts keep trusted identity strings), **D4** (a stale `preparing` creator that
+already committed its turn pair now settles, `companion_creation.py:573-589`).
+
+Still failing — two durability defects in the new client retry ledger:
+
+- **HIGH** — sign-out deletes unresolved creation metadata, and the owner scope is derived from
+  the gateway URL plus a local UUID instead of authenticated owner identity
+  (`companion-store.ts:600-611`, `:1840-1850`); a later first-send can create a duplicate.
+- **MEDIUM** — more than 100 persisted entries are treated as corruption and the entire ledger
+  is deleted on load; `put()` enforces no 100-entry cap (`session-operation-retries.ts:92-120`).
+
+Real-device acceptance (2026-09-12, Galaxy S24 against a real gateway over Tailscale): owner
+Google sign-in, HTTPS transport and the WS session were proven on the device, and the mobile
+new-conversation entry is now reachable. Creation is still refused with "Durable conversation
+creation is unavailable for this connection." because the app's directory coverage is empty, so
+no `backend_namespace` exists for the profile. Root cause not yet established.
