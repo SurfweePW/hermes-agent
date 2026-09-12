@@ -48,6 +48,7 @@ _CREATION_RECONCILE_KEYS = frozenset({
     "operation_kind", "backend_namespace", "profile", "client_request_id",
 })
 _INVALID_RECONCILIATION_MESSAGE = "invalid session reconciliation parameters"
+_CREATION_UNKNOWN_MESSAGE = "Creation outcome unknown; reconcile this request."
 
 
 def _reset_process_creation_identity_after_fork() -> None:
@@ -383,15 +384,17 @@ def _creation_evidence_permitted(
     }
 
 
-def _null_creation_receipt() -> dict[str, Any]:
+def _degraded_creation_receipt(
+    *, client_request_id: str, index: Mapping[str, Any]
+) -> dict[str, Any]:
     return {
         "version": 1,
         "operation_kind": "create",
-        "backend_namespace": None,
-        "profile": None,
-        "client_request_id": None,
-        "project_id": None,
-        "stored_session_id": None,
+        "backend_namespace": index["backend_namespace"],
+        "profile": index["target_profile"],
+        "client_request_id": client_request_id,
+        "project_id": index["project_id"],
+        "stored_session_id": index["requested_id"],
         "row_state": "unavailable",
         "operation_status": "recovery_required",
         "runtime_session_id": None,
@@ -411,12 +414,18 @@ def project_creation_receipt(
 
     try:
         index = _canonical_creation_index_snapshot(index)
-        if not _valid_canonical_uuid4(client_request_id):
-            return _null_creation_receipt()
+    except Exception as exc:
+        raise CompanionSessionsError(_CREATION_UNKNOWN_MESSAGE, 5066) from exc
+    if not _valid_canonical_uuid4(client_request_id):
+        raise CompanionSessionsError(_CREATION_UNKNOWN_MESSAGE, 5066)
+
+    try:
         if type(creator_liveness) is not str or creator_liveness not in {
             "alive", "dead", "unknown"
         }:
-            return _null_creation_receipt()
+            return _degraded_creation_receipt(
+                client_request_id=client_request_id, index=index
+            )
         if type(age_seconds) is int:
             valid_age = age_seconds >= 0
         elif type(age_seconds) is float:
@@ -424,7 +433,9 @@ def project_creation_receipt(
         else:
             valid_age = False
         if not valid_age or type(observation) is not CreatedSessionObservation:
-            return _null_creation_receipt()
+            return _degraded_creation_receipt(
+                client_request_id=client_request_id, index=index
+            )
 
         row_state = observation.row_state
         evidence_state = observation.evidence_state
@@ -455,7 +466,9 @@ def project_creation_receipt(
             )
         )
         if not valid_observation:
-            return _null_creation_receipt()
+            return _degraded_creation_receipt(
+                client_request_id=client_request_id, index=index
+            )
 
         operation_status = "recovery_required"
         permitted = _creation_evidence_permitted(
@@ -489,8 +502,8 @@ def project_creation_receipt(
             "operation_status": operation_status,
             "runtime_session_id": None,
         }
-    except Exception:
-        return _null_creation_receipt()
+    except Exception as exc:
+        raise CompanionSessionsError(_CREATION_UNKNOWN_MESSAGE, 5066) from exc
 
 
 def _reconcile_creation_recovery(

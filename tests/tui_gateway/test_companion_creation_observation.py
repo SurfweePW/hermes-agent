@@ -4,6 +4,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import json
 import sqlite3
+from typing import cast
 
 import pytest
 
@@ -718,19 +719,34 @@ def test_terminal_exact_evidence_ignores_creator_liveness_and_age():
     assert receipt["row_state"] == "present"
 
 
+def _assert_trusted_degraded_receipt(receipt, index):
+    assert set(receipt) == RECEIPT_KEYS
+    assert receipt["backend_namespace"] == index["backend_namespace"]
+    assert receipt["profile"] == index["target_profile"]
+    assert receipt["client_request_id"] == REQUEST
+    assert receipt["project_id"] == index["project_id"]
+    assert receipt["stored_session_id"] == index["requested_id"]
+    assert receipt["row_state"] == "unavailable"
+    assert receipt["operation_status"] == "recovery_required"
+    assert receipt["runtime_session_id"] is None
+    assert all(
+        isinstance(receipt[field], str)
+        for field in ("backend_namespace", "profile", "client_request_id")
+    )
+
+
 @pytest.mark.parametrize("field", ["row_state", "evidence_state", "turn_state"])
-def test_unhashable_observation_values_return_all_null_identity(field):
+def test_unhashable_observation_values_preserve_trusted_identity(field):
     values = {
         "row_state": "present",
         "evidence_state": "exact",
         "turn_state": "claimed",
     }
     values[field] = ["PRIVATE-CANARY"]
-    receipt = _receipt(_index(), companion_turns.CreatedSessionObservation(**values))
+    index = _index()
+    receipt = _receipt(index, companion_turns.CreatedSessionObservation(**values))
 
-    assert receipt["backend_namespace"] is None
-    assert receipt["client_request_id"] is None
-    assert receipt["stored_session_id"] is None
+    _assert_trusted_degraded_receipt(receipt, index)
     assert "CANARY" not in json.dumps(receipt)
 
 
@@ -745,18 +761,16 @@ def test_unhashable_observation_values_return_all_null_identity(field):
         ("alive", -1.0),
     ],
 )
-def test_malformed_liveness_or_age_returns_all_null_identity(liveness, age):
+def test_malformed_liveness_or_age_preserves_trusted_identity(liveness, age):
+    index = _index()
     receipt = _receipt(
-        _index(),
+        index,
         companion_turns.CreatedSessionObservation("present", "exact", "claimed"),
         liveness=liveness,
         age=age,
     )
 
-    assert receipt["backend_namespace"] is None
-    assert receipt["profile"] is None
-    assert receipt["client_request_id"] is None
-    assert receipt["stored_session_id"] is None
+    _assert_trusted_degraded_receipt(receipt, index)
 
 
 @pytest.mark.parametrize(
@@ -771,46 +785,38 @@ def test_malformed_liveness_or_age_returns_all_null_identity(liveness, age):
         {**_index(), "creator_pid": True},
     ],
 )
-def test_malformed_projection_boundary_returns_private_fixed_receipt(malformed):
-    receipt = companion_creation.project_creation_receipt(
-        client_request_id=REQUEST,
-        index=malformed,
-        observation=companion_turns.CreatedSessionObservation("present", "exact", "running"),
-        creator_liveness="alive",
-        age_seconds=1.0,
-    )
+def test_malformed_projection_index_raises_private_creation_unknown(malformed):
+    with pytest.raises(companion_creation.CompanionSessionsError) as exc_info:
+        companion_creation.project_creation_receipt(
+            client_request_id=REQUEST,
+            index=malformed,
+            observation=companion_turns.CreatedSessionObservation(
+                "present", "exact", "running"
+            ),
+            creator_liveness="alive",
+            age_seconds=1.0,
+        )
 
-    assert set(receipt) == RECEIPT_KEYS
-    assert receipt == {
-        "version": 1,
-        "operation_kind": "create",
-        "backend_namespace": None,
-        "profile": None,
-        "client_request_id": None,
-        "project_id": None,
-        "stored_session_id": None,
-        "row_state": "unavailable",
-        "operation_status": "recovery_required",
-        "runtime_session_id": None,
-    }
-    encoded = json.dumps(receipt)
-    assert "CANARY" not in encoded
+    assert exc_info.value.code == 5066
+    assert str(exc_info.value) == "Creation outcome unknown; reconcile this request."
+    assert "CANARY" not in str(exc_info.value)
 
 
-def test_malformed_request_id_cannot_leak_through_projection_boundary():
-    receipt = companion_creation.project_creation_receipt(
-        client_request_id={"secret": "REQUEST-CANARY"},
-        index=_index(),
-        observation=companion_turns.CreatedSessionObservation("present", "exact", "claimed"),
-        creator_liveness="alive",
-        age_seconds=1.0,
-    )
+def test_malformed_request_id_raises_private_creation_unknown():
+    with pytest.raises(companion_creation.CompanionSessionsError) as exc_info:
+        companion_creation.project_creation_receipt(
+            client_request_id=cast(str, {"secret": "REQUEST-CANARY"}),
+            index=_index(),
+            observation=companion_turns.CreatedSessionObservation(
+                "present", "exact", "claimed"
+            ),
+            creator_liveness="alive",
+            age_seconds=1.0,
+        )
 
-    assert set(receipt) == RECEIPT_KEYS
-    assert receipt["client_request_id"] is None
-    assert receipt["backend_namespace"] is None
-    assert receipt["row_state"] == "unavailable"
-    assert "REQUEST-CANARY" not in json.dumps(receipt)
+    assert exc_info.value.code == 5066
+    assert str(exc_info.value) == "Creation outcome unknown; reconcile this request."
+    assert "REQUEST-CANARY" not in str(exc_info.value)
 
 
 @pytest.mark.parametrize(
@@ -830,25 +836,19 @@ def test_malformed_request_id_cannot_leak_through_projection_boundary():
     ],
 )
 def test_projection_rejects_noncanonical_protocol_identifiers(field, value):
-    receipt = companion_creation.project_creation_receipt(
-        client_request_id=REQUEST,
-        index={**_index(), field: value},
-        observation=companion_turns.CreatedSessionObservation("present", "exact", "claimed"),
-        creator_liveness="alive",
-        age_seconds=1.0,
-    )
-    assert receipt == {
-        "version": 1,
-        "operation_kind": "create",
-        "backend_namespace": None,
-        "profile": None,
-        "client_request_id": None,
-        "project_id": None,
-        "stored_session_id": None,
-        "row_state": "unavailable",
-        "operation_status": "recovery_required",
-        "runtime_session_id": None,
-    }
+    with pytest.raises(companion_creation.CompanionSessionsError) as exc_info:
+        companion_creation.project_creation_receipt(
+            client_request_id=REQUEST,
+            index={**_index(), field: value},
+            observation=companion_turns.CreatedSessionObservation(
+                "present", "exact", "claimed"
+            ),
+            creator_liveness="alive",
+            age_seconds=1.0,
+        )
+
+    assert exc_info.value.code == 5066
+    assert str(exc_info.value) == "Creation outcome unknown; reconcile this request."
 
 
 def test_projection_preserves_non_control_unicode_protocol_identifiers():
@@ -881,15 +881,38 @@ def test_projection_preserves_non_control_unicode_protocol_identifiers():
     ],
 )
 def test_projection_requires_canonical_uuid_v4_request_id(request_id):
-    receipt = companion_creation.project_creation_receipt(
-        client_request_id=request_id,
-        index=_index(),
-        observation=companion_turns.CreatedSessionObservation("present", "exact", "claimed"),
-        creator_liveness="alive",
-        age_seconds=1.0,
+    with pytest.raises(companion_creation.CompanionSessionsError) as exc_info:
+        companion_creation.project_creation_receipt(
+            client_request_id=request_id,
+            index=_index(),
+            observation=companion_turns.CreatedSessionObservation(
+                "present", "exact", "claimed"
+            ),
+            creator_liveness="alive",
+            age_seconds=1.0,
+        )
+
+    assert exc_info.value.code == 5066
+    assert str(exc_info.value) == "Creation outcome unknown; reconcile this request."
+
+
+def test_unexpected_projection_exception_raises_private_creation_unknown(monkeypatch):
+    def fail_projection(*_args, **_kwargs):
+        raise RuntimeError("INTERNAL-CANARY")
+
+    monkeypatch.setattr(
+        companion_creation, "_creation_evidence_permitted", fail_projection
     )
-    assert receipt["client_request_id"] is None
-    assert receipt["backend_namespace"] is None
+
+    with pytest.raises(companion_creation.CompanionSessionsError) as exc_info:
+        _receipt(
+            _index(),
+            companion_turns.CreatedSessionObservation("present", "exact", "claimed"),
+        )
+
+    assert exc_info.value.code == 5066
+    assert str(exc_info.value) == "Creation outcome unknown; reconcile this request."
+    assert "CANARY" not in str(exc_info.value)
 
 
 def test_observer_rejects_full_schema_invalid_index_before_reading():
