@@ -9,7 +9,6 @@ production stdio entrypoint in its own process and shares only the real temporar
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 import sqlite3
 import uuid
@@ -23,6 +22,23 @@ from tests.tui_gateway.test_companion_transport_integration import (
     PROFILE,
     StdioRpcClient,
 )
+
+# Design §1.4: the receipt vocabulary is closed; every status is legal for any operation.
+_RECEIPT_STATUSES = frozenset(
+    {
+        "not_found",
+        "preparing",
+        "claimed",
+        "admitted",
+        "running",
+        "completed",
+        "failed",
+        "cancelled",
+        "not_admitted",
+        "interrupted_outcome_unknown",
+    }
+)
+_ROW_STATES = frozenset({"absent", "present", "unavailable"})
 
 TURN_SECONDS = 0.6
 
@@ -162,24 +178,24 @@ def test_duplicate_create_from_two_processes_yields_one_session_and_one_dispatch
     assert _count(recorded, "agent_build") == 1, recorded
     assert len(rows) == 1, rows
 
-    results = [value["result"] for value in outcomes.values() if isinstance(value.get("result"), dict)]
-    assert len(results) == 2, outcomes
-    allowed = {
-        "preparing",
-        "admitted",
-        "failed",
-        "recovery_required",
-        "not_admitted",
-        "not_found",
-    }
-    for receipt in results:
-        # One request key, one logical conversation: both processes may read the same
-        # operation, but neither may invent a second stored session.
-        assert receipt["client_request_id"] == request_id, receipt
-        assert receipt["stored_session_id"] == rows[0], receipt
-        assert receipt["operation_status"] in allowed, receipt
-    assert any(receipt["operation_status"] == "admitted" for receipt in results), results
-    runtimes = {receipt["runtime_session_id"] for receipt in results} - {None}
+    receipts: list[dict[str, Any]] = []
+    for outcome in outcomes.values():
+        if isinstance(outcome.get("result"), dict):
+            receipt = outcome["result"]
+            assert receipt["client_request_id"] == request_id, receipt
+            assert receipt["operation_status"] in _RECEIPT_STATUSES, receipt
+            assert receipt["row_state"] in _ROW_STATES, receipt
+            # One request key, one logical conversation: a receipt may still leave the row
+            # unknown, but it may never point somewhere else.
+            assert receipt["stored_session_id"] in {None, rows[0]}, receipt
+            receipts.append(receipt)
+        else:
+            # A peer that refuses must say so explicitly instead of continuing silently.
+            failure = outcome["error"]
+            assert isinstance(failure, dict) and failure.get("code") in {4090, 4091}, outcome
+    # Non-vacuity: the operation really reached the stored row, not just an empty shell.
+    assert any(receipt["stored_session_id"] == rows[0] for receipt in receipts), outcomes
+    runtimes = {receipt["runtime_session_id"] for receipt in receipts} - {None}
     assert len(runtimes) <= 1, runtimes
 
 
@@ -201,6 +217,9 @@ def test_crash_before_submit_entry_recovers_as_not_admitted_with_zero_dispatch(
             rigged.receive(
                 lambda value: value.get("id") == "create-crashed", timeout=60.0
             )
+        # Death is verified, not inferred from a receive timeout: the halt point fired and
+        # the process left through the crash exit code.
+        assert rigged.process.wait(timeout=30) == 9, rigged.process.returncode
     finally:
         rigged.close()
     monkeypatch.delenv("HERMES_COMPANION_TEST_HALT_AT", raising=False)
@@ -208,8 +227,10 @@ def test_crash_before_submit_entry_recovers_as_not_admitted_with_zero_dispatch(
     recorded = _events(events)
     assert _count(recorded, "create_entry") == 1, recorded
     assert _count(recorded, "agent_build") == 0, recorded
+    assert ["halt", "submit_entry"] in [line.split()[:2] for line in recorded], recorded
 
     rows_before = _session_rows(home)
+    dispatches_before = _count(recorded, "agent_build")
     fresh = StdioRpcClient(home)
     try:
         response = fresh.call(
@@ -226,11 +247,16 @@ def test_crash_before_submit_entry_recovers_as_not_admitted_with_zero_dispatch(
         if isinstance(retried, dict):
             assert retried["operation_status"] == "not_admitted", retried
             assert retried["runtime_session_id"] is None, retried
-        assert _session_rows(home) == rows_before, (rows_before, _session_rows(home))
+            # A closed index is terminal: the retry may never resurrect the request.
+            assert retried["client_request_id"] == request_id, retried
     finally:
         fresh.close()
 
-    assert _count(_events(events), "agent_build") == 0, _events(events)
+    # The retry is judged by its effect, whatever envelope it arrived in.
+    assert _session_rows(home) == rows_before, (rows_before, _session_rows(home))
+    final = _events(events)
+    assert _count(final, "agent_build") == dispatches_before, final
+    assert _count(final, "submit_entry") == 1, final
 
 
 def test_crash_after_admission_recovers_as_unknown_outcome(
@@ -271,6 +297,11 @@ def test_crash_after_admission_recovers_as_unknown_outcome(
         assert receipt["operation_status"] == "interrupted_outcome_unknown", receipt
         assert receipt["client_request_id"] == request_id
         assert receipt["row_state"] == "present", receipt
+        # The admission is durable, but nothing was reported as done and reconcile is a read.
+        assert receipt["runtime_session_id"] is None, receipt
+        after = _events(events)
+        assert _count(after, "submit_entry") == 1, after
+        assert _count(after, "agent_build") == 1, after
     finally:
         fresh.close()
 
@@ -314,8 +345,66 @@ def test_same_request_id_with_a_different_payload_is_refused(
         # Documented conflict contract: one request key owns one payload.
         assert conflict["error"]["code"] == 4090, conflict
     else:
-        receipt = conflict["result"]
-        assert receipt["operation_status"] != "admitted", conflict
-        assert receipt["stored_session_id"] == stored, receipt
+        # The product path refuses instead of adopting, so a receipt here is a contract
+        # violation, not an alternative success.
+        pytest.fail(f"a conflicting payload must be refused: {conflict}")
     assert _session_rows(home) == rows_after_first, _session_rows(home)
     assert _count(_events(events), "agent_build") == dispatches_after_first, _events(events)
+def test_death_before_the_trusted_create_leaves_no_row_and_no_dispatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Death before the reserved create commits must settle to not_admitted with row absent."""
+    home, _project, project_id = _seed(tmp_path, "crash-pre-create")
+    events = tmp_path / "crash-pre-create" / "events.log"
+    _shared_env(monkeypatch, events)
+    request_id = str(uuid.uuid4())
+    params = _create_params(request_id, project_id, _turn())
+
+    monkeypatch.setenv("HERMES_COMPANION_TEST_HALT_AT", "create_entry")
+    rigged = StdioRpcClient(home)
+    try:
+        rigged.send("create-crashed", "companion.sessions.create", params)
+        with pytest.raises(AssertionError):
+            rigged.receive(
+                lambda value: value.get("id") == "create-crashed", timeout=60.0
+            )
+        assert rigged.process.wait(timeout=30) == 9, rigged.process.returncode
+    finally:
+        rigged.close()
+    monkeypatch.delenv("HERMES_COMPANION_TEST_HALT_AT", raising=False)
+
+    recorded = _events(events)
+    assert _count(recorded, "create_entry") == 1, recorded
+    assert ["halt", "create_entry"] in [line.split()[:2] for line in recorded], recorded
+    assert _session_rows(home) == [], _session_rows(home)
+
+    fresh = StdioRpcClient(home)
+    try:
+        response = fresh.call(
+            "reconcile-pre-create", "companion.sessions.reconcile", _reconcile_params(request_id)
+        )
+        assert "result" in response, response
+        receipt = response["result"]
+        assert receipt["operation_status"] == "not_admitted", receipt
+        assert receipt["row_state"] == "absent", receipt
+        assert receipt["runtime_session_id"] is None, receipt
+        assert receipt["client_request_id"] == request_id
+        reserved = receipt["stored_session_id"]
+        assert isinstance(reserved, str) and reserved, receipt
+
+        retry = fresh.call("create-retry-pre-create", "companion.sessions.create", params)
+        retried = retry.get("result")
+        if isinstance(retried, dict):
+            # The reservation is stable: a retry re-reads the same closed operation
+            # instead of minting a second identity.
+            assert retried["stored_session_id"] == reserved, retried
+            assert retried["operation_status"] == "not_admitted", retried
+            assert retried["row_state"] == "absent", retried
+    finally:
+        fresh.close()
+
+    # Nothing was created, and the retry never entered the dispatch pipeline.
+    assert _session_rows(home) == [], _session_rows(home)
+    final = _events(events)
+    assert _count(final, "submit_entry") == 0, final
+    assert _count(final, "agent_build") == 0, final
