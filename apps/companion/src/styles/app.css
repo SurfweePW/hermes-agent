@@ -363,6 +363,14 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   .chats-screen--conversation { min-height: 0; padding-bottom: 12px; }
   .chat-history-head { align-items: flex-start; }
   .chat-history-head h2 { font-size: 28px; }
+  .mobile-new-conversation { margin: 18px 0 12px; }
+  .mobile-new-conversation__toggle { width: 100%; }
+  .mobile-new-conversation__form { margin-top: 10px; padding: 16px; display: grid; gap: 8px; border: 1px solid var(--line); border-radius: 14px; background: var(--white); box-shadow: var(--shadow-small); }
+  .mobile-new-conversation__form label { color: var(--muted-text); font-size: 11px; font-weight: 750; }
+  .mobile-new-conversation__form select, .mobile-new-conversation__form textarea { width: 100%; min-width: 0; padding: 11px 12px; border: 1px solid #cfd2c8; border-radius: 10px; background: var(--paper); }
+  .mobile-new-conversation__form select { min-height: 48px; }
+  .mobile-new-conversation__form textarea { min-height: 86px; resize: vertical; }
+  .mobile-new-conversation__form p { margin: 2px 0 0; color: var(--muted-text); font-size: 12px; line-height: 1.45; }
   .chat-controls { grid-template-columns: minmax(0, 1fr); }
   .chat-session-row { min-height: 96px; grid-template-columns: minmax(0, 1fr) 14px; }
   .chat-session-row > span:nth-child(2) { grid-column: 1; text-align: left; }
