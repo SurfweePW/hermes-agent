@@ -24,7 +24,7 @@ delivery, racing creators, or death at a durability boundary.
 
 | # | Scenario | Assertion (contract) | Observed |
 |---|---|---|---|
-| 1 | Two competing gateway processes, same `client_request_id`, same payload | exactly one `create_entry`, exactly one `submit_entry`, exactly one `agent_build`, exactly one session row; both replies share one `stored_session_id` | held in all 5 runs; the losing process releases its reservation and returns the same logical operation (`preparing`/`admitted`), never a second creation |
+| 1 | Two competing gateway processes, same `client_request_id`, same payload | exactly one `create_entry`, exactly one `submit_entry`, exactly one `agent_build`, exactly one session row; both replies share one `stored_session_id` | held in all 5 runs; the losing process returns the same logical operation, never a second creation. **Correction after the independent audit:** the loser does *not* release a capacity reservation — as implemented, the durable index is bound before capacity is claimed, so the loser never acquires one. Design §3.2 step 9 requires the opposite order (acquire, then bind, then release on loss). See the audit defect 1 below. |
 | 2 | Death at `submit_entry` (dispatching, before the submit pipeline) | reconcile by request id → `not_admitted`, `runtime_session_id` null, zero pipeline entries, no session row | held |
 | 3 | Death at `agent_build` (admitted, before build/thread) | reconcile → `interrupted_outcome_unknown`, `row_state` `present` — never a fabricated success | held |
 | 4 | Same `client_request_id`, different payload | refusal with documented conflict code 4090 (`client_request_id conflicts with different creation payload`), row count and dispatch count unchanged | held |
@@ -77,6 +77,36 @@ Left open, with reasons:
 - One assertion (`at most one runtime id across both receipts`) cannot catch a *missing* winner
   runtime id; the non-vacuity check added instead requires that the operation really reached
   the stored row.
+
+## Independent audit gate — FAIL (2026-09-12)
+
+`gpt-5.6-sol` via `openai-codex`, reasoning `high`, one-shot over the frozen candidate
+`3c4e18bcef`, read-only. Verdict: **`AUDIT_VERDICT: FAIL`** — the candidate is not fit to close
+G3c, even behind a feature gate. Full report:
+`docs/plans/companion-mobile-evidence/sol-audit-2026-09-12/report-sol-audit.md`.
+
+Claims C2–C7 and C10 were CONFIRMED; C1 is PARTIAL/literally REFUTED (the index is bound before
+capacity is reserved, so a losing duplicate never holds a reservation to release); C8 and C9 are
+PARTIAL (the fixture always installs test auth and a synthetic persistence agent; the vitest and
+typecheck numbers were not reproduced by the auditor).
+
+Must fix before the gate closes:
+
+1. **High** — `tui_gateway/companion_session_create.py:337-378` binds the durable request index
+   *before* `_claim_active_session_slot` (`:354`). Design §3.2 (steps 6–9, lines 176–185) requires
+   reserve-then-bind, and "a rejected capacity reservation has zero creation business effects".
+   As implemented, a capacity refusal creates and closes a durable creation operation.
+2. **High / product-blocking** — the mobile client does not enter durable creation at all (see
+   the client gap below).
+3. **Medium** — `_null_creation_receipt` (`tui_gateway/companion_creation.py:386-398`) returns
+   nulls in `backend_namespace`, `profile` and `client_request_id`, which §1.4 requires to be
+   strings.
+
+Open items adjudicated: O1 owner checks exist (not a defect); O2 intentional; O3 server-safe but
+client-incomplete; O4 is defect 3 above; O5 is intentional exception preservation in
+`tui_gateway/companion_projects.py:464-474` (the earlier brief named a nonexistent `hermes_cli/`
+path); O6 confirmed a tool-output redaction artefact — the file contains `= None`, the bytes
+`***` do not appear in it.
 
 ## Still not covered (needs the phone, or a second real client)
 
