@@ -6,6 +6,8 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 import java.net.URI;
 import java.net.URLEncoder;
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -70,9 +72,12 @@ final class OwnerSession implements AutoCloseable {
         boolean isOwned(String base, String owner, Current current) throws Exception;
         Object requestTicket(String base, Object credentials) throws Exception;
         JSObject ticketResult(String base, Object response) throws Exception;
-        JSObject signedInResult(String base) throws Exception;
+        JSObject signedInResult(String base, Object credentials) throws Exception;
         default JSObject statusResult(String base, boolean signedIn, boolean supported) {
             return OwnerSession.statusResult(base, signedIn, supported);
+        }
+        default JSObject authenticatedStatusResult(String base, Object credentials) throws Exception {
+            return OwnerSession.statusResult(base, true, true, OwnerSession.accountScope((JSONObject) credentials));
         }
     }
     static final class Unsupported extends Exception { }
@@ -165,7 +170,9 @@ final class OwnerSession implements AutoCloseable {
                 result.put("value", socket.toASCIIString());
                 return result;
             }
-            @Override public JSObject signedInResult(String base) { return statusResult(base, true, true); }
+            @Override public JSObject signedInResult(String base, Object credentials) throws Exception {
+                return authenticatedStatusResult(base, credentials);
+            }
         };
     }
 
@@ -216,7 +223,7 @@ final class OwnerSession implements AutoCloseable {
             String credentialOwner = UUID.randomUUID().toString();
             require(boundary.persistSignIn(base, credentials, credentialOwner, lease));
             lease.requireCurrent();
-            JSObject result = boundary.signedInResult(base);
+            JSObject result = boundary.signedInResult(base, credentials);
             lease.requireCurrent();
             return result;
         } finally {
@@ -234,7 +241,9 @@ final class OwnerSession implements AutoCloseable {
         }
         StoredCredentials credentials = credentials(base, lease);
         lease.requireCurrent();
-        return boundary.statusResult(base, credentials != null, true);
+        return credentials == null
+            ? boundary.statusResult(base, false, true)
+            : boundary.authenticatedStatusResult(base, credentials.value);
     }
 
     JSObject signOut(String base) throws Exception {
@@ -294,15 +303,17 @@ final class OwnerSession implements AutoCloseable {
         String access = response.getString("access_token");
         String refresh = response.optString("refresh_token", "");
         String provider = response.getString("provider");
+        String userId = response.getString("user_id");
         long expires = response.getLong("expires_at");
         if (!GatewayTokenValidator.isValid(access) || (!refresh.isEmpty() && !GatewayTokenValidator.isValid(refresh))
             || !"Bearer".equalsIgnoreCase(response.optString("token_type"))
-            || !GatewayTokenValidator.isValid(provider) || expires <= System.currentTimeMillis() / 1000) {
+            || !GatewayTokenValidator.isValid(provider) || !GatewayTokenValidator.isValid(userId)
+            || expires <= System.currentTimeMillis() / 1000) {
             throw new IllegalStateException();
         }
         // Persist only this explicit credential allowlist, encrypted using an origin-scoped AndroidKeyStore key.
         return new JSONObject().put("access_token", access).put("refresh_token", refresh)
-            .put("provider", provider).put("expires_at", expires).toString();
+            .put("provider", provider).put("user_id", userId).put("expires_at", expires).toString();
     }
 
     private Lease claim(String base, Attempt attempt) {
@@ -424,9 +435,22 @@ final class OwnerSession implements AutoCloseable {
         synchronized (REGISTRY_LOCK) { return ++nextSession; }
     }
 
+    private static String accountScope(JSONObject credentials) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        byte[] bytes = digest.digest((credentials.getString("provider") + "\0" + credentials.getString("user_id"))
+            .getBytes(StandardCharsets.UTF_8));
+        StringBuilder value = new StringBuilder(bytes.length * 2);
+        for (byte item : bytes) value.append(String.format(java.util.Locale.ROOT, "%02x", item & 0xff));
+        return value.toString();
+    }
+
     static JSObject statusResult(String base, boolean signedIn, boolean supported) {
+        return statusResult(base, signedIn, supported, null);
+    }
+
+    static JSObject statusResult(String base, boolean signedIn, boolean supported, String ownerScope) {
         JSObject result = new JSObject();
-        for (Map.Entry<String, Object> field : statusFields(base, signedIn, supported).entrySet()) {
+        for (Map.Entry<String, Object> field : statusFields(base, signedIn, supported, ownerScope).entrySet()) {
             result.put(field.getKey(), field.getValue());
         }
         return result;
@@ -434,12 +458,20 @@ final class OwnerSession implements AutoCloseable {
 
     /** Pure field set so unit tests can assert the disclosed contract without org.json (not mocked on the JVM). */
     static Map<String, Object> statusFields(String base, boolean signedIn, boolean supported) {
+        return statusFields(base, signedIn, supported, null);
+    }
+
+    static Map<String, Object> statusFields(String base, boolean signedIn, boolean supported, String ownerScope) {
         Map<String, Object> fields = new LinkedHashMap<>();
         fields.put("baseUrl", base);
         fields.put("supported", supported);
         fields.put("signedIn", signedIn);
         fields.put("authenticated", signedIn);
         fields.put("status", !supported ? "unsupported" : signedIn ? "signed-in" : "signed-out");
+        if (signedIn) {
+            if (ownerScope == null || !ownerScope.matches("[a-f0-9]{64}")) throw new IllegalArgumentException();
+            fields.put("ownerScope", ownerScope);
+        }
         // This is authentication state, NOT an authorization/approval grant. Gateway remains authoritative.
         return fields;
     }

@@ -90,14 +90,18 @@ export function createOwnerBridge(renderer: IpcRendererAdapter) {
     return response.value
   }
 
-  const status = (value: unknown): { signedIn: boolean; baseUrl?: string } => {
-    const result = value as { signedIn?: unknown; baseUrl?: unknown } | null
+  const status = (value: unknown): { signedIn: boolean; baseUrl?: string; ownerScope?: string } => {
+    const result = value as { signedIn?: unknown; baseUrl?: unknown; ownerScope?: unknown } | null
 
-    if (typeof result?.signedIn !== 'boolean' || (result.signedIn && typeof result.baseUrl !== 'string')) {
+    if (typeof result?.signedIn !== 'boolean'
+      || (result.signedIn && (typeof result.baseUrl !== 'string' || typeof result.ownerScope !== 'string'
+        || !/^[a-f0-9]{64}$/.test(result.ownerScope)))) {
       throw new Error('owner-auth-failed')
     }
 
-    return result.signedIn ? { signedIn: true, baseUrl: result.baseUrl as string } : { signedIn: false }
+    return result.signedIn
+      ? { signedIn: true, baseUrl: result.baseUrl as string, ownerScope: result.ownerScope as string }
+      : { signedIn: false }
   }
 
   const inputBaseUrl = (input: unknown): string => {

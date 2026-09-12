@@ -8,9 +8,14 @@ public class OwnerSessionContractTest {
 
     @Test
     public void disclosedResultContainsOnlyStatusFields() {
+        String scope = String.join("", Collections.nCopies(64, "a"));
+        Map<String, Object> signedIn = OwnerSession.statusFields("https://gateway.ts.net", true, true, scope);
+        assertEquals(new HashSet<>(Arrays.asList("baseUrl", "supported", "signedIn", "authenticated", "status", "ownerScope")),
+            signedIn.keySet());
+        assertEquals(scope, signedIn.get("ownerScope"));
+
         for (Map<String, Object> result : Arrays.asList(
             OwnerSession.statusFields("https://gateway.ts.net", false, true),
-            OwnerSession.statusFields("https://gateway.ts.net", true, true),
             OwnerSession.statusFields("https://gateway.ts.net", false, false))) {
             assertEquals(new HashSet<>(Arrays.asList("baseUrl", "supported", "signedIn", "authenticated", "status")),
                 result.keySet());
@@ -23,7 +28,8 @@ public class OwnerSessionContractTest {
     public void unsupportedGatewayIsDistinctFromSignedOut() {
         assertEquals("unsupported", OwnerSession.statusFields("https://gateway.ts.net", false, false).get("status"));
         assertEquals("signed-out", OwnerSession.statusFields("https://gateway.ts.net", false, true).get("status"));
-        assertEquals("signed-in", OwnerSession.statusFields("https://gateway.ts.net", true, true).get("status"));
+        assertEquals("signed-in", OwnerSession.statusFields("https://gateway.ts.net", true, true,
+            String.join("", Collections.nCopies(64, "a"))).get("status"));
     }
 
     @Test

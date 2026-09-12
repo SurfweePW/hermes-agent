@@ -560,7 +560,8 @@ public class OwnerSessionSupersessionTest {
             return "ticket";
         }
         @Override public JSObject ticketResult(String base, Object response) { return null; }
-        @Override public JSObject signedInResult(String base) { return null; }
+        @Override public JSObject signedInResult(String base, Object credentials) { return null; }
         @Override public JSObject statusResult(String base, boolean signedIn, boolean supported) { return null; }
+        @Override public JSObject authenticatedStatusResult(String base, Object credentials) { return null; }
     }
 }

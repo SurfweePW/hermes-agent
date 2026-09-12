@@ -10,6 +10,7 @@ import { CHANNELS, createGatewayTokenBridge, createOwnerBridge } from './preload
 
 const input = { baseUrl: 'http://127.0.0.1:8642/prefix' }
 const socketUrl = 'ws://127.0.0.1:8642/prefix/api/ws?ticket=single_use_ticket_1'
+const ownerScope = 'a'.repeat(64)
 
 describe('Companion owner preload bridge', () => {
   it('exposes exactly the fixed minimal surface', () => {
@@ -21,14 +22,14 @@ describe('Companion owner preload bridge', () => {
 
   it('uses only exact {baseUrl} requests and returns status or a one-use WebSocket URL', async () => {
     const invoke = vi.fn()
-      .mockResolvedValueOnce({ ok: true, value: { signedIn: true, baseUrl: input.baseUrl, ignored: 'secret' } })
+      .mockResolvedValueOnce({ ok: true, value: { signedIn: true, baseUrl: input.baseUrl, ownerScope, ignored: 'secret' } })
       .mockResolvedValueOnce({ ok: true, value: { signedIn: false } })
       .mockResolvedValueOnce({ ok: true, value: socketUrl })
       .mockResolvedValueOnce({ ok: true })
 
     const bridge = createOwnerBridge({ invoke })
 
-    expect(await bridge.ownerSignIn(input)).toEqual({ signedIn: true, baseUrl: input.baseUrl })
+    expect(await bridge.ownerSignIn(input)).toEqual({ signedIn: true, baseUrl: input.baseUrl, ownerScope })
     expect(await bridge.ownerStatus(input)).toEqual({ signedIn: false })
     expect(await bridge.ownerWebSocketUrl(input)).toBe(socketUrl)
     await expect(bridge.ownerSignOut(input)).resolves.toBeUndefined()

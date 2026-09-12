@@ -193,7 +193,6 @@ export interface CompanionStore {
 const TOKEN_SECRET_NAME = 'gateway-token'
 const LOCAL_PINS_STORAGE_KEY = 'hermes.companion.localPins'
 const CONTINUITY_RETRY_STORAGE_KEY = 'hermes.companion.continuityRetry.v1'
-const OWNER_SCOPE_STORAGE_PREFIX = 'hermes.companion.ownerScope.v1:'
 const MAX_CONTINUATION_TEXT_LENGTH = 1_000_000
 const MAX_CONTINUITY_RETRY_STORAGE_LENGTH = 16_384
 
@@ -539,11 +538,13 @@ function isUnsupportedMethod(error: unknown): boolean {
   return code === -32601 || /(?:method not found|unknown method|-32601)/i.test(error.message)
 }
 
-function hasExistingOwnerSession(status: unknown): boolean {
-  return typeof status === 'object'
-    && status !== null
-    && 'signedIn' in status
-    && (status as { signedIn?: unknown }).signedIn === true
+function authenticatedOwnerScope(status: unknown): string | null {
+  if (typeof status !== 'object' || status === null
+    || !('signedIn' in status) || (status as { signedIn?: unknown }).signedIn !== true
+    || !('ownerScope' in status)) {return null}
+  const scope = (status as { ownerScope?: unknown }).ownerScope
+
+  return validBoundedString(scope, 512) ? scope : null
 }
 
 export function createCompanionStore(options: CompanionStoreOptions = {}): CompanionStore {
@@ -596,21 +597,6 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
   let persistedContinuationTarget: CompanionSessionTarget | null = null
   let activeDraftIdentity: SessionDraftIdentity | null = null
   let activePresentationIdentity: PresentationIdentity | null = null
-
-  const getOrCreateOwnerScope = () => {
-    if (!storage || typeof crypto.randomUUID !== 'function') {return null}
-    const key = `${OWNER_SCOPE_STORAGE_PREFIX}${snapshot.baseUrl}`
-
-    try {
-      const existing = storage.getItem(key)
-
-      if (existing) {return existing}
-      const value = crypto.randomUUID()
-      storage.setItem(key, value)
-
-      return storage.getItem(key) === value ? value : null
-    } catch {return null}
-  }
 
   const backendNamespaceForProfile = (profile: string) => directory.getSnapshot().coverage
     .find((item) => item.profile === profile)?.backendNamespace ?? null
@@ -1661,7 +1647,13 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
           profile: identity.profile, clientRequestId: crypto.randomUUID(), draftId: identity.sessionId,
           draftRevision: identity.revision, projectId: null, messageSha256: payloadDigest,
           storedSessionId: null, operationStatus: 'untransmitted' }
-        operationRetries.put(retry)
+        try {
+          operationRetries.put(retry)
+        } catch (error) {
+          publish({ turnStatus: 'error', error: error instanceof Error ? error.message : 'Companion could not durably save creation retry metadata.' })
+
+          return
+        }
         const verified = operationRetries.get(retry)
 
         if (!verified || verified.messageSha256 !== payloadDigest) {
@@ -1774,21 +1766,22 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
         if (!ownerAuth) {throw new Error('Owner authentication is unavailable.')}
         publish({ phase: 'connecting', baseUrl: configuration.baseUrl, warnings: configuration.warnings, error: null })
-        ownerScope = getOrCreateOwnerScope()
         // Persist only the validated, non-secret endpoint before opening the
         // system browser so Activity recreation can resume this exact flow.
-
         if (storage) {persistGatewayBaseUrl(storage, { baseUrl: configuration.baseUrl, token: '' })}
         // The setup button is an explicit reauthentication request. Persisted
         // session reuse is handled by cold-start bootstrap below; preflighting
         // status here can stall on stale macOS safeStorage before browser launch.
-        await ownerAuth.ownerSignIn({ baseUrl: configuration.baseUrl })
+        const status = await ownerAuth.ownerSignIn({ baseUrl: configuration.baseUrl })
+        ownerScope = authenticatedOwnerScope(status)
+        if (!ownerScope) {throw new Error('Authenticated owner identity is unavailable.')}
 
         if (connectionGeneration !== operation || destroyed) {return}
         const client = await connect('connecting', operation, 'owner')
 
         if (client && isCurrentConnection(client, operation)) {
           if (storage) {persistGatewayBaseUrl(storage, { baseUrl: configuration.baseUrl, token: '' })}
+          await reconcileCreationsAfterReconnect(client, operation)
 
           if (!isCurrentConnection(client, operation)) {return}
           publish({ phase: 'ready', connectionMode: 'owner', error: null })
@@ -1819,7 +1812,11 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       const operation = ++connectionGeneration
 
       try {
-        ownerScope = getOrCreateOwnerScope()
+        if (!ownerScope) {
+          if (!ownerAuth) {throw new Error('Owner authentication is unavailable.')}
+          ownerScope = authenticatedOwnerScope(await ownerAuth.ownerStatus({ baseUrl: snapshot.baseUrl }))
+          if (!ownerScope) {throw new Error('Authenticated owner identity is unavailable.')}
+        }
         const client = await connect('recovering', operation, 'owner')
 
         if (!client || !isCurrentConnection(client, operation)) {return}
@@ -1843,12 +1840,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       connectionMode = 'shared'
       const identityStatePurged = resetOwnerPresentation()
 
-      if (ownerScope) {
-        try {operationRetries.clearOwner(ownerScope)} catch { /* The invalidated scope remains isolated. */ }
-
-        try {storage?.removeItem?.(`${OWNER_SCOPE_STORAGE_PREFIX}${snapshot.baseUrl}`)} catch { /* Best effort after local partition invalidation. */ }
-        ownerScope = null
-      }
+      ownerScope = null
 
       try {await ownerAuth?.ownerSignOut({ baseUrl: snapshot.baseUrl })} catch {
         publish({ error: 'Owner sign-out could not be verified. The connection was closed.' })
@@ -2607,11 +2599,14 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     const bootstrapGeneration = connectionGeneration
 
     void ownerAuth.ownerStatus({ baseUrl: bootstrapBaseUrl }).then((status) => {
+      const authenticatedScope = authenticatedOwnerScope(status)
+
       if (destroyed
         || connectionGeneration !== bootstrapGeneration
         || snapshot.phase !== 'setup'
-        || !hasExistingOwnerSession(status)) {return}
+        || !authenticatedScope) {return}
 
+      ownerScope = authenticatedScope
       return api.connectOwner()
     }).catch((error: unknown) => {
       if (!destroyed && connectionGeneration === bootstrapGeneration && snapshot.phase === 'setup') {

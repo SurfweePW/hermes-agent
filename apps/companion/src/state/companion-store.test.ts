@@ -179,9 +179,58 @@ function harness(
 }
 
 describe('CompanionStore setup and sessions', () => {
+  it('preserves unresolved creation metadata across sign-out and reuses the authenticated owner partition', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })),
+      ownerStatus: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })),
+      ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
+    }
+
+    const { store, gateways, values } = harness(null, undefined, undefined, ownerAuth, (gateway, index) => {
+      Object.assign(gateway, {
+        listCompanionSessions: async () => ({ backend_namespace: 'backend-1', sessions: [], has_more: false, next_cursor: null,
+          coverage: { complete: true, freshness: null, message: null } }),
+        listCompanionProjects: async () => ({ backend_namespace: 'backend-1', projects: [], has_more: false, next_cursor: null,
+          coverage: { complete: true, freshness: null, message: null } }),
+        getCompanionProject: async () => {throw new Error('unused')},
+        createCompanionSession: async (request: CreateCompanionSessionRequest) => {
+          gateway.calls.push(['createCompanionSession', request])
+          throw new Error('socket closed')
+        },
+        reconcileCompanionSessionCreation: async (request: { operation_kind: 'create'; backend_namespace: string; profile: string; client_request_id: string }) => {
+          gateway.calls.push(['reconcileCompanionSessionCreation', request])
+
+          return {
+            version: 1 as const, operation_kind: 'create' as const, backend_namespace: request.backend_namespace,
+            profile: request.profile, client_request_id: request.client_request_id, project_id: null,
+            stored_session_id: 'created-stored', row_state: 'present' as const,
+            operation_status: 'completed' as const, runtime_session_id: null
+          }
+        }
+      })
+    })
+
+    await store.configureOwner({ baseUrl: 'https://gateway.test' })
+    await vi.waitFor(() => expect(store.directory.getSnapshot().coverage[0]?.backendNamespace).toBe('backend-1'))
+    await store.openBotChat('atlas')
+    store.setDraft('Create exactly once')
+    await store.submitDraft()
+    const retryBeforeSignOut = values.get('hermes.companion.sessionOperationRetries.v2')
+    expect(retryBeforeSignOut).toContain('owner-account-a')
+
+    await store.signOutOwner()
+    expect(values.get('hermes.companion.sessionOperationRetries.v2')).toBe(retryBeforeSignOut)
+    await store.configureOwner({ baseUrl: 'https://gateway.test' })
+
+    expect(gateways.flatMap((gateway) => gateway.calls).filter(([name]) => name === 'createCompanionSession')).toHaveLength(1)
+    expect(gateways[1].calls.filter(([name]) => name === 'reconcileCompanionSessionCreation')).toHaveLength(1)
+    expect(store.getSnapshot()).toMatchObject({ storedSessionId: 'created-stored', turnStatus: 'idle' })
+  })
+
   it('reconciles an uncertain first send without creating a second session', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -231,7 +280,7 @@ describe('CompanionStore setup and sessions', () => {
   })
   it('bootstraps a native owner connection without opening a shared-token socket first', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true, ignored: 'renderer-secret' })),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a', ignored: 'renderer-secret' })),
       ownerStatus: vi.fn(),
       ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=single-use-owner-ticket')
@@ -255,8 +304,8 @@ describe('CompanionStore setup and sessions', () => {
 
   it('explicit setup sign-in reauthenticates without preflighting a saved native session', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })),
-      ownerStatus: vi.fn(async () => ({ signedIn: true })),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })),
+      ownerStatus: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })),
       ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket')
     }
@@ -274,7 +323,7 @@ describe('CompanionStore setup and sessions', () => {
   it('reconnects a persisted native owner session after a cold restart', async () => {
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(),
-      ownerStatus: vi.fn(async () => ({ signedIn: true })),
+      ownerStatus: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })),
       ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=restart-ticket')
     }
@@ -354,7 +403,7 @@ describe('CompanionStore setup and sessions', () => {
       ownerSignIn: vi.fn(async ({ baseUrl: normalizedBaseUrl }) => {
         if (normalizedBaseUrl.endsWith('/sign-in-failure')) {throw new Error('owner sign-in failed')}
 
-        return { signedIn: true }
+        return { signedIn: true, ownerScope: 'owner-account-a' }
       }),
       ownerStatus: vi.fn(),
       ownerSignOut: vi.fn(),
@@ -393,7 +442,7 @@ describe('CompanionStore setup and sessions', () => {
 
   it('does not let a saved-token storage failure overwrite an active owner bootstrap', async () => {
     const token = deferred<string | undefined>()
-    const signIn = deferred<{ signedIn: boolean }>()
+    const signIn = deferred<{ signedIn: boolean; ownerScope?: string }>()
     const secrets = tokenStore()
     vi.mocked(secrets.get).mockReturnValue(token.promise)
 
@@ -413,14 +462,14 @@ describe('CompanionStore setup and sessions', () => {
     await Promise.resolve()
     expect(store.getSnapshot()).toMatchObject({ phase: 'connecting', error: null })
 
-    signIn.resolve({ signedIn: true })
+    signIn.resolve({ signedIn: true, ownerScope: 'owner-account-a' })
     await configuring
     expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner', error: null })
   })
 
   it('fails closed when a newer owner bootstrap supersedes an in-flight attempt', async () => {
-    const firstSignIn = deferred<{ signedIn: boolean }>()
-    const secondSignIn = deferred<{ signedIn: boolean }>()
+    const firstSignIn = deferred<{ signedIn: boolean; ownerScope?: string }>()
+    const secondSignIn = deferred<{ signedIn: boolean; ownerScope?: string }>()
 
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn()
@@ -442,7 +491,7 @@ describe('CompanionStore setup and sessions', () => {
     expect(ownerAuth.ownerWebSocketUrl).not.toHaveBeenCalled()
     expect(gateways).toHaveLength(0)
 
-    secondSignIn.resolve({ signedIn: true })
+    secondSignIn.resolve({ signedIn: true, ownerScope: 'owner-account-a' })
     await second
 
     expect(ownerAuth.ownerWebSocketUrl).toHaveBeenCalledTimes(1)
@@ -456,7 +505,7 @@ describe('CompanionStore setup and sessions', () => {
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn()
         .mockRejectedValueOnce(new Error('owner sign-in failed'))
-        .mockResolvedValueOnce({ signedIn: true }),
+        .mockResolvedValueOnce({ signedIn: true, ownerScope: 'owner-account-a' }),
       ownerStatus: vi.fn(),
       ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=retry-ticket')
@@ -539,7 +588,7 @@ describe('CompanionStore setup and sessions', () => {
     vi.mocked(secrets.get).mockReturnValue(hydration.promise)
 
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })),
       ownerStatus: vi.fn(),
       ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://owner.gateway.test/api/ws?ticket=owner-ticket')
@@ -587,7 +636,7 @@ describe('CompanionStore setup and sessions', () => {
     })
     vi.mocked(secrets.delete).mockImplementation(() => {persistedToken = undefined})
 
-    const ownerSignIn = deferred<{ signedIn: boolean }>()
+    const ownerSignIn = deferred<{ signedIn: boolean; ownerScope?: string }>()
 
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(() => ownerSignIn.promise),
@@ -821,7 +870,7 @@ describe('CompanionStore setup and sessions', () => {
     'does not let a late unsupported pin RPC repopulate pins after %s',
     async (action) => {
       const ownerAuth: OwnerAuthBridge = {
-        ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+        ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
         ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
       }
 
@@ -1007,7 +1056,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     const values = new Map<string, string>()
 
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -1071,7 +1120,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     let blockDraftStorage = false
 
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -1115,7 +1164,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('clears identity-bound drafts on owner sign-out and saved-token forget', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -1138,7 +1187,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
   it('replaces the shared transport with an owner ticket connection and signs out closed', async () => {
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(),
-      ownerStatus: vi.fn(),
+      ownerStatus: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })),
       ownerSignOut: vi.fn(async () => undefined),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket-one')
     }
@@ -1166,7 +1215,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     const signOut = deferred<void>()
 
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(),
       ownerSignOut: vi.fn(() => signOut.promise),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket')
     }
@@ -1212,11 +1261,11 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
   })
 
   it('clears the complete owner presentation before owner reauthentication settles', async () => {
-    const reauthentication = deferred<{ signedIn: boolean }>()
+    const reauthentication = deferred<{ signedIn: boolean; ownerScope?: string }>()
 
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn()
-        .mockResolvedValueOnce({ signedIn: true })
+        .mockResolvedValueOnce({ signedIn: true, ownerScope: 'owner-account-a' })
         .mockImplementationOnce(() => reauthentication.promise),
       ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket')
@@ -1259,7 +1308,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     })
     expect(JSON.stringify(store.getSnapshot())).not.toContain('Private')
 
-    reauthentication.resolve({ signedIn: true })
+    reauthentication.resolve({ signedIn: true, ownerScope: 'owner-account-a' })
     await configuring
     expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner' })
   })
@@ -1268,7 +1317,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     const signOut = deferred<void>()
 
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(), ownerStatus: vi.fn(async () => ({ signedIn: true })),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })),
       ownerSignOut: vi.fn(() => signOut.promise),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket')
     }
@@ -1297,7 +1346,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(),
-      ownerStatus: vi.fn(),
+      ownerStatus: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })),
       ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => ownerUrls.shift()!)
     }
@@ -1868,7 +1917,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('continues an exact persisted target while preserving its loaded history', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -1900,7 +1949,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('clears continuation A before opening cross-profile attention B and routes B text to its runtime', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -1932,7 +1981,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('clears continuation A before opening cross-profile bot chat B', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -1963,7 +2012,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('clears continuation A when a cross-profile quick task establishes runtime B', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -1995,7 +2044,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('recovers the selected saved conversation instead of reactivating a prior admitted continuation', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2033,7 +2082,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('preserves admitted continuation identity when the same saved conversation is reactivated before reconnect', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2067,7 +2116,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     'reconciles unresolved continuation A in the background while %s awaits opening B',
     async (route) => {
       const ownerAuth: OwnerAuthBridge = {
-        ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+        ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
         ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
       }
 
@@ -2148,7 +2197,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     'ignores a stale %s opening failure after unresolved continuation A is recovered',
     async (route) => {
       const ownerAuth: OwnerAuthBridge = {
-        ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+        ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
         ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
       }
 
@@ -2212,7 +2261,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('reconciles unresolved continuation A in the background without replacing selected draft B', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2263,7 +2312,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('applies a terminal continuation event emitted before the runtime ID response', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2299,7 +2348,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('applies an interrupted continuation emitted before the runtime ID response', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2337,7 +2386,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('replays a buffered continuation terminal before pending approvals settle', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2378,7 +2427,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('applies a buffered continuation terminal exactly once while admission is pending', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2422,7 +2471,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('bounds terminal payload memory while continuation admission is pending', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2455,7 +2504,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('drops arbitrary fields from a buffered error while preserving terminal semantics', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2499,7 +2548,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('evicts the oldest runtime after 65 distinct buffered continuation terminals', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2544,7 +2593,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     'detaches a never-settling continuation during %s',
     async (action) => {
       const ownerAuth: OwnerAuthBridge = {
-        ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+        ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
         ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
       }
 
@@ -2582,7 +2631,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('applies only the buffered continuation error for the admitted runtime ID', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2615,7 +2664,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('preserves safe tool, internal, and compaction records when persisted history becomes live', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2643,7 +2692,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('keeps every later send on the durable persisted-continuation path', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2665,7 +2714,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('preserves raw continuation whitespace and a newer in-flight edit while sending trimmed text', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2703,7 +2752,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('preserves an intentionally cleared draft when continuation admission fails', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2725,7 +2774,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('preserves an intentionally cleared draft when continuity reconciliation fails', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2750,7 +2799,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     'detaches admitted runtime A before a late %s arrives after selecting B',
     async (type) => {
       const ownerAuth: OwnerAuthBridge = {
-        ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+        ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
         ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
       }
 
@@ -2786,7 +2835,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     'handles a %s continuation preflight rejection as an unsent retryable draft',
     async (path) => {
       const ownerAuth: OwnerAuthBridge = {
-        ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+        ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
         ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
       }
 
@@ -2829,7 +2878,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('fences a late session A continuation from session B and both durable drafts', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2863,7 +2912,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('abandons session A continuation preflight after activating session B', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2895,7 +2944,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('abandons a rejected session A preflight after switching so session B can submit', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2920,7 +2969,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('reconciles a lost response without creating a second logical send', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2947,7 +2996,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('preserves a newer draft when an older completed continuity retry reconciles', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -2971,7 +3020,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     const reconciliation = deferred<Awaited<ReturnType<CompanionGateway['reconcileCompanionSession']>>>()
 
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -3006,7 +3055,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('drops continuity and drafts from the previous identity during explicit owner sign-in', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -3029,7 +3078,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('automatically reconciles a continuity retry on reconnect and preserves exact presentation identity', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -3067,7 +3116,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     const values = new Map<string, string>()
 
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -3103,7 +3152,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     }
 
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(async () => ({ signedIn: true })), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -3163,7 +3212,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     }
 
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(async () => ({ signedIn: true })), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -3244,7 +3293,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     }
 
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(async () => ({ signedIn: true })), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 
@@ -3290,7 +3339,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('does not reuse a continuity request ID after an authoritative rejection', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
 

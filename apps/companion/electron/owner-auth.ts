@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { type AddressInfo, isIP } from 'node:net'
 
@@ -9,10 +10,12 @@ import {
 
 import { type GatewayTokenStore, SecureStorageError } from './secure-store'
 
-export interface OwnerStatus { signedIn: boolean; baseUrl?: string }
+export interface OwnerStatus { signedIn: boolean; baseUrl?: string; ownerScope?: string }
 interface OwnerSession { baseUrl: string; tokens: NativeTokenSet }
 export class OwnerAuthError extends Error {}
 const error = (code: string) => new OwnerAuthError(code)
+const ownerScope = (tokens: NativeTokenSet) => createHash('sha256')
+  .update(`${tokens.provider}\0${tokens.userId}`, 'utf8').digest('hex')
 
 /** Owner credentials may cross cleartext only to the literal loopback interface. */
 export function ownerBaseUrl(input: string): string {
@@ -213,7 +216,9 @@ export class OwnerAuth {
     const baseUrl = ownerBaseUrl(input.baseUrl)
     const session = this.load()
 
-    return session?.baseUrl === baseUrl ? { signedIn: true, baseUrl: session.baseUrl } : { signedIn: false }
+    return session?.baseUrl === baseUrl
+      ? { signedIn: true, baseUrl: session.baseUrl, ownerScope: ownerScope(session.tokens) }
+      : { signedIn: false }
   }
 
   cancel(): void {
@@ -261,7 +266,7 @@ export class OwnerAuth {
       signal.throwIfAborted()
       this.store.set(JSON.stringify({ baseUrl, tokens }))
 
-      return { signedIn: true, baseUrl }
+      return { signedIn: true, baseUrl, ownerScope: ownerScope(tokens) }
     } finally {
       clearTimeout(timer)
 

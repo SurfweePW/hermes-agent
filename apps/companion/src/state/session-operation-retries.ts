@@ -49,7 +49,8 @@ export interface ContinuationRetryEntry {
 export type SessionOperationRetryEntry = CreationRetryEntry | ContinuationRetryEntry
 
 const RETRIES_STORAGE_KEY = 'hermes.companion.sessionOperationRetries.v2'
-const MAX_SERIALIZED_LENGTH = 65_536
+const MAX_ENTRIES = 100
+const MAX_ENTRY_SERIALIZED_LENGTH = 16_384
 const UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 const SHA256 = /^[0-9a-f]{64}$/
 const CREATE_STATUSES = new Set<CreationRetryStatus>([
@@ -91,19 +92,31 @@ const keyOf = (entry: Pick<SessionOperationRetryEntry, 'ownerScope' | 'backendNa
 
 export function createSessionOperationRetryStore(storage?: RetryStorage) {
   let entries = new Map<string, SessionOperationRetryEntry>()
+  let quarantined = false
+
   try {
     const raw = storage?.getItem(RETRIES_STORAGE_KEY)
     const parsed = raw ? JSON.parse(raw) as unknown : []
-    if (!Array.isArray(parsed) || parsed.length > 100 || !parsed.every(validEntry)) {throw new Error('invalid retries')}
-    entries = new Map(parsed.map((entry) => [keyOf(entry), { ...entry }]))
+
+    if (!Array.isArray(parsed) || parsed.length > MAX_ENTRIES || !parsed.every(validEntry)
+      || parsed.some((entry) => JSON.stringify(entry).length > MAX_ENTRY_SERIALIZED_LENGTH)) {
+      quarantined = true
+    } else {
+      entries = new Map(parsed.map((entry) => [keyOf(entry), { ...entry }]))
+    }
   } catch {
-    try {storage?.removeItem?.(RETRIES_STORAGE_KEY)} catch { /* Fail closed on subsequent writes. */ }
+    quarantined = true
+  }
+
+  const requireWritable = () => {
+    if (quarantined) {throw new Error('Retry ledger is quarantined; resolve its durable metadata before sending again.')}
   }
 
   const persist = () => {
+    requireWritable()
     if (!storage) {throw new Error('Local storage is required to send safely.')}
     const serialized = JSON.stringify([...entries.values()])
-    if (serialized.length > MAX_SERIALIZED_LENGTH) {throw new Error('Local storage is required to send safely.')}
+
     try {
       storage.setItem(RETRIES_STORAGE_KEY, serialized)
       if (storage.getItem(RETRIES_STORAGE_KEY) !== serialized) {throw new Error('retry readback mismatch')}
@@ -114,9 +127,22 @@ export function createSessionOperationRetryStore(storage?: RetryStorage) {
 
   return {
     put(entry: SessionOperationRetryEntry): void {
+      requireWritable()
       if (!validEntry(entry)) {throw new Error('Invalid retry metadata.')}
-      entries.set(keyOf(entry), { ...entry })
-      persist()
+      if (JSON.stringify(entry).length > MAX_ENTRY_SERIALIZED_LENGTH) {throw new Error('Retry metadata is too large to store safely.')}
+      const key = keyOf(entry)
+
+      if (!entries.has(key) && entries.size >= MAX_ENTRIES) {
+        throw new Error('Retry ledger is full. Resolve a pending send before starting a new one.')
+      }
+
+      const previous = entries.get(key)
+      entries.set(key, { ...entry })
+
+      try {persist()} catch (error) {
+        if (previous) {entries.set(key, previous)} else {entries.delete(key)}
+        throw error
+      }
     },
     get(identity: Pick<SessionOperationRetryEntry, 'ownerScope' | 'backendNamespace' | 'operationKind' | 'clientRequestId'>): SessionOperationRetryEntry | null {
       const entry = entries.get(keyOf(identity))

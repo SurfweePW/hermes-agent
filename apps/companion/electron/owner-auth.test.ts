@@ -134,7 +134,9 @@ describe('native owner login, real loopback and HTTP path', () => {
     s.legacy.set('legacy-agent-token')
     const auth = new OwnerAuth(s.owner, g.open)
     cleanups.push(() => auth.cancel())
-    expect(await auth.ownerSignIn({ baseUrl: g.baseUrl })).toEqual({ signedIn: true, baseUrl: g.baseUrl })
+    const status = await auth.ownerSignIn({ baseUrl: g.baseUrl })
+    expect(status).toMatchObject({ signedIn: true, baseUrl: g.baseUrl })
+    expect(status.ownerScope).toMatch(/^[a-f0-9]{64}$/)
     await expect(fetch(g.callback())).rejects.toThrow() // listener has been torn down, no replay
     expect(g.calls.filter(c => c.path.endsWith('/token'))).toHaveLength(1)
     expect(readFileSync(s.owner.filePath).toString()).not.toContain('native-access-secret')
@@ -181,7 +183,8 @@ describe('native owner login, real loopback and HTTP path', () => {
 
     await expect(auth.ownerSignIn({ baseUrl: 'http://127.0.0.1:8642' })).resolves.toEqual({
       signedIn: true,
-      baseUrl: 'http://127.0.0.1:8642'
+      baseUrl: 'http://127.0.0.1:8642',
+      ownerScope: expect.stringMatching(/^[a-f0-9]{64}$/)
     })
     expect(store.prepareReplacement).toHaveBeenCalledOnce()
     expect(store.get).not.toHaveBeenCalled()

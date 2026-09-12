@@ -25,7 +25,7 @@ async function readyDirectoryStore() {
 
 async function readyOwnerDirectoryStore(gateway = new FakeWorkGateway()) {
   const ownerAuth: OwnerAuthBridge = {
-    ownerSignIn: vi.fn(async () => ({ signedIn: true })),
+    ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })),
     ownerStatus: vi.fn(),
     ownerSignOut: vi.fn(),
     ownerWebSocketUrl: vi.fn(async () => 'wss://fixture.invalid/api/ws?ticket=owner')
@@ -223,7 +223,7 @@ describe('App', () => {
 
   it('offers native Google owner sign-in during setup and reaches owner-ready without a token', async () => {
     const ownerAuth: OwnerAuthBridge = {
-      ownerSignIn: vi.fn(async () => ({ ignored: 'native-owner-secret' })),
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a', ignored: 'native-owner-secret' })),
       ownerStatus: vi.fn(),
       ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://fixture.invalid/api/ws?ticket=single-use-ticket')
