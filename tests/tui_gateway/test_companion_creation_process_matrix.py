@@ -8,7 +8,6 @@ production stdio entrypoint in its own process and shares only the real temporar
 """
 from __future__ import annotations
 
-from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
@@ -22,7 +21,6 @@ from hermes_cli import projects_db as pdb
 from tests.tui_gateway.test_companion_transport_integration import (
     BACKEND,
     PROFILE,
-    REPO_ROOT,
     StdioRpcClient,
 )
 
