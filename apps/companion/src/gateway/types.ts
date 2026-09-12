@@ -137,6 +137,7 @@ export interface CompanionProjectListOptions {
 }
 
 export interface CompanionSessionListResult {
+  backend_namespace?: string
   sessions: CompanionSession[]
   has_more: boolean
   next_cursor: string | null
@@ -144,6 +145,7 @@ export interface CompanionSessionListResult {
 }
 
 export interface CompanionProjectListResult {
+  backend_namespace?: string
   projects: CompanionProject[]
   has_more: boolean
   next_cursor: string | null
@@ -228,6 +230,49 @@ export interface CompanionSessionTarget {
 export interface ContinueCompanionSessionOptions extends CompanionSessionTarget {
   text: string
   client_request_id: string
+}
+
+export interface CreateCompanionSessionRequest {
+  version: 1
+  backend_namespace: string
+  profile: string
+  project_id: string | null
+  text: string
+  client_request_id: string
+}
+
+export interface ReconcileCompanionSessionCreationRequest {
+  operation_kind: 'create'
+  backend_namespace: string
+  profile: string
+  client_request_id: string
+}
+
+export type CompanionCreationRowState = 'absent' | 'present' | 'unavailable'
+export type CompanionCreationOperationStatus =
+  | 'not_found'
+  | 'preparing'
+  | 'claimed'
+  | 'admitted'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'not_admitted'
+  | 'interrupted_outcome_unknown'
+  | 'recovery_required'
+
+export interface CompanionSessionCreationReceipt {
+  version: 1
+  operation_kind: 'create'
+  backend_namespace: string
+  profile: string
+  client_request_id: string
+  project_id: string | null
+  stored_session_id: string | null
+  row_state: CompanionCreationRowState
+  operation_status: CompanionCreationOperationStatus
+  runtime_session_id: string | null
 }
 
 export interface AcceptedCompanionSessionResult extends SessionResult, PromptSubmitResult {
