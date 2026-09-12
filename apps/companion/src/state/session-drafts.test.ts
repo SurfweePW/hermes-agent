@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 
-import { createSessionDraftStore, DRAFTS_STORAGE_KEY, type SessionDraftIdentity } from './session-drafts'
+import { createSessionDraftStore, DRAFTS_STORAGE_KEY, type PersistedSessionDraftIdentity, type SessionDraftIdentity } from './session-drafts'
 
 function memoryStorage(initial = new Map<string, string>()) {
   return {
@@ -13,7 +13,7 @@ function memoryStorage(initial = new Map<string, string>()) {
   }
 }
 
-const identity = (change: Partial<SessionDraftIdentity> = {}): SessionDraftIdentity => ({
+const identity = (change: Partial<PersistedSessionDraftIdentity> = {}): SessionDraftIdentity => ({
   backendNamespace: 'desktop-a',
   profile: 'atlas',
   sessionId: 'logical-a',
@@ -279,5 +279,23 @@ describe('session drafts', () => {
     expect(retained.length).toBeLessThan(escapeHeavy.length)
     expect(escapeHeavy.startsWith(retained)).toBe(true)
     expect(createSessionDraftStore(storage).get(identity())).toBe(retained)
+  })
+
+  it('partitions local new-session drafts by owner, backend, UUID, profile, project-null, and revision', () => {
+    const { storage } = memoryStorage()
+    const drafts = createSessionDraftStore(storage)
+    const first = {
+      ownerScope: 'owner:https://gateway.test', backendNamespace: 'desktop:mini',
+      profile: 'atlas', projectId: null, sessionKind: 'local' as const,
+      sessionId: '11111111-1111-4111-8111-111111111111', revision: 1
+    }
+    const edited = { ...first, revision: 2 }
+    const anotherOwner = { ...edited, ownerScope: 'owner:https://other.test' }
+
+    expect(drafts.set(first, 'first revision')).toBe(true)
+    expect(drafts.rekey(first, edited, 'second revision')).toBe(true)
+    expect(drafts.get(first)).toBe('')
+    expect(drafts.get(edited)).toBe('second revision')
+    expect(drafts.get(anotherOwner)).toBe('')
   })
 })

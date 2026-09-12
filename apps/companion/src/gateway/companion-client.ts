@@ -41,11 +41,13 @@ import type {
   CompanionProjectListOptions,
   CompanionProjectListResult,
   CompanionSession,
+  CompanionSessionCreationReceipt,
   CompanionSessionHistoryResult,
   CompanionSessionListOptions,
   CompanionSessionListResult,
   ContinueCompanionSessionOptions,
   ContinueCompanionSessionResult,
+  CreateCompanionSessionRequest,
   CreateSessionOptions,
   GatewayAttentionItem,
   GatewaySessionSummary,
@@ -53,6 +55,7 @@ import type {
   PendingApprovalsResult,
   ProfilesListResult,
   PromptSubmitResult,
+  ReconcileCompanionSessionCreationRequest,
   ReconcileCompanionSessionOptions,
   ReconcileCompanionSessionResult,
   SessionInterruptResult,
@@ -65,6 +68,69 @@ import { validateWorkCapability, validateWorkCommentResult, validateWorkDecision
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+const CREATION_RECEIPT_KEYS = [
+  'version', 'operation_kind', 'backend_namespace', 'profile', 'client_request_id',
+  'project_id', 'stored_session_id', 'row_state', 'operation_status', 'runtime_session_id'
+] as const
+
+const CREATION_STATUSES = new Set([
+  'not_found', 'preparing', 'claimed', 'admitted', 'running', 'completed', 'failed',
+  'cancelled', 'not_admitted', 'interrupted_outcome_unknown', 'recovery_required'
+])
+
+const CREATION_ROW_STATES = new Set(['absent', 'present', 'unavailable'])
+const CANONICAL_UUID_V4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+
+const CONTROL_CHARACTER = /[\u0000-\u001f\u007f-\u009f]/ // eslint-disable-line no-control-regex -- control characters are exactly what must be rejected
+
+function protocolString(value: unknown, maximumBytes: number): value is string {
+  return typeof value === 'string'
+    && value.length > 0
+    && value === value.trim()
+    && !CONTROL_CHARACTER.test(value)
+    && new TextEncoder().encode(value).length <= maximumBytes
+}
+
+function malformedCreationReceipt(): never {
+  throw new Error('Malformed companion.sessions.create receipt.')
+}
+
+export function validateCompanionSessionCreationReceipt(
+  value: unknown,
+  expected: Pick<CreateCompanionSessionRequest, 'backend_namespace' | 'profile' | 'client_request_id'>
+): CompanionSessionCreationReceipt {
+  if (!isRecord(value)
+    || Object.keys(value).length !== CREATION_RECEIPT_KEYS.length
+    || CREATION_RECEIPT_KEYS.some((key) => !Object.hasOwn(value, key))
+    || value.version !== 1
+    || value.operation_kind !== 'create'
+    || value.backend_namespace !== expected.backend_namespace
+    || value.profile !== expected.profile
+    || value.client_request_id !== expected.client_request_id
+    || !protocolString(value.backend_namespace, 4_096)
+    || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(value.profile as string)
+    || !CANONICAL_UUID_V4.test(value.client_request_id as string)
+    || (value.project_id !== null && !protocolString(value.project_id, 512))
+    || (value.stored_session_id !== null && !protocolString(value.stored_session_id, 512))
+    || !CREATION_ROW_STATES.has(value.row_state as string)
+    || !CREATION_STATUSES.has(value.operation_status as string)
+    || (value.runtime_session_id !== null && !protocolString(value.runtime_session_id, 512))) {
+    return malformedCreationReceipt()
+  }
+
+  const receipt = value as unknown as CompanionSessionCreationReceipt
+  const notFound = receipt.operation_status === 'not_found'
+
+  if ((notFound && (receipt.row_state !== 'absent' || receipt.project_id !== null
+      || receipt.stored_session_id !== null || receipt.runtime_session_id !== null))
+    || (!notFound && receipt.stored_session_id === null)
+    || (receipt.runtime_session_id !== null && receipt.row_state !== 'present')) {
+    return malformedCreationReceipt()
+  }
+
+  return receipt
 }
 
 function isApprovalChoice(value: unknown): value is ApprovalChoice {
@@ -212,6 +278,7 @@ const projectFromRaw = (value: unknown, method: string, freshness: string, expec
 
   if (expectedSource !== undefined && source !== expectedSource) {return directoryError(method)}
   const sessionCount = value.session_count === null || value.session_count === undefined ? null : nonNegativeInteger(value.session_count, method)
+
   const sessionIds = value.session_ids === null || value.session_ids === undefined
     ? null
     : Array.isArray(value.session_ids)
@@ -294,6 +361,7 @@ export function validateCompanionSessionList(value: unknown, expectedProfile?: s
   const warningList = warnings(value.warnings, method)
 
   return {
+    backend_namespace: source,
     sessions: value.items.map((item) => sessionFromListRaw(item, method, profile, source)),
     has_more: value.has_more as boolean,
     next_cursor: optionalCursor(value, method),
@@ -312,6 +380,7 @@ export function validateCompanionProjectList(value: unknown, expectedProfile?: s
   const warningList = warnings(value.warnings, method)
 
   return {
+    backend_namespace: source,
     projects: value.items.map((item) => projectFromRaw(item, method, asOf, profile, source)),
     has_more: value.has_more as boolean,
     next_cursor: optionalCursor(value, method),
@@ -341,6 +410,7 @@ export function validateCompanionSessionHistory(value: unknown, profile: string,
     if (entry.kind !== 'internal_event' || typeof entry.label !== 'string' || entry.collapsed !== true) {return directoryError(method)}
 
     const eventKind = typeof entry.event === 'string' ? entry.event : ''
+
     const kind = eventKind === 'compaction_summary'
       ? 'compression'
       : /(?:^|_)(?:tool|shell)(?:_|$)/.test(eventKind) ? 'tool' : 'internal'
@@ -435,6 +505,7 @@ function validatedAttention(value: unknown): AttentionListResult {
         || typeof candidate.work_ref.profile !== 'string' || !candidate.work_ref.profile || candidate.work_ref.profile !== candidate.work_ref.profile.trim()
         || candidate.work_ref.profile.length > 64 || /[\\/]/.test(candidate.work_ref.profile) || candidate.work_ref.profile.includes('://')
         || typeof candidate.work_ref.id !== 'string' || !candidate.work_ref.id.trim() || candidate.work_ref.id.length > 100) {throw new Error(error)}
+
       item.work_ref = { profile: candidate.work_ref.profile, id: candidate.work_ref.id }
     }
 
@@ -663,8 +734,18 @@ export class CompanionClient {
     return this.gateway.request('companion.sessions.continue', { ...options })
   }
 
+  createCompanionSession(options: CreateCompanionSessionRequest): Promise<CompanionSessionCreationReceipt> {
+    return this.gateway.request<unknown>('companion.sessions.create', { ...options })
+      .then((value) => validateCompanionSessionCreationReceipt(value, options))
+  }
+
   reconcileCompanionSession(options: ReconcileCompanionSessionOptions): Promise<ReconcileCompanionSessionResult> {
     return this.gateway.request('companion.sessions.reconcile', { ...options })
+  }
+
+  reconcileCompanionSessionCreation(options: ReconcileCompanionSessionCreationRequest): Promise<CompanionSessionCreationReceipt> {
+    return this.gateway.request<unknown>('companion.sessions.reconcile', { ...options })
+      .then((value) => validateCompanionSessionCreationReceipt(value, options))
   }
 
   listCompanionProjects(options: CompanionProjectListOptions): Promise<CompanionProjectListResult> {

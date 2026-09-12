@@ -317,6 +317,80 @@ describe('CompanionClient RPC domain methods', () => {
     await expect(reconciled).resolves.toMatchObject({ operation_status: 'running', reconciled: true })
   })
 
+  it('uses the exact durable creation and request-only reconciliation contracts', async () => {
+    const { client, connect } = harness()
+    const socket = await connect()
+    const request = {
+      version: 1,
+      backend_namespace: 'desktop:mac-mini',
+      profile: 'atlas',
+      project_id: null,
+      text: 'Preserve this text exactly',
+      client_request_id: '11111111-1111-4111-8111-111111111111'
+    } as const
+    const receipt = {
+      version: 1,
+      operation_kind: 'create',
+      backend_namespace: request.backend_namespace,
+      profile: request.profile,
+      client_request_id: request.client_request_id,
+      project_id: null,
+      stored_session_id: 'stored/session:99',
+      row_state: 'present',
+      operation_status: 'running',
+      runtime_session_id: 'runtime/session:01'
+    } as const
+
+    const created = client.createCompanionSession(request)
+    expect(socket.frame()).toEqual(expect.objectContaining({
+      method: 'companion.sessions.create',
+      params: request
+    }))
+    socket.respond(receipt)
+    await expect(created).resolves.toEqual(receipt)
+
+    const reconcileRequest = {
+      operation_kind: 'create' as const,
+      backend_namespace: request.backend_namespace,
+      profile: request.profile,
+      client_request_id: request.client_request_id
+    }
+    const reconciled = client.reconcileCompanionSessionCreation(reconcileRequest)
+    expect(socket.frame()).toEqual(expect.objectContaining({
+      method: 'companion.sessions.reconcile',
+      params: reconcileRequest
+    }))
+    socket.respond({ ...receipt, operation_status: 'completed', runtime_session_id: null })
+    await expect(reconciled).resolves.toMatchObject({ operation_status: 'completed' })
+  })
+
+  it.each([
+    ['unknown field', { unexpected: true }],
+    ['wrong scope', { backend_namespace: 'other-backend' }],
+    ['wrong request identity', { client_request_id: '22222222-2222-4222-8222-222222222222' }],
+    ['noncanonical request UUID', { client_request_id: 'NOT-A-UUID' }],
+    ['contradictory not-found row', { operation_status: 'not_found', row_state: 'present' }],
+    ['bound status without stored ID', { stored_session_id: null }],
+    ['runtime without a row', { row_state: 'absent', runtime_session_id: 'runtime/session:01' }]
+  ])('rejects malformed creation receipts: %s', async (_label, change) => {
+    const { client, connect } = harness()
+    const socket = await connect()
+    const request = {
+      version: 1 as const,
+      backend_namespace: 'desktop:mac-mini', profile: 'atlas', project_id: null,
+      text: 'Exact text', client_request_id: '11111111-1111-4111-8111-111111111111'
+    }
+    const created = client.createCompanionSession(request)
+    socket.respond({
+      version: 1, operation_kind: 'create', backend_namespace: request.backend_namespace,
+      profile: request.profile, client_request_id: request.client_request_id, project_id: null,
+      stored_session_id: 'stored/session:99', row_state: 'present', operation_status: 'running',
+      runtime_session_id: 'runtime/session:01', ...change
+    })
+
+    await expect(created).rejects.toThrow(/malformed companion\.sessions\.create receipt/i)
+  })
+
   it('uses companion attention, session history, pinning, and canonical Bot Chat parameters', async () => {
     const { client, connect } = harness()
     const socket = await connect()

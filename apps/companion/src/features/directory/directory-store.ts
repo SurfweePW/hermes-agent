@@ -16,6 +16,7 @@ import type { WorkCard, WorkDetail } from '../../gateway/work-types'
 export type DirectoryStatus = 'idle' | 'loading' | 'ready' | 'unsupported' | 'error' | 'offline'
 export interface SourceCoverage {
   profile: string
+  backendNamespace?: string | null
   status: DirectoryStatus
   complete: boolean
   freshness: string | null
@@ -113,6 +114,7 @@ const initialSnapshot = (): DirectorySnapshot => ({ sessions: [], projects: [], 
 
 const pendingCoverage = (profile: string): SourceCoverage => ({
   profile,
+  backendNamespace: null,
   status: 'loading',
   complete: false,
   freshness: null,
@@ -306,6 +308,9 @@ export function createDirectoryStore(): DirectoryStore {
 
     coverage.set(profile, {
       profile,
+      backendNamespace: sessionResult?.backend_namespace
+        ?? projectResult?.backend_namespace
+        ?? previous.backendNamespace,
       status,
       complete: sessionStatus === 'ready' && projectStatus === 'ready' && sessionComplete && projectComplete && !sessionsHasMore && !projectsHasMore,
       freshness: sessionResult?.coverage.freshness ?? projectResult?.coverage.freshness ?? previous.freshness,

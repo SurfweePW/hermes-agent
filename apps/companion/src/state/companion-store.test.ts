@@ -1,7 +1,7 @@
 import { type ConnectionState, JsonRpcGatewayError } from '@hermes/shared'
 import { describe, expect, it, vi } from 'vitest'
 
-import type { CompanionEvent, CompanionSessionHistoryResult, ContinueCompanionSessionResult, GatewaySessionSummary, ProfilesListResult, SessionInterruptResult, SessionResult } from '../gateway/types'
+import type { CompanionEvent, CompanionSessionHistoryResult, ContinueCompanionSessionResult, CreateCompanionSessionRequest, GatewaySessionSummary, ProfilesListResult, SessionInterruptResult, SessionResult } from '../gateway/types'
 import type { OwnerAuthBridge } from '../security/owner-auth'
 import type { SessionSecretStore } from '../security/secret-store'
 
@@ -30,6 +30,7 @@ class ControlledGateway implements CompanionGateway {
   resumeResults: Promise<SessionResult>[] = []
   continuationResults: Promise<ContinueCompanionSessionResult>[] = []
   reconciliationResults: Promise<Awaited<ReturnType<CompanionGateway['reconcileCompanionSession']>>>[] = []
+
   sessionListResults: Promise<{ sessions: GatewaySessionSummary[] }>[] = []
   sessions: GatewaySessionSummary[] = []
   attentionResult = { items: [], scope: 'This gateway runtime only' } as Awaited<ReturnType<CompanionGateway['listAttention']>>
@@ -60,6 +61,7 @@ class ControlledGateway implements CompanionGateway {
  return this.resumeResults.shift() ?? this.session }
   async getCompanionSessionHistory(profile: string, id: string, cursor?: string, expectedSource?: string): Promise<CompanionSessionHistoryResult> {
     this.calls.push(['getCompanionSessionHistory', profile, id, cursor, expectedSource])
+
     return {
       session_id: id, profile, source: expectedSource ?? 'backend-1',
       entries: [{ id: 'persisted-1', kind: 'message' as const, role: 'assistant' as const, content: 'Persisted reply', label: null, occurred_at: null }],
@@ -69,12 +71,15 @@ class ControlledGateway implements CompanionGateway {
   }
   async continueCompanionSession(options: { backend_namespace: string; profile: string; stored_session_id: string; text: string; client_request_id: string }) {
     this.calls.push(['continueCompanionSession', options])
+
     return this.continuationResults.shift() ?? { ...this.session, stored_session_id: options.stored_session_id, backend_namespace: options.backend_namespace, profile: options.profile, cwd: '/persisted/cwd', status: 'streaming' as const }
   }
   async reconcileCompanionSession(options: { backend_namespace: string; profile: string; stored_session_id: string; client_request_id: string }) {
     this.calls.push(['reconcileCompanionSession', options])
+
     return this.reconciliationResults.shift() ?? { ...options, status: 'reconciled' as const, reconciled: true as const, operation_status: 'not_admitted' as const }
   }
+
   async listSessions(options: { profile: string; limit?: number; include_hidden?: boolean; include_archived?: boolean; title?: string }) {
     this.calls.push(['listSessions', options])
 
@@ -164,13 +169,66 @@ function harness(
     gatewayFactory: factory,
     storage,
     ...(secretStore ? { secretStore } : {}),
-    ...(ownerAuthBridge ? { ownerAuthBridge } : {})
+    ...(ownerAuthBridge ? { ownerAuthBridge } : {}),
+    creationLock: {
+      request: async (_name, _options, callback) => callback({ name: _name })
+    }
   })
 
   return { store, storage, gateways, values }
 }
 
 describe('CompanionStore setup and sessions', () => {
+  it('reconciles an uncertain first send without creating a second session', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
+    }
+
+    const { store, gateways } = harness(null, undefined, undefined, ownerAuth, (gateway, index) => {
+      Object.assign(gateway, {
+        listCompanionSessions: async () => ({ backend_namespace: 'backend-1', sessions: [], has_more: false, next_cursor: null,
+          coverage: { complete: true, freshness: null, message: null } }),
+        listCompanionProjects: async () => ({ backend_namespace: 'backend-1', projects: [], has_more: false, next_cursor: null,
+          coverage: { complete: true, freshness: null, message: null } }),
+        getCompanionProject: async () => {throw new Error('unused')},
+        createCompanionSession: async (request: CreateCompanionSessionRequest) => {
+          gateway.calls.push(['createCompanionSession', request])
+
+          if (index === 0) {throw new Error('socket closed')}
+          throw new Error('creation must be reconciled, not replayed')
+        },
+        reconcileCompanionSessionCreation: async (request: { operation_kind: 'create'; backend_namespace: string; profile: string; client_request_id: string }) => {
+          gateway.calls.push(['reconcileCompanionSessionCreation', request])
+
+          return {
+            version: 1 as const, operation_kind: 'create' as const, backend_namespace: request.backend_namespace,
+            profile: request.profile, client_request_id: request.client_request_id, project_id: null,
+            stored_session_id: 'created-stored', row_state: 'present' as const,
+            operation_status: 'completed' as const, runtime_session_id: null
+          }
+        }
+      })
+    })
+
+    await store.configureOwner({ baseUrl: 'https://gateway.test' })
+    await vi.waitFor(() => expect(store.directory.getSnapshot().coverage[0]?.backendNamespace).toBe('backend-1'))
+    await store.openBotChat('atlas')
+    expect(gateways[0].calls.some(([name]) => name === 'createSession' || name === 'listSessions')).toBe(false)
+    store.setDraft('Create exactly once')
+    await store.submitDraft()
+    expect(store.getSnapshot().turnStatus).toBe('uncertain')
+    gateways[0].setState('closed')
+
+    await store.connectOwner()
+
+    const creationCalls = gateways.flatMap((gateway) => gateway.calls)
+      .filter(([name]) => name === 'createCompanionSession')
+
+    expect(creationCalls).toHaveLength(1)
+    expect(gateways[1].calls.filter(([name]) => name === 'reconcileCompanionSessionCreation')).toHaveLength(1)
+    expect(store.getSnapshot()).toMatchObject({ storedSessionId: 'created-stored', turnStatus: 'idle' })
+  })
   it('bootstraps a native owner connection without opening a shared-token socket first', async () => {
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(async () => ({ signedIn: true, ignored: 'renderer-secret' })),
@@ -766,6 +824,7 @@ describe('CompanionStore setup and sessions', () => {
         ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
         ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
       }
+
       const pin = deferred<{ pinned: boolean; session_id: string; changed: boolean }>()
       const { store, gateways, values } = harness(null, undefined, undefined, ownerAuth)
       await store.configureOwner({ baseUrl: 'https://gateway.test' })
@@ -909,11 +968,13 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('restores per-backend/profile/logical-session drafts across switches, restart, and reconnect', async () => {
     const values = new Map<string, string>()
+
     const storage = {
       getItem: (key: string) => values.get(key) ?? null,
       setItem: (key: string, value: string) => {values.set(key, value)},
       removeItem: (key: string) => {values.delete(key)}
     }
+
     const a = { backend_namespace: 'desktop-a', profile: 'atlas', stored_session_id: 'logical-a' }
     const b = { backend_namespace: 'desktop-a', profile: 'atlas', stored_session_id: 'logical-b' }
     const otherProfile = { ...a, profile: 'mentor' }
@@ -944,10 +1005,12 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('keeps an in-memory draft and allows owner switch after failed persistence is safely purged', async () => {
     const values = new Map<string, string>()
+
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const storage = {
       getItem: (key: string) => values.get(key) ?? null,
       setItem: (key: string, value: string) => {
@@ -956,9 +1019,11 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       },
       removeItem: (key: string) => {values.delete(key)}
     }
+
     const store = createCompanionStore({
       gatewayFactory: () => new ControlledGateway(), ownerAuthBridge: ownerAuth, storage
     })
+
     const target = { backend_namespace: 'desktop-a', profile: 'atlas', stored_session_id: 'logical-a' }
 
     store.activateSessionDraft(target)
@@ -1004,10 +1069,12 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
   it('blocks owner replacement on unpurged draft plaintext but still attempts native sign-out cleanup', async () => {
     const values = new Map<string, string>()
     let blockDraftStorage = false
+
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const storage = {
       getItem: (key: string) => values.get(key) ?? null,
       setItem: (key: string, value: string) => {
@@ -1019,9 +1086,11 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
         values.delete(key)
       }
     }
+
     const store = createCompanionStore({
       gatewayFactory: () => new ControlledGateway(), ownerAuthBridge: ownerAuth, storage
     })
+
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     store.activateSessionDraft({ backend_namespace: 'desktop-a', profile: 'atlas', stored_session_id: 'logical-a' })
     store.setDraft('private plaintext')
@@ -1049,6 +1118,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const owner = harness(null, undefined, undefined, ownerAuth)
     await owner.store.configureOwner({ baseUrl: 'https://gateway.test' })
     owner.store.activateSessionDraft({ backend_namespace: 'desktop-a', profile: 'atlas', stored_session_id: 'logical-a' })
@@ -1801,6 +1871,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     await store.openPersistedSession(
@@ -1832,6 +1903,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const profiles = { profiles: [{ name: 'atlas' }, { name: 'mentor' }] }
     const { store, gateways } = harness(null, profiles, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
@@ -1863,6 +1935,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const profiles = { profiles: [{ name: 'atlas' }, { name: 'mentor' }] }
     const { store, gateways } = harness(null, profiles, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
@@ -1893,6 +1966,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const profiles = { profiles: [{ name: 'atlas' }, { name: 'mentor' }] }
     const { store, gateways } = harness(null, profiles, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
@@ -1996,8 +2070,10 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
         ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
         ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
       }
+
       const profiles = { profiles: [{ name: 'atlas' }, { name: 'mentor' }] }
       const sessionA = { backend_namespace: 'backend-a', profile: 'atlas', stored_session_id: 'stored-a' }
+
       const { store, gateways, values } = harness(null, profiles, undefined, ownerAuth, (gateway, index) => {
         if (index === 1) {
           gateway.reconciliationResults.push(Promise.resolve({
@@ -2006,6 +2082,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
           }))
         }
       })
+
       await store.configureOwner({ baseUrl: 'https://gateway.test' })
       const lostAdmission = deferred<ContinueCompanionSessionResult>()
       gateways[0].continuationResults.push(lostAdmission.promise)
@@ -2022,6 +2099,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       }]
       gateways[0].resumeResults.push(openingBResult.promise)
       const mentorId = store.getSnapshot().teammates.find((teammate) => teammate.name === 'Mentor')!.id
+
       const openingB = route === 'openAttention'
         ? store.openAttention({
             id: 'attention-b', kind: 'question', profile: 'mentor', runtime_session_id: 'runtime-b',
@@ -2031,6 +2109,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
         : route === 'openBotChat'
           ? store.openBotChat(mentorId)
           : store.submitQuickTask(mentorId, 'Quick task B')
+
       await vi.waitFor(() => expect(gateways[0].calls.some(([name]) => name === 'resumeSession')).toBe(true))
       store.setDraft('Draft B')
       const selectedB = store.getSnapshot()
@@ -2072,8 +2151,10 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
         ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
         ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
       }
+
       const profiles = { profiles: [{ name: 'atlas' }, { name: 'mentor' }] }
       const sessionA = { backend_namespace: 'backend-a', profile: 'atlas', stored_session_id: 'stored-a' }
+
       const { store, gateways, values } = harness(null, profiles, undefined, ownerAuth, (gateway, index) => {
         if (index === 1) {
           gateway.reconciliationResults.push(Promise.resolve({
@@ -2082,6 +2163,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
           }))
         }
       })
+
       await store.configureOwner({ baseUrl: 'https://gateway.test' })
       const lostAdmission = deferred<ContinueCompanionSessionResult>()
       gateways[0].continuationResults.push(lostAdmission.promise)
@@ -2098,6 +2180,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       }]
       gateways[0].resumeResults.push(openingBResult.promise)
       const mentorId = store.getSnapshot().teammates.find((teammate) => teammate.name === 'Mentor')!.id
+
       const openingB = route === 'openAttention'
         ? store.openAttention({
             id: 'attention-b', kind: 'question', profile: 'mentor', runtime_session_id: 'runtime-b',
@@ -2107,6 +2190,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
         : route === 'openBotChat'
           ? store.openBotChat(mentorId)
           : store.submitQuickTask(mentorId, 'Quick task B')
+
       await vi.waitFor(() => expect(gateways[0].calls.some(([name]) => name === 'resumeSession')).toBe(true))
       store.setDraft('Draft B')
 
@@ -2131,8 +2215,10 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const sessionA = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-a' }
     const sessionB = { backend_namespace: 'backend-2', profile: 'Operations Assistant', stored_session_id: 'stored-b' }
+
     const { store, gateways, values } = harness(null, undefined, undefined, ownerAuth, (gateway, index) => {
       if (index === 1) {
         gateway.reconciliationResults.push(Promise.resolve({
@@ -2141,6 +2227,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
         }))
       }
     })
+
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const lostAdmission = deferred<ContinueCompanionSessionResult>()
     gateways[0].continuationResults.push(lostAdmission.promise)
@@ -2179,6 +2266,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const continuation = deferred<ContinueCompanionSessionResult>()
@@ -2252,6 +2340,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const continuation = deferred<ContinueCompanionSessionResult>()
@@ -2292,6 +2381,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const continuation = deferred<ContinueCompanionSessionResult>()
@@ -2300,6 +2390,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
     const opening = store.openPersistedSession(target, 'Apply the terminal once')
     await vi.waitFor(() => expect(gateways[0].calls.some(([name]) => name === 'continueCompanionSession')).toBe(true))
+
     for (let index = 0; index < 80; index += 1) {
       gateways[0].emit({
         type: 'message.complete',
@@ -2307,6 +2398,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
         payload: { text: `Duplicate completion ${index}` }
       })
     }
+
     continuation.resolve({
       ...target,
       session_id: 'runtime-bounded',
@@ -2333,6 +2425,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const continuation = deferred<ContinueCompanionSessionResult>()
@@ -2365,6 +2458,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const continuation = deferred<ContinueCompanionSessionResult>()
@@ -2491,6 +2585,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const continuation = deferred<ContinueCompanionSessionResult>()
@@ -2523,6 +2618,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     vi.spyOn(gateways[0], 'getCompanionSessionHistory').mockResolvedValue({
@@ -2550,6 +2646,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     const target = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-exact' }
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
@@ -2571,6 +2668,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways, values } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const continuation = deferred<ContinueCompanionSessionResult>()
@@ -2608,6 +2706,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways, values } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const continuation = deferred<ContinueCompanionSessionResult>()
@@ -2629,6 +2728,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const target = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-exact' }
@@ -2653,6 +2753,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
         ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
         ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
       }
+
       const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
       await store.configureOwner({ baseUrl: 'https://gateway.test' })
       const sessionA = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-a' }
@@ -2688,16 +2789,20 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
         ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
         ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
       }
+
       const { store, gateways, values } = harness(null, undefined, undefined, ownerAuth)
       await store.configureOwner({ baseUrl: 'https://gateway.test' })
       const target = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-exact' }
+
       if (path === 'active-composer') {
         await store.openPersistedSession(target, 'Initial accepted turn')
         store.setDraft('  preserve active draft  ')
       }
+
       const previousContinuationCalls = gateways[0].calls.filter(([name]) => name === 'continueCompanionSession').length
       vi.spyOn(gateways[0], 'getCompanionSessionHistory')
         .mockRejectedValueOnce(new Error('gateway preflight leaked API_KEY=synthetic-secret'))
+
       const firstAttempt = path === 'active-composer'
         ? store.submitDraft()
         : store.openPersistedSession(target, '  preserve saved draft  ')
@@ -2716,6 +2821,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
       if (path === 'active-composer') {await store.submitDraft()}
       else {await store.openPersistedSession(target, expectedRawDraft)}
+
       expect(gateways[0].calls.filter(([name]) => name === 'continueCompanionSession')).toHaveLength(previousContinuationCalls + 1)
       expect(gateways[0].calls.filter(([name]) => name === 'reconcileCompanionSession')).toHaveLength(0)
     }
@@ -2726,6 +2832,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const continuation = deferred<ContinueCompanionSessionResult>()
@@ -2759,6 +2866,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways, values } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const history = deferred<CompanionSessionHistoryResult>()
@@ -2790,6 +2898,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways, values } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const history = deferred<CompanionSessionHistoryResult>()
@@ -2814,6 +2923,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const lostResponse = deferred<ContinueCompanionSessionResult>()
@@ -2840,6 +2950,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const target = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-exact' }
@@ -2858,14 +2969,18 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('reconciles continuity through connectOwner before publishing ready', async () => {
     const reconciliation = deferred<Awaited<ReturnType<CompanionGateway['reconcileCompanionSession']>>>()
+
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const target = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-exact' }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth, (gateway, index) => {
       if (index === 1) {gateway.reconciliationResults.push(reconciliation.promise)}
     })
+
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     gateways[0].continuationResults.push(Promise.resolve({ ...target, status: 'uncertain', reconciled: true }))
     await expect(store.openPersistedSession(target, 'Accepted during owner session', 'Exact owner title')).rejects.toThrow(/may have accepted/i)
@@ -2917,8 +3032,10 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const target = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-exact' }
     let requestId = ''
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth, (gateway, index) => {
       if (index === 1) {
         gateway.reconciliationResults.push(Promise.resolve({
@@ -2927,6 +3044,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
         }))
       }
     })
+
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     gateways[0].continuationResults.push(Promise.resolve({ ...target, status: 'uncertain', reconciled: true }))
 
@@ -2947,16 +3065,22 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('persists the continuation binding before its first asynchronous boundary', async () => {
     const values = new Map<string, string>()
+
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const gateways: ControlledGateway[] = []
+
     const store = createCompanionStore({
-      gatewayFactory: () => { const gateway = new ControlledGateway(); gateways.push(gateway); return gateway },
+      gatewayFactory: () => { const gateway = new ControlledGateway(); gateways.push(gateway);
+
+ return gateway },
       ownerAuthBridge: ownerAuth,
       storage: { getItem: (key) => values.get(key) ?? null, setItem: (key, value) => {values.set(key, value)}, removeItem: (key) => {values.delete(key)} }
     })
+
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const target = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-exact' }
 
@@ -2971,17 +3095,24 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('reconciles a persisted continuity request ID in a fresh store without resubmitting', async () => {
     const values = new Map<string, string>()
+
     const storage = {
       getItem: (key: string) => values.get(key) ?? null,
       setItem: (key: string, value: string) => {values.set(key, value)},
       removeItem: (key: string) => {values.delete(key)}
     }
+
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(async () => ({ signedIn: true })), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const gateways: ControlledGateway[] = []
-    const factory = () => { const gateway = new ControlledGateway(); gateways.push(gateway); return gateway }
+
+    const factory = () => { const gateway = new ControlledGateway(); gateways.push(gateway);
+
+ return gateway }
+
     const target = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-exact' }
     const firstStore = createCompanionStore({ gatewayFactory: factory, ownerAuthBridge: ownerAuth, storage })
     await firstStore.configureOwner({ baseUrl: 'https://gateway.test' })
@@ -3013,6 +3144,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerAuthBridge: ownerAuth,
       storage
     })
+
     await vi.waitFor(() => expect(freshStore.getSnapshot().phase).toBe('ready'))
     expect(gateways[1].calls.filter(([name]) => name === 'continueCompanionSession')).toHaveLength(0)
     const reconciliation = gateways[1].calls.find(([name]) => name === 'reconcileCompanionSession')?.[1] as { client_request_id: string }
@@ -3023,22 +3155,29 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('preserves a different durable draft while reconciling continuity after a cold restart', async () => {
     const values = new Map<string, string>()
+
     const storage = {
       getItem: (key: string) => values.get(key) ?? null,
       setItem: (key: string, value: string) => {values.set(key, value)},
       removeItem: (key: string) => {values.delete(key)}
     }
+
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(async () => ({ signedIn: true })), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const target = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-exact' }
     const gateways: ControlledGateway[] = []
+
     const firstStore = createCompanionStore({
-      gatewayFactory: () => { const gateway = new ControlledGateway(); gateways.push(gateway); return gateway },
+      gatewayFactory: () => { const gateway = new ControlledGateway(); gateways.push(gateway);
+
+ return gateway },
       ownerAuthBridge: ownerAuth,
       storage
     })
+
     await firstStore.configureOwner({ baseUrl: 'https://gateway.test' })
     gateways[0].continuationResults.push(Promise.resolve({ ...target, status: 'uncertain', reconciled: true }))
     await expect(firstStore.openPersistedSession(target, 'Older accepted message')).rejects.toThrow(/may have accepted/i)
@@ -3059,6 +3198,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerAuthBridge: ownerAuth,
       storage
     })
+
     await vi.waitFor(() => expect(freshStore.getSnapshot().phase).toBe('ready'))
 
     expect(gateways[1].calls).toContainEqual(['reconcileCompanionSession', { ...target, client_request_id: requestId }])
@@ -3070,6 +3210,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
   it('removes legacy retry storage that contains plaintext', () => {
     const sensitiveText = 'legacy plaintext password=do-not-keep'
+
     const values = new Map<string, string>([[
       'hermes.companion.continuityRetry.v1',
       JSON.stringify({
@@ -3078,6 +3219,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
         clientRequestId: 'legacy-request'
       })
     ]])
+
     const storage = {
       getItem: (key: string) => values.get(key) ?? null,
       setItem: (key: string, value: string) => {values.set(key, value)},
@@ -3094,17 +3236,24 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     ['target', { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-other' }, 'Original retry text']
   ])('blocks a differing %s while an unresolved continuity request exists', async (_kind, retryTarget, retryText) => {
     const values = new Map<string, string>()
+
     const storage = {
       getItem: (key: string) => values.get(key) ?? null,
       setItem: (key: string, value: string) => {values.set(key, value)},
       removeItem: (key: string) => {values.delete(key)}
     }
+
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(async () => ({ signedIn: true })), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const gateways: ControlledGateway[] = []
-    const factory = () => { const gateway = new ControlledGateway(); gateways.push(gateway); return gateway }
+
+    const factory = () => { const gateway = new ControlledGateway(); gateways.push(gateway);
+
+ return gateway }
+
     const target = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-exact' }
     const firstStore = createCompanionStore({ gatewayFactory: factory, ownerAuthBridge: ownerAuth, storage })
     await firstStore.configureOwner({ baseUrl: 'https://gateway.test' })
@@ -3116,9 +3265,11 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     const freshStore = createCompanionStore({
       gatewayFactory: () => {
         const gateway = factory()
+
         const runningReconciliation = {
           ...target, status: 'reconciled' as const, reconciled: true as const, operation_status: 'running' as const
         }
+
         gateway.reconciliationResults.push(
           Promise.resolve(runningReconciliation),
           Promise.resolve(runningReconciliation)
@@ -3129,6 +3280,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerAuthBridge: ownerAuth,
       storage
     })
+
     await vi.waitFor(() => expect(freshStore.getSnapshot().phase).toBe('ready'))
     await expect(freshStore.openPersistedSession(retryTarget, retryText)).rejects.toThrow(/may have accepted/i)
     expect(gateways[1].calls.filter(([name]) => name === 'continueCompanionSession')).toHaveLength(0)
@@ -3141,6 +3293,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       ownerSignIn: vi.fn(async () => ({ signedIn: true })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
       ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
     }
+
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const rejected = deferred<ContinueCompanionSessionResult>()

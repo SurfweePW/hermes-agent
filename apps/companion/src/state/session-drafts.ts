@@ -4,12 +4,24 @@ export interface DraftStorage {
   removeItem?(key: string): void
 }
 
-export interface SessionDraftIdentity {
+export interface PersistedSessionDraftIdentity {
   backendNamespace: string
   profile: string
   sessionId: string
   sessionKind: 'stored' | 'runtime'
 }
+
+export interface LocalSessionDraftIdentity {
+  ownerScope: string
+  backendNamespace: string
+  profile: string
+  projectId: null
+  sessionId: string
+  sessionKind: 'local'
+  revision: number
+}
+
+export type SessionDraftIdentity = PersistedSessionDraftIdentity | LocalSessionDraftIdentity
 
 const DRAFTS_STORAGE_KEY = 'hermes.companion.sessionDrafts.v1'
 const MAX_DRAFT_LENGTH = 1_000_000
@@ -24,17 +36,27 @@ function validIdentityParts(identity: unknown): identity is [string, string, 'st
     && (identity[2] === 'stored' || identity[2] === 'runtime')
 }
 
+function validLocalIdentityParts(identity: unknown): identity is [string, string, string, 'local', string, null, number] {
+  return Array.isArray(identity)
+    && identity.length === 7
+    && identity.slice(0, 3).every((part) => typeof part === 'string' && part.length > 0)
+    && identity[3] === 'local'
+    && typeof identity[4] === 'string'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(identity[4])
+    && identity[5] === null
+    && Number.isSafeInteger(identity[6])
+    && identity[6] > 0
+}
+
 function identityKey(identity: SessionDraftIdentity): string | null {
   if (!identity || typeof identity !== 'object') {return null}
 
-  const parts = [
-    identity.backendNamespace,
-    identity.profile,
-    identity.sessionKind,
-    identity.sessionId
-  ]
+  const parts = identity.sessionKind === 'local'
+    ? [identity.ownerScope, identity.backendNamespace, identity.profile, identity.sessionKind,
+        identity.sessionId, identity.projectId, identity.revision]
+    : [identity.backendNamespace, identity.profile, identity.sessionKind, identity.sessionId]
 
-  if (!validIdentityParts(parts)) {return null}
+  if (!validIdentityParts(parts) && !validLocalIdentityParts(parts)) {return null}
 
   const key = JSON.stringify(parts)
 
@@ -47,7 +69,7 @@ function validIdentityKey(key: string): boolean {
   try {
     const identity = JSON.parse(key) as unknown
 
-    return validIdentityParts(identity)
+    return (validIdentityParts(identity) || validLocalIdentityParts(identity))
       && JSON.stringify(identity) === key
   } catch {
     return false
@@ -231,6 +253,18 @@ export function createSessionDraftStore(storage?: DraftStorage) {
       const entries = Object.entries(drafts).filter(([existingKey]) => existingKey !== key)
 
       if (value) {entries.push([key, value.slice(0, MAX_DRAFT_LENGTH)])}
+      drafts = boundDrafts(entries)
+
+      return persist()
+    },
+    rekey(from: SessionDraftIdentity, to: SessionDraftIdentity, value: string): boolean {
+      const fromKey = identityKey(from)
+      const toKey = identityKey(to)
+
+      if (!fromKey || !toKey) {return false}
+      const entries = Object.entries(drafts).filter(([existingKey]) => existingKey !== fromKey && existingKey !== toKey)
+
+      if (value) {entries.push([toKey, value.slice(0, MAX_DRAFT_LENGTH)])}
       drafts = boundDrafts(entries)
 
       return persist()
