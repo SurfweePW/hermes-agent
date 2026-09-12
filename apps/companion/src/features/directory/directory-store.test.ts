@@ -147,6 +147,29 @@ function deferred<T>() {
 }
 
 describe('createDirectoryStore', () => {
+  it('loads every eligible session page when search matches a project name', async () => {
+    const client = gateway()
+    const namedProject = { ...project, title: 'Deep Project Match', session_ids: ['older-member'] }
+    vi.mocked(client.listCompanionProjects)
+      .mockResolvedValueOnce({ projects: [namedProject], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } })
+      .mockResolvedValueOnce({ projects: [namedProject], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } })
+    vi.mocked(client.listCompanionSessions)
+      .mockResolvedValueOnce({ sessions: [], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } })
+      .mockResolvedValueOnce({ sessions: [], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } })
+      .mockResolvedValueOnce({ sessions: [session('unrelated')], has_more: true, next_cursor: 'all-2', coverage: { complete: true, freshness: null, message: null } })
+      .mockResolvedValueOnce({ sessions: [session('older-member')], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } })
+    const store = createDirectoryStore()
+    await store.attach(client, [profile])
+
+    await store.setBrowseQuery({ search: 'deep project', archive: 'all' })
+
+    expect(store.getSnapshot().sessions).toEqual([
+      expect.objectContaining({ id: 'older-member', project: expect.objectContaining({ title: 'Deep Project Match' }) })
+    ])
+    expect(vi.mocked(client.listCompanionSessions).mock.calls.at(-1)?.[0]).toMatchObject({ cursor: 'all-2' })
+    expect(store.getSnapshot().coverage[0].complete).toBe(true)
+  })
+
   it('hydrates a project Topics relationship with the topic namespace intact', async () => {
     const client = gateway()
     const detailed = topicDetail()
@@ -186,7 +209,7 @@ describe('createDirectoryStore', () => {
     const card: WorkCard = {
       id: 'launch-checklist', profile, source_key: 'launch-checklist', state: 'needs_me', title: 'Approve launch checklist', brief: 'Review release gates.',
       evidence: [], next_action: 'Approve it', owner: profile, revision: 2, version: 3, created_at: '2026-09-01T00:00:00.000Z',
-      updated_at: '2026-09-03T00:00:00.000Z', snoozed_until: null, attention_due: true, attention_key: 'launch-checklist', approval: null,
+      updated_at: '2026-09-03T00:00:00.000Z', snoozed_until: null, attention_due: true, attention_key: 'launch-checklist', recommended_action: 'approve_preparation', approval: null,
       preparation_status: 'prepared', handoff_key: null, execution_link: null, tracker_evidence: null, completion_evidence: null
     }
 
@@ -342,6 +365,67 @@ describe('createDirectoryStore', () => {
     expect(client.getCompanionProject).toHaveBeenLastCalledWith(profile, project.id, 'next-page')
   })
 
+  it('keeps later-page project membership unknown until the matching project page loads', async () => {
+    const client = gateway()
+    vi.mocked(client.listCompanionSessions).mockResolvedValue({
+      sessions: [session('one')], has_more: false, next_cursor: null,
+      coverage: { complete: true, freshness: project.freshness, message: null }
+    })
+    vi.mocked(client.listCompanionProjects)
+      .mockResolvedValueOnce({
+        projects: [{ ...project, session_ids: [] }], has_more: true, next_cursor: 'projects-2',
+        coverage: { complete: true, freshness: project.freshness, message: null }
+      })
+      .mockResolvedValueOnce({
+        projects: [{ ...project, id: 'project-2', title: 'Project two', session_ids: ['one'] }], has_more: false, next_cursor: null,
+        coverage: { complete: true, freshness: project.freshness, message: null }
+      })
+    const store = createDirectoryStore()
+
+    await store.attach(client, [profile])
+    expect(store.getSnapshot().sessions[0]?.project).toBeUndefined()
+
+    await store.loadOlder('projects', profile)
+    expect(store.getSnapshot().sessions[0]?.project).toEqual({ id: 'project-2', title: 'Project two', profile })
+  })
+
+  it('preserves known positive membership and marks absent membership unknown when project loading fails', async () => {
+    const client = gateway()
+    vi.mocked(client.listCompanionSessions).mockResolvedValue({
+      sessions: [
+        { ...session('one'), project: { id: project.id, title: project.title, profile } },
+        session('two')
+      ],
+      has_more: false, next_cursor: null,
+      coverage: { complete: true, freshness: project.freshness, message: null }
+    })
+    vi.mocked(client.listCompanionProjects).mockRejectedValue(new Error('project source offline'))
+    const store = createDirectoryStore()
+
+    await store.attach(client, [profile])
+
+    expect(store.getSnapshot().sessions.find((item) => item.id === 'one')?.project).toEqual({ id: project.id, title: project.title, profile })
+    expect(store.getSnapshot().sessions.find((item) => item.id === 'two')?.project).toBeUndefined()
+    expect(store.getSnapshot().coverage[0]).toMatchObject({ projectStatus: 'error', complete: false })
+  })
+
+  it('marks a session unassigned only after complete project coverage excludes it', async () => {
+    const client = gateway()
+    vi.mocked(client.listCompanionSessions).mockResolvedValue({
+      sessions: [session('one')], has_more: false, next_cursor: null,
+      coverage: { complete: true, freshness: project.freshness, message: null }
+    })
+    vi.mocked(client.listCompanionProjects).mockResolvedValue({
+      projects: [], has_more: false, next_cursor: null,
+      coverage: { complete: true, freshness: project.freshness, message: null }
+    })
+    const store = createDirectoryStore()
+
+    await store.attach(client, [profile])
+
+    expect(store.getSnapshot().sessions[0]?.project).toBeNull()
+  })
+
   it('passes search/archive to session RPCs and exhausts project pages for local title search', async () => {
     const client = gateway()
     const store = createDirectoryStore()
@@ -354,12 +438,34 @@ describe('createDirectoryStore', () => {
     await store.setBrowseQuery({ search: 'Needle', archive: 'archived', sources: ['desktop-db'], origins: ['desktop', 'cli'] })
 
     expect(client.listCompanionSessions).toHaveBeenLastCalledWith(expect.objectContaining({ profile, search: 'Needle', view: 'archived', sources: ['desktop-db'], origins: ['cli', 'desktop'] }))
-    expect(client.listCompanionProjects).toHaveBeenNthCalledWith(1, expect.objectContaining({ profile, archived: true }))
+    expect(client.listCompanionProjects).toHaveBeenNthCalledWith(1, { profile, limit: 50 })
     expect(client.listCompanionProjects).toHaveBeenLastCalledWith(expect.objectContaining({ cursor: 'projects-2' }))
     expect(store.getSnapshot().projects.map((item) => item.id)).toEqual(['project-1', 'older-project'])
   })
 
-  it('appends and deduplicates older history pages', async () => {
+  it('does not mark active sessions in archived projects as unassigned', async () => {
+    const client = gateway()
+    const store = createDirectoryStore()
+    await store.attach(client, [profile])
+    vi.mocked(client.listCompanionSessions).mockResolvedValue({
+      sessions: [session('one')], has_more: false, next_cursor: null,
+      coverage: { complete: true, freshness: project.freshness, message: null }
+    })
+    vi.mocked(client.listCompanionProjects).mockResolvedValue({
+      projects: [{ ...project, archived: true, session_ids: ['one'] }],
+      has_more: false, next_cursor: null,
+      coverage: { complete: true, freshness: project.freshness, message: null }
+    })
+
+    await store.setBrowseQuery({ search: '', archive: 'current' })
+
+    expect(client.listCompanionProjects).toHaveBeenLastCalledWith({ profile, limit: 50 })
+    expect(store.getSnapshot().sessions[0]?.project).toEqual({
+      id: project.id, title: project.title, profile
+    })
+  })
+
+  it('prepends and deduplicates older history pages', async () => {
     const client = gateway()
     vi.mocked(client.getCompanionSessionHistory)
       .mockResolvedValueOnce({ ...history('one'), has_more: true, next_cursor: 'history-2' })
@@ -371,7 +477,7 @@ describe('createDirectoryStore', () => {
     await store.loadOlderHistory()
 
     expect(client.getCompanionSessionHistory).toHaveBeenLastCalledWith(profile, 'one', 'history-2', source)
-    expect(store.getSnapshot().history?.entries.map((entry) => entry.id)).toEqual(['one-message', 'older'])
+    expect(store.getSnapshot().history?.entries.map((entry) => entry.id)).toEqual(['older', 'one-message'])
   })
 
   it('ignores stale detail responses after a newer selection wins', async () => {

@@ -2,9 +2,15 @@ import type { ConnectionState } from '@hermes/shared'
 
 import type {
   ApprovalChoice,
+  AttentionListResult,
   CompanionEvent,
   CompanionEventHandler,
+  CompanionSessionHistoryResult,
+  ContinueCompanionSessionOptions,
+  ContinueCompanionSessionResult,
   CreateSessionOptions,
+  ReconcileCompanionSessionOptions,
+  ReconcileCompanionSessionResult,
   SessionMessage,
   SessionResult
 } from '../gateway/types'
@@ -81,6 +87,46 @@ export class FakeCompanionGateway implements CompanionGateway {
     return { ...this.activeSession, messages: [...this.activeSession.messages] }
   }
 
+  async getCompanionSessionHistory(profile: string, id: string, _cursor?: string, expectedSource?: string): Promise<CompanionSessionHistoryResult> {
+    return {
+      session_id: id,
+      profile,
+      source: expectedSource ?? 'fixture-gateway',
+      entries: initialMessages.map((message, index) => ({
+        id: `fixture-history-${index + 1}`,
+        kind: 'message' as const,
+        role: 'assistant' as const,
+        content: String(message.content ?? ''),
+        label: null,
+        occurred_at: null
+      })),
+      linked_work: [],
+      linked_work_available: false,
+      has_more: false,
+      next_cursor: null,
+      coverage: { complete: true, freshness: null, message: null }
+    }
+  }
+
+  async continueCompanionSession(options: ContinueCompanionSessionOptions): Promise<ContinueCompanionSessionResult> {
+    const session = await this.resumeSession(options.stored_session_id, options.profile)
+    const submitted = await this.submitPrompt(session.session_id, options.text)
+
+    return {
+      ...session,
+      ...submitted,
+      messages: [],
+      backend_namespace: options.backend_namespace,
+      profile: options.profile,
+      cwd: '',
+      reconciled: false
+    }
+  }
+
+  async reconcileCompanionSession(options: ReconcileCompanionSessionOptions): Promise<ReconcileCompanionSessionResult> {
+    return { ...options, status: 'reconciled', reconciled: true, operation_status: 'not_admitted' }
+  }
+
   async listSessions(options: { profile: string; limit?: number; include_hidden?: boolean; title?: string }) {
     const sessions = this.activeSession?.stored_session_id
       ? [{ id: this.activeSession.stored_session_id, title: options.title ?? 'Recent conversation', preview: 'Fixture conversation', started_at: 1, last_active: 1, message_count: 1, source: 'companion', pinned: false }]
@@ -93,7 +139,7 @@ export class FakeCompanionGateway implements CompanionGateway {
     return { pinned, session_id: sessionId, changed: true }
   }
 
-  async listAttention() {
+  async listAttention(): Promise<AttentionListResult> {
     return { items: [], scope: 'This gateway runtime only' }
   }
 

@@ -18,6 +18,7 @@ export class FakeWorkGateway extends FakeCompanionGateway {
       created_at: '2026-01-01T00:00:00Z', updated_at: '2026-01-02T00:00:00Z',
       snoozed_until: id === 'snoozed' ? '2099-12-01T12:00:00Z' : null,
       attention_due: id === 'review', attention_key: `synthetic:${id}:2`,
+      recommended_action: 'approve_preparation',
       approval: id === 'pending' ? { revision: 2, scope: 'preparation_only', decision_id: 'synthetic-approved' } : null,
       preparation_status: id === 'pending' ? 'approved_task_linking_pending' : 'not_authorized', handoff_key: id === 'pending' ? 'synthetic-handoff' : null, execution_link: null, tracker_evidence: null, completion_evidence: null
     }
@@ -26,8 +27,13 @@ export class FakeWorkGateway extends FakeCompanionGateway {
   }))
 
   async workCapabilities(_profile: string) { return { can_decide: true, reason: 'SYNTHETIC QA ONLY — simulated human; no real authorization.' } }
-  async libraryCapabilities() { return { version: 1 as const, max_page_size: 500, max_chunk_size: 65_536, download_transport: 'authenticated_json_rpc_base64_chunks' as const, transfer_consistency: 'signed_immutable_descriptor' as const, html_preview: 'sanitized_static_document' as const, relationship_filters: ['collection', 'project', 'topic', 'session', 'status'] as ['collection', 'project', 'topic', 'session', 'status'], evidence_pin: 'explicit_owner_reviewed_latest' as const } }
+  async libraryCapabilities() { return { version: 1 as const, max_page_size: 500, max_chunk_size: 65_536, download_transport: 'authenticated_json_rpc_base64_chunks' as const, transfer_consistency: 'signed_immutable_descriptor' as const, html_preview: 'sanitized_static_document' as const, relationship_filters: ['collection', 'project', 'topic', 'session', 'status'] as ['collection', 'project', 'topic', 'session', 'status'], evidence_pin: 'explicit_owner_reviewed_latest' as const, reference_resolution: 'exact_collection_relative_path' as const } }
   async libraryProfiles() { return { items: [{ profile: 'atlas', configured: true }], backend_namespace: 'fixture-mac-mini', as_of: '2026-01-04T00:00:00Z' } }
+  async resolveLibraryReference(reference: string, profile = 'atlas') {
+    const available = profile === 'atlas' && reference === 'library:synthetic/synthetic-campaign-brief.md'
+
+    return { available, profile, backend_namespace: 'fixture-mac-mini', ...(available ? { artifact_id: `art_${'a'.repeat(64)}` } : {}) }
+  }
   async listLibrary(options: LibraryListOptions = {}) {
     const candidate = { artifact_id: `art_${'a'.repeat(64)}`, profile: 'atlas', collection: { id: 'synthetic', name: '[SYNTHETIC QA] Outputs', owner: 'atlas', availability: 'available' }, filename: 'synthetic-campaign-brief.md', version_id: `ver_${'b'.repeat(64)}`, size: this.libraryBytes.length, sha256: 'c'.repeat(64), mime_type: 'text/markdown', availability: 'available', reviewed: true, version_count: 1, date: '2026-01-02T00:00:00Z', preview: { kind: 'markdown' as const, preview_available: true } }
     const items = (!options.search || candidate.filename.includes(options.search)) && (!options.collection || options.collection === 'synthetic') && (!options.type || options.type === 'markdown') && (options.reviewed === undefined || options.reviewed) ? [candidate] : []
@@ -55,7 +61,7 @@ export class FakeWorkGateway extends FakeCompanionGateway {
     return structuredClone({ session_id: id, profile, source: 'fixture-mac-mini', entries: [{ id: 'synthetic-message-user', kind: 'message' as const, role: 'user' as const, content: 'Synthetic request for read-only QA.', label: null, occurred_at: '2026-01-01T00:00:00Z' }, { id: 'synthetic-internal', kind: 'internal' as const, role: null, content: '', label: 'Internal event', occurred_at: '2026-01-01T00:01:00Z' }, { id: 'synthetic-message-assistant', kind: 'message' as const, role: 'assistant' as const, content: 'Synthetic response for read-only QA.', label: null, occurred_at: '2026-01-01T00:02:00Z' }], linked_work: id === 'synthetic-session-1' ? [{ id: 'fixture-review', title: '[SYNTHETIC QA] Prepare a sample campaign brief', status: 'needs_me' }] : [], linked_work_available: true, has_more: false, next_cursor: null, coverage: { complete: true, freshness: '2026-01-04T00:00:00Z', message: null } })
   }
   async listCompanionProjects({ profile }: { profile: string; limit?: number; cursor?: string }) {
-    const projects = profile === 'atlas' ? [{ id: 'synthetic-project-1', title: '[SYNTHETIC QA] Companion project', profile, source: 'fixture-mac-mini', type: 'desktop_project' as const, archived: false, last_active: '2026-01-02T00:00:00Z', session_count: 1, linked_work_count: 1, freshness: '2026-01-04T00:00:00Z' }, { id: 'synthetic-project-empty', title: '[SYNTHETIC QA] Empty Desktop project', profile, source: 'fixture-mac-mini', type: 'desktop_project' as const, archived: false, last_active: null, session_count: 0, linked_work_count: 0, freshness: '2026-01-04T00:00:00Z' }] : []
+    const projects = profile === 'atlas' ? [{ id: 'synthetic-project-1', title: '[SYNTHETIC QA] Companion project', profile, source: 'fixture-mac-mini', type: 'desktop_project' as const, archived: false, last_active: '2026-01-02T00:00:00Z', session_count: 1, session_ids: ['synthetic-session-1'], linked_work_count: 1, freshness: '2026-01-04T00:00:00Z' }, { id: 'synthetic-project-empty', title: '[SYNTHETIC QA] Empty Desktop project', profile, source: 'fixture-mac-mini', type: 'desktop_project' as const, archived: false, last_active: null, session_count: 0, session_ids: [], linked_work_count: 0, freshness: '2026-01-04T00:00:00Z' }] : []
 
     return structuredClone({ projects, has_more: false, next_cursor: null, coverage: { complete: true, freshness: '2026-01-04T00:00:00Z', message: 'Synthetic QA source.' } })
   }
@@ -84,7 +90,7 @@ export class FakeWorkGateway extends FakeCompanionGateway {
   async getWork(profile: string, id: string) { return structuredClone(this.lookup(profile, id)) }
   async commentWork(params: WorkCommentParams) {
     const detail = this.lookup(params.profile, params.id)
-    const comment = { id: params.idempotency_key, card_id: params.id, revision: detail.item.revision, actor: 'human' as const, text: params.text, created_at: new Date().toISOString() }
+    const comment = { id: crypto.randomUUID(), card_id: params.id, revision: detail.item.revision, actor: 'human' as const, text: params.text, created_at: new Date().toISOString() }
     detail.comments.push(comment)
 
     return structuredClone({ comment })
@@ -94,7 +100,7 @@ export class FakeWorkGateway extends FakeCompanionGateway {
     const item = detail.item
 
     if (item.version !== params.expected_version || item.revision !== params.revision || !item.attention_due) {throw { code: 4409 }}
-    const decision = { id: params.idempotency_key, card_id: item.id, revision: item.revision, action: params.action, actor: 'Synthetic human', reason: params.reason ?? '', snoozed_until: params.snoozed_until ?? null, created_at: new Date().toISOString(), scope: params.action === 'approve_preparation' ? 'preparation_only' as const : 'none' as const }
+    const decision = { id: crypto.randomUUID(), card_id: item.id, revision: item.revision, action: params.action, actor: 'Synthetic human', reason: params.reason ?? '', snoozed_until: params.snoozed_until ?? null, created_at: new Date().toISOString(), scope: params.action === 'approve_preparation' ? 'preparation_only' as const : 'none' as const }
     detail.decisions.push(decision)
     item.version += 1
     item.attention_due = false

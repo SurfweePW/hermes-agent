@@ -41,4 +41,14 @@ describe('session secret store', () => {
     expect(String(store)).toBe('[SessionSecretStore]')
     expect(JSON.stringify(store)).not.toContain('never-serialize-me')
   })
+
+  it('revokes browser session secrets idempotently', async () => {
+    const store = createSessionSecretStore()
+    store.set('gateway-token', 'session-only-token')
+
+    await store.revoke('gateway-token')
+    await store.revoke('gateway-token')
+
+    expect(store.get('gateway-token')).toBeUndefined()
+  })
 })

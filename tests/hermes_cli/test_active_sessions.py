@@ -342,6 +342,82 @@ def test_liveness_registry_corruption_fails_closed_without_overwrite(
     assert state_path.read_text(encoding="utf-8") == corrupt
 
 
+def test_strict_refusal_does_not_persist_dead_entry_pruning(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    state_path = active_sessions._state_path(home)
+    active_sessions._write_entries(
+        state_path,
+        [
+            {"lease_id": "dead", "session_id": "old", "surface": "companion", "pid": 101},
+            {"lease_id": "live", "session_id": "busy", "surface": "companion", "pid": 202},
+        ],
+    )
+    original = state_path.read_text(encoding="utf-8")
+    monkeypatch.setattr(
+        active_sessions,
+        "_pid_liveness",
+        lambda pid, *_args, **_kwargs: False if pid == 101 else True,
+    )
+
+    lease, refusal = active_sessions.try_acquire_active_session(
+        session_id="requested", surface="companion",
+        config={"max_concurrent_sessions": 1}, registry_home=home,
+        track_liveness=True, persist_prune_on_refusal=False,
+    )
+
+    assert lease is None
+    assert getattr(refusal, "reason", None) == active_sessions.MAX_CONCURRENT_SESSIONS
+    assert state_path.read_text(encoding="utf-8") == original
+
+
+def test_default_refusal_persists_dead_entry_pruning(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    state_path = active_sessions._state_path(home)
+    active_sessions._write_entries(
+        state_path,
+        [
+            {"lease_id": "dead", "session_id": "old", "surface": "cli", "pid": 101},
+            {"lease_id": "live", "session_id": "busy", "surface": "cli", "pid": 202},
+        ],
+    )
+    monkeypatch.setattr(
+        active_sessions,
+        "_pid_liveness",
+        lambda pid, *_args, **_kwargs: False if pid == 101 else True,
+    )
+
+    lease, refusal = active_sessions.try_acquire_active_session(
+        session_id="requested", surface="cli",
+        config={"max_concurrent_sessions": 1}, registry_home=home,
+    )
+
+    assert lease is None
+    assert getattr(refusal, "reason", None) == active_sessions.MAX_CONCURRENT_SESSIONS
+    assert [entry["lease_id"] for entry in active_sessions._read_entries(state_path)] == ["live"]
+
+
+def test_successful_strict_acquisition_persists_canonical_pruned_registry(tmp_path, monkeypatch):
+    home = tmp_path / ".hermes"
+    state_path = active_sessions._state_path(home)
+    active_sessions._write_entries(
+        state_path,
+        [{"lease_id": "dead", "session_id": "old", "surface": "companion", "pid": 101}],
+    )
+    monkeypatch.setattr(active_sessions, "_pid_liveness", lambda *_args, **_kwargs: False)
+
+    lease, refusal = active_sessions.try_acquire_active_session(
+        session_id="requested", surface="companion",
+        config={"max_concurrent_sessions": 1}, registry_home=home,
+        track_liveness=True, persist_prune_on_refusal=False,
+    )
+
+    assert lease is not None and refusal is None
+    entries = active_sessions._read_entries(state_path, strict=True)
+    assert [(entry["lease_id"], entry["session_id"]) for entry in entries] == [
+        (lease.lease_id, "requested")
+    ]
+
+
 def test_strict_registry_rejects_structurally_invalid_entries(tmp_path, monkeypatch):
     home = tmp_path / ".hermes"
     monkeypatch.setenv("HERMES_HOME", str(home))
@@ -471,6 +547,7 @@ def test_liveness_guard_rejects_unknown_pid_state(tmp_path, monkeypatch):
         session_id="cli-cap-session",
         surface="cli",
         config={"max_concurrent_sessions": 1},
+        persist_prune_on_refusal=False,
     )
     assert lease is None
     assert getattr(message, "reason", None) == (

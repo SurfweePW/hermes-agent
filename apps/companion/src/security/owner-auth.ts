@@ -7,6 +7,15 @@ export interface OwnerAuthBridge {
   ownerSignOut(options: { baseUrl: string }): Promise<unknown>
   ownerWebSocketUrl(options: { baseUrl: string }): Promise<string>
 }
+
+export interface SecureOwnerSignOutOptions {
+  bridge: Pick<OwnerAuthBridge, 'ownerSignOut'>
+  baseUrl: string
+  revokeGatewayAccess(): void | Promise<void>
+  clearHistory(): void | Promise<void>
+  clearCache(): void | Promise<void>
+  clearDrafts(): void | Promise<void>
+}
 const nativePlugin = registerPlugin<OwnerAuthBridge>('GatewayToken')
 
 export function getOwnerAuthBridge(): OwnerAuthBridge | undefined {
@@ -34,5 +43,31 @@ export function getOwnerAuthBridge(): OwnerAuthBridge | undefined {
 
       return result.value
     }
+  }
+}
+
+/** App wiring must supply its existing history, cache, and draft reset hooks. */
+export function createSecureOwnerSignOut(options: SecureOwnerSignOutOptions): () => Promise<void> {
+  let operation: Promise<void> | null = null
+  const invoke = (action: () => void | Promise<void>) => Promise.resolve().then(action)
+
+  return () => {
+    if (operation) { return operation }
+
+    operation = (async () => {
+      const results = await Promise.allSettled([
+        invoke(options.revokeGatewayAccess),
+        invoke(options.clearHistory),
+        invoke(options.clearCache),
+        invoke(options.clearDrafts),
+        invoke(async () => { await options.bridge.ownerSignOut({ baseUrl: options.baseUrl }) })
+      ])
+
+      if (results.some((result) => result.status === 'rejected')) {
+        throw new Error('owner-sign-out-incomplete')
+      }
+    })()
+
+    return operation
   }
 }

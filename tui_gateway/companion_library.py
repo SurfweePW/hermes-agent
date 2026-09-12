@@ -90,6 +90,9 @@ _CURSOR_SECRET = os.urandom(32)
 _SNAPSHOTS: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _SNAPSHOT_LOCK = threading.Lock()
 _RELATION_KINDS = {"projects": "project", "topics": "topic", "sessions": "session"}
+_LIBRARY_REFERENCE_RE = re.compile(
+    r"^library:([a-z0-9][a-z0-9._-]{0,127})/([^\\?#%\x00-\x1f\x7f]+)$"
+)
 
 
 class CompanionLibraryError(Exception):
@@ -322,25 +325,69 @@ def _safe_provenance(value: Any) -> Any:
     """Retain useful provenance while removing credentials and absolute paths."""
     from agent.redact import redact_sensitive_text
 
-    sensitive_keys = {
-        "access_token", "refresh_token", "id_token", "token", "api_key",
-        "apikey", "client_secret", "password", "authorization", "cookie",
-        "path", "root", "file", "url",
-    }
+    def key_words(key: Any) -> list[str]:
+        expanded = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", str(key))
+        return [part for part in re.split(r"[^a-z0-9]+", expanded.lower()) if part]
+
+    def path_key(key: Any) -> bool:
+        words = key_words(key)
+        return bool(words) and (
+            words[-1] in {"path", "root", "directory"}
+            or words in (["file"], ["url"], ["uri"])
+        )
+
+    def secret_key(key: Any) -> bool:
+        words = key_words(key)
+        joined = "".join(words)
+        return (
+            joined in {
+                "accesstoken", "refreshtoken", "idtoken", "apikey",
+                "clientsecret", "authorization", "password", "passwd", "cookie",
+            }
+            or (bool(words) and words[-1] in {"token", "secret", "password", "passwd"})
+            or (bool(words) and words[-1] == "key" and any(
+                word in {"api", "auth", "access", "secret", "private"}
+                for word in words[:-1]
+            ))
+        )
+
+    def redact_paths(text: str) -> str:
+        boundary = r"(?=\s+(?:and|via|then|from|using)\b|[,;)}\]]|$)"
+        patterns = (
+            r"(?i)file://(?:localhost)?/[^\r\n,;)}\]]+?" + boundary,
+            r"(?<![A-Za-z0-9])\\\\[^\\\r\n,;)}\]]+\\[^\r\n,;)}\]]+?" + boundary,
+            r"(?<![A-Za-z0-9])(?:[A-Za-z]:[\\/][^\r\n,;)}\]]+?)" + boundary,
+            r"(?<![:A-Za-z0-9])/(?:[^\r\n/,;:)}\]]+/)*[^\r\n,;:)}\]]+?" + boundary,
+        )
+        for pattern in patterns:
+            text = re.sub(pattern, "[REDACTED PATH]", text)
+        return text
+
+    def redact_assignments(text: str) -> str:
+        text = re.sub(
+            r"(?i)\b((?:api[_ -]?key|access[_ -]?token|refresh[_ -]?token|id[_ -]?token|client[_ -]?secret|password|passwd|authorization|credential))\b(\s*[:=]\s*)(?:bearer\s+)?[^\s,;]+",
+            r"\1\2[REDACTED]",
+            text,
+        )
+        return re.sub(
+            r"(?i)\bbearer\s+(?=[A-Za-z0-9._~+/-]{6,}\b)[A-Za-z0-9._~+/-]+=*",
+            "Bearer [REDACTED]",
+            text,
+        )
+
     if isinstance(value, Mapping):
-        return {
-            str(key): ("[REDACTED]" if str(key).lower() in sensitive_keys else _safe_provenance(item))
-            for key, item in value.items()
-        }
+        result = {}
+        for key, item in value.items():
+            if path_key(key):
+                continue
+            result[str(key)] = "[REDACTED]" if secret_key(key) else _safe_provenance(item)
+        return result
     if isinstance(value, list):
         return [_safe_provenance(item) for item in value]
     if isinstance(value, tuple):
         return [_safe_provenance(item) for item in value]
     if isinstance(value, str):
-        text = redact_sensitive_text(value, force=True)
-        if text.startswith(("/", "file://")) or re.match(r"^[A-Za-z]:[\\/]", text):
-            return "[REDACTED PATH]"
-        return text
+        return redact_paths(redact_assignments(redact_sensitive_text(value, force=True)))
     if value is None or isinstance(value, (bool, int, float)):
         return value
     return "[REDACTED]"
@@ -583,7 +630,6 @@ def _detail_projection(value: Mapping[str, Any]) -> dict[str, Any]:
         "artifact_id": value["artifact_id"],
         "profile": value["profile"],
         "collection": _collection(value.get("collection")),
-        "relative_path": value.get("relative_path", ""),
         "filename": value.get("filename", ""),
         "versions": [_version_projection(version) for version in value.get("versions", [])],
         "latest": _latest_projection(value.get("latest")),
@@ -613,7 +659,7 @@ def _catalog(library: ArtifactLibrary) -> list[dict[str, Any]]:
                     "artifact_id": artifact_id,
                     "profile": (retained or newest)["profile"],
                     "collection": _collection((retained or newest).get("collection")),
-                    "relative_path": (retained or newest).get("relative_path", ""),
+                    "_search_relative_path": (retained or newest).get("relative_path", ""),
                     "filename": newest.get("filename", ""),
                     "version_count": len(versions),
                     "reviewed": True,
@@ -629,7 +675,7 @@ def _catalog(library: ArtifactLibrary) -> list[dict[str, Any]]:
                     "artifact_id": artifact_id,
                     "profile": current["profile"],
                     "collection": _collection(current.get("collection")),
-                    "relative_path": current.get("relative_path", ""),
+                    "_search_relative_path": current.get("relative_path", ""),
                     "filename": current.get("filename", ""),
                     "version_count": 0,
                     "reviewed": False,
@@ -639,6 +685,36 @@ def _catalog(library: ArtifactLibrary) -> list[dict[str, Any]]:
             )
         items.append(item)
     return items
+
+
+def _resolve_reference(
+    library: ArtifactLibrary, reference: Any, *, profile: str, backend: str
+) -> dict[str, Any]:
+    """Resolve an explicit collection/path identity without projecting either path."""
+    if not isinstance(reference, str) or len(reference.encode("utf-8")) > 1_000:
+        raise CompanionLibraryError("invalid library reference", -32602)
+    matched = _LIBRARY_REFERENCE_RE.fullmatch(reference)
+    if matched is None:
+        raise CompanionLibraryError("invalid library reference", -32602)
+    collection_id, relative_path = matched.groups()
+    try:
+        normalized = "/".join(ArtifactLibrary._relative_parts(relative_path))
+    except ArtifactSecurityError as exc:
+        raise CompanionLibraryError("invalid library reference", -32602) from exc
+    matches = [
+        item
+        for item in _catalog(library)
+        if item.get("collection", {}).get("id") == collection_id
+        and item.get("_search_relative_path") == normalized
+    ]
+    result: dict[str, Any] = {
+        "available": len(matches) == 1,
+        "profile": profile,
+        "backend_namespace": backend,
+    }
+    if len(matches) == 1:
+        result["artifact_id"] = matches[0]["artifact_id"]
+    return result
 
 
 def _scope(profile: str, backend: str, params: Mapping[str, Any]) -> dict[str, Any]:
@@ -823,14 +899,14 @@ def _filter_catalog(items: list[dict[str, Any]], params: Mapping[str, Any]) -> l
             haystack = " ".join(
                 str(value)
                 for value in (
-                    item.get("filename"), item.get("relative_path"), item.get("mime_type"),
+                    item.get("filename"), item.get("_search_relative_path"), item.get("mime_type"),
                     item.get("collection", {}).get("id"), item.get("collection", {}).get("name"),
                     item.get("collection", {}).get("owner"), item.get("title"), item.get("status"),
                     *(link.get("id") for link in links),
                     *(link.get("title") for link in links),
                 )
             ).casefold()
-            relative_path = str(item.get("relative_path") or "").casefold().strip("/")
+            relative_path = str(item.get("_search_relative_path") or "").casefold().strip("/")
             if query not in haystack and not (
                 relative_path and query.endswith("/" + relative_path)
             ):
@@ -879,6 +955,8 @@ def _list(
             ),
             params,
         )
+        for item in items:
+            item.pop("_search_relative_path", None)
         # The inventory passed by the authorization boundary predates the
         # scan. Re-evaluate it against the library's pinned root identities so
         # a root replaced after authorization cannot be reported available.
@@ -1178,6 +1256,7 @@ def _validate_params(operation: str, params: Any) -> dict[str, Any]:
         raise CompanionLibraryError("parameters must be an object", -32602)
     allowed = {
         "profiles": set(),
+        "resolve": {"profile", "reference"},
         "list": {
             "profile", "search", "collection", "type", "date_from", "date_to",
             "reviewed", "project", "topic", "session", "status", "limit", "cursor",
@@ -1208,7 +1287,7 @@ def execute(
     *,
     owner_authorization: Any = None,
 ) -> dict[str, Any]:
-    if operation not in {"profiles", "list", "get", "preview", "download", "pin_reviewed"}:
+    if operation not in {"profiles", "resolve", "list", "get", "preview", "download", "pin_reviewed"}:
         raise CompanionLibraryError("unknown library operation", -32601)
     params = _validate_params(operation, params)
     _require_owner(owner_authorization)
@@ -1240,6 +1319,10 @@ def execute(
             "backend_namespace": backend,
         }
     try:
+        if operation == "resolve":
+            return _resolve_reference(
+                library, params.get("reference"), profile=profile, backend=backend
+            )
         if operation == "list":
             return _list(
                 server, profile, backend, library, collections, params,

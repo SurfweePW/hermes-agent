@@ -171,12 +171,14 @@ describe('CompanionClient RPC domain methods', () => {
     const decision = client.decideWork(decisionParams)
     expect(socket.frame()).toMatchObject({ method: 'work.decide', params: decisionParams })
     expect(socket.frame().params).toEqual(decisionParams)
-    socket.respond({}); await decision
+    socket.respond({ decision: { id: '11111111-1111-4111-8111-111111111111', card_id: decisionParams.id, revision: decisionParams.revision, action: decisionParams.action, actor: 'owner:test', reason: decisionParams.reason, snoozed_until: null, created_at: '2026-09-01T00:00:00Z', scope: 'none' } })
+    await expect(decision).resolves.toMatchObject({ decision: { id: '11111111-1111-4111-8111-111111111111' } })
     const commentParams = { profile: 'CMO Exact', id: 'stable:01', text: 'Focused comment', idempotency_key: 'comment-1' }
     const comment = client.commentWork(commentParams)
     expect(socket.frame()).toMatchObject({ method: 'work.comment', params: commentParams })
     expect(socket.frame().params).toEqual(commentParams)
-    socket.respond({}); await comment
+    socket.respond({ comment: { id: '22222222-2222-4222-8222-222222222222', card_id: commentParams.id, revision: 3, actor: 'human', text: commentParams.text, created_at: '2026-09-01T00:00:00Z' } })
+    await expect(comment).resolves.toMatchObject({ comment: { id: '22222222-2222-4222-8222-222222222222' } })
     client.close()
   })
 
@@ -274,6 +276,47 @@ describe('CompanionClient RPC domain methods', () => {
     await expect(respondPromise).resolves.toEqual({ resolved: 1 })
   })
 
+  it('serializes persisted continuity as one exact composite RPC', async () => {
+    const { client, connect } = harness()
+    const socket = await connect()
+    const params = {
+      backend_namespace: 'desktop:mac-mini',
+      profile: 'Atlas Exact',
+      stored_session_id: 'stored/session:99',
+      text: 'Preserve this text exactly',
+      client_request_id: 'continuity-request:01'
+    }
+
+    const continued = client.continueCompanionSession(params)
+    expect(socket.frame()).toEqual(expect.objectContaining({
+      method: 'companion.sessions.continue',
+      params
+    }))
+    socket.respond({
+      session_id: 'runtime/resumed:02', stored_session_id: 'stored/session:99', messages: [],
+      status: 'streaming', backend_namespace: 'desktop:mac-mini', profile: 'Atlas Exact',
+      cwd: '/persisted/exact-cwd', reconciled: false
+    })
+    await expect(continued).resolves.toMatchObject({
+      session_id: 'runtime/resumed:02', stored_session_id: 'stored/session:99',
+      cwd: '/persisted/exact-cwd', reconciled: false
+    })
+
+    const reconcileParams = {
+      backend_namespace: 'desktop:mac-mini',
+      profile: 'Atlas Exact',
+      stored_session_id: 'stored/session:99',
+      client_request_id: 'continuity-request:01'
+    }
+    const reconciled = client.reconcileCompanionSession(reconcileParams)
+    expect(socket.frame()).toEqual(expect.objectContaining({
+      method: 'companion.sessions.reconcile',
+      params: reconcileParams
+    }))
+    socket.respond({ ...reconcileParams, status: 'reconciled', reconciled: true, operation_status: 'running' })
+    await expect(reconciled).resolves.toMatchObject({ operation_status: 'running', reconciled: true })
+  })
+
   it('uses companion attention, session history, pinning, and canonical Bot Chat parameters', async () => {
     const { client, connect } = harness()
     const socket = await connect()
@@ -285,11 +328,12 @@ describe('CompanionClient RPC domain methods', () => {
       items: [{
         id: 'a1', kind: 'approval', profile: 'atlas', runtime_session_id: 'runtime-1',
         stored_session_id: 'stored-1', title: 'Approval requested', detail: 'Review.',
-        occurred_at: 1, actionable: true, resolution: 'approval'
+        occurred_at: 1, actionable: true, resolution: 'approval',
+        work_ref: { profile: 'atlas', id: 'durable-work-1' }
       }]
     })
     await expect(attention).resolves.toMatchObject({
-      scope: 'runtime-local', items: [{ actionable: true, resolution: 'approval' }]
+      scope: 'runtime-local', items: [{ actionable: true, resolution: 'approval', work_ref: { profile: 'atlas', id: 'durable-work-1' } }]
     })
 
     const sessions = client.listSessions({ profile: 'atlas', limit: 1, include_hidden: true, include_archived: true, title: 'Bot Chat' })
@@ -319,6 +363,20 @@ describe('CompanionClient RPC domain methods', () => {
     const sessions = client.listSessions({ profile: 'atlas' })
     socket.respond({ sessions: [{ id: 'only-an-id' }] })
     await expect(sessions).rejects.toThrow(/malformed session\.list response/i)
+  })
+
+  it('rejects malformed canonical Work references on runtime Attention', async () => {
+    const { client, connect } = harness()
+    const socket = await connect()
+    const attention = client.listAttention()
+    socket.respond({ items: [{
+      id: 'a1', kind: 'approval', profile: 'atlas', runtime_session_id: 'runtime-1',
+      stored_session_id: 'stored-1', title: 'Approval requested', detail: 'Review.',
+      occurred_at: 1, actionable: true, resolution: 'approval',
+      work_ref: { profile: '../atlas', id: 'durable-work-1' }
+    }] })
+
+    await expect(attention).rejects.toThrow(/malformed attention\.list response/i)
   })
 
   it('omits optional session parameters instead of sending undefined values', async () => {
@@ -484,6 +542,61 @@ describe('CompanionClient typed event stream', () => {
     ])
   })
 
+  it('reduces terminal errors to a fixed allowlisted payload at the gateway boundary', async () => {
+    const { client, connect } = harness()
+    const socket = await connect()
+    const events: CompanionEvent[] = []
+    client.onEvent((event) => events.push(event))
+
+    socket.receive({
+      method: 'event',
+      params: {
+        type: 'error',
+        session_id: 'runtime-error',
+        payload: {
+          message: 'gateway rejected API_KEY=synthetic-secret',
+          details: 'x'.repeat(2_000_000),
+          stack: 'synthetic-stack',
+          nested: { token: 'synthetic-token' }
+        }
+      }
+    })
+
+    expect(events).toEqual([{
+      type: 'error',
+      session_id: 'runtime-error',
+      payload: { message: 'Hermes reported an error while running this turn.' }
+    }])
+    expect(JSON.stringify(events)).not.toContain('synthetic-secret')
+    expect(JSON.stringify(events)).not.toContain('synthetic-token')
+    expect(JSON.stringify(events)).not.toContain('synthetic-stack')
+  })
+
+  it('bounds completed terminal text at the gateway boundary', async () => {
+    const { client, connect } = harness()
+    const socket = await connect()
+    const events: CompanionEvent[] = []
+    client.onEvent((event) => events.push(event))
+
+    socket.receive({
+      method: 'event',
+      params: {
+        type: 'message.complete',
+        session_id: 'runtime-large-complete',
+        payload: { text: 'x'.repeat(100_000), interrupted: false, details: 'must-not-survive' }
+      }
+    })
+
+    expect(events).toHaveLength(1)
+    expect(events[0]).toMatchObject({
+      type: 'message.complete',
+      session_id: 'runtime-large-complete',
+      payload: { interrupted: false }
+    })
+    expect((events[0] as Extract<CompanionEvent, { type: 'message.complete' }>).payload.text).toHaveLength(65_536)
+    expect(JSON.stringify(events)).not.toContain('must-not-survive')
+  })
+
   it('omits malformed approval capabilities and prototype-like metadata', async () => {
     const { client, connect } = harness()
     const socket = await connect()
@@ -527,7 +640,7 @@ describe('CompanionClient typed event stream', () => {
 })
 
 describe('CompanionClient prompt delivery', () => {
-  it('creates a fresh transport on reconnect without replaying an accepted prompt', async () => {
+  it('creates a fresh transport on reconnect without replaying accepted prompt or Stop RPCs', async () => {
     const { client, connect, sockets } = harness()
     const firstSocket = await connect()
 
@@ -536,11 +649,19 @@ describe('CompanionClient prompt delivery', () => {
     firstSocket.respond({ status: 'streaming' })
     await submitted
 
+    const stopped = client.interruptSession('runtime:once')
+    expect(firstSocket.sent).toHaveLength(2)
+    firstSocket.respond({ status: 'interrupted' })
+    await stopped
+
     firstSocket.serverClose()
     const secondSocket = await connect()
 
     expect(sockets).toHaveLength(2)
     expect(secondSocket.sent).toEqual([])
-    expect(firstSocket.sent.map((frame) => JSON.parse(frame).method)).toEqual(['prompt.submit'])
+    expect(firstSocket.sent.map((frame) => JSON.parse(frame).method)).toEqual([
+      'prompt.submit',
+      'session.interrupt'
+    ])
   })
 })

@@ -6,6 +6,7 @@ globals at install time (method_ctx.bind_module), so they reference server.py gl
 from __future__ import annotations
 
 import contextlib
+import threading
 
 from .method_ctx import bind_module
 
@@ -23,18 +24,153 @@ def _notify_session_boundary(event_type: str, session_id: str | None, platform: 
 _SESSION_OWNERSHIP_UNAVAILABLE = "Hermes could not safely reserve this session. Try again."
 _AUTOMATIC_SESSION_END_REASONS = frozenset({"ws_orphan_reap", "ws_disconnect", "idle_timeout", "lru_evict", "tui_shutdown"})
 
+# Serializes the short acquire->track and track->runtime handoffs with lease
+# snapshots. When both locks are needed, reservation lock precedes
+# ``_sessions_lock``. Registry I/O may run under this lock, never under
+# ``_sessions_lock``.
+_lifecycle_reservation_lock = threading.RLock()
+# object identity -> (exact lease object, intended stored key, intended runtime id,
+# retained-after-failed-release)
+_inflight_creation_reservations: dict[int, tuple[Any, str, str, bool]] = {}
+
+
+def _tracked_creation_reservation(lease) -> tuple[Any, str, str, bool] | None:
+    return _inflight_creation_reservations.get(id(lease))
+
+
+def _creation_key_is_reserved(session_key: str) -> bool:
+    key = str(session_key or "")
+    return bool(key) and any(
+        str(getattr(lease, "session_id", "")) == key
+        for lease, _stored_key, _runtime_id, _retained in _inflight_creation_reservations.values()
+    )
+
+
+def _track_creation_reservation(
+    lease, *, session_key: str, live_session_id: str
+) -> bool:
+    """Track one real strict lease by object identity before sweeps can observe it."""
+    if (lease is None or not getattr(lease, "enabled", False)
+            or getattr(lease, "released", False) or not getattr(lease, "track_liveness", False)):
+        return False
+    lease_id = str(getattr(lease, "lease_id", ""))
+    if (
+        not lease_id
+        or not session_key
+        or not live_session_id
+        or str(getattr(lease, "session_id", "")) != session_key
+    ):
+        return False
+    with _lifecycle_reservation_lock:
+        existing = _inflight_creation_reservations.get(id(lease))
+        if existing is not None:
+            return existing[:3] == (lease, session_key, live_session_id)
+        _inflight_creation_reservations[id(lease)] = (
+            lease, session_key, live_session_id, False
+        )
+        return True
+
+
+def _retain_creation_reservation(lease) -> bool:
+    """Mark an exact tracked lease as release-pending for a later sweep retry."""
+    with _lifecycle_reservation_lock:
+        tracked = _tracked_creation_reservation(lease)
+        if tracked is None or tracked[0] is not lease:
+            return False
+        _inflight_creation_reservations[id(lease)] = (*tracked[:3], True)
+        return True
+
+
+def _untrack_creation_reservation(lease) -> bool:
+    """Forget only the exact tracked lease, never another object with its id."""
+    with _lifecycle_reservation_lock:
+        tracked = _tracked_creation_reservation(lease)
+        if tracked is None or tracked[0] is not lease:
+            return False
+        _inflight_creation_reservations.pop(id(lease), None)
+        return True
+
+
+def _transfer_creation_reservation(lease, *, sid: str, session: dict) -> bool:
+    """Atomically move the exact tracked lease onto its intended live runtime."""
+    with _lifecycle_reservation_lock, _sessions_lock:
+        tracked = _tracked_creation_reservation(lease)
+        if (
+            tracked is None
+            or tracked[0] is not lease
+            or tracked[3]
+            or sid != tracked[2]
+            or str(session.get("session_key") or "") != tracked[1]
+            or _sessions.get(sid) is not session
+        ):
+            return False
+        current = session.get("active_session_lease")
+        if current is not None:
+            return False
+        session["active_session_lease"] = lease
+        _inflight_creation_reservations.pop(id(lease), None)
+        return True
+
+
+def _rollback_creation_reservation(lease) -> str | None:
+    """Release an exact tracked reservation, retaining it after three bounded failures."""
+    with _lifecycle_reservation_lock:
+        tracked = _tracked_creation_reservation(lease)
+        if tracked is None or tracked[0] is not lease:
+            return _SESSION_OWNERSHIP_UNAVAILABLE
+        err = _lease_retry(3, lease.release)
+        if err is None and (getattr(lease, "released", False) or not getattr(lease, "enabled", True)):
+            _untrack_creation_reservation(lease)
+            return None
+        _retain_creation_reservation(lease)
+        # Deliberately omit exception text: registry paths and provider details
+        # are not part of the public creation failure surface.
+        logger.warning("Failed to release provisional active-session reservation after 3 attempts")
+        return _SESSION_OWNERSHIP_UNAVAILABLE
+
+
+def _retry_retained_creation_reservations() -> None:
+    """Let an existing lifecycle sweep retry exact failed rollback references."""
+    with _lifecycle_reservation_lock:
+        retained = [lease for lease, _key, _sid, release_pending in _inflight_creation_reservations.values()
+                    if release_pending]
+        for lease in retained:
+            _rollback_creation_reservation(lease)
+
 
 def _claim_active_session_slot(
-    session_key: str, *, live_session_id: str, surface: str = "tui", profile_home: str | Path | None = None
+    session_key: str, *, live_session_id: str, surface: str = "tui",
+    profile_home: str | Path | None = None, config: Any = None,
+    strict_reservation: bool = False,
 ) -> tuple[Any, str | None]:
     try:
         from hermes_cli.active_sessions import try_acquire_active_session
+        if strict_reservation:
+            with _lifecycle_reservation_lock:
+                # A retained failed rollback remains locally authoritative even
+                # if a same-writer re-acquire could otherwise replace its
+                # registry entry.
+                if config is None or _creation_key_is_reserved(session_key):
+                    return None, _SESSION_OWNERSHIP_UNAVAILABLE
+                lease, refusal = try_acquire_active_session(
+                    session_id=session_key, surface="companion", config=config,
+                    registry_home=profile_home, metadata={"live_session_id": live_session_id},
+                    track_liveness=True, persist_prune_on_refusal=False)
+                if lease is not None and not _track_creation_reservation(
+                    lease, session_key=session_key, live_session_id=live_session_id
+                ):
+                    return None, _SESSION_OWNERSHIP_UNAVAILABLE
+                return lease, refusal
         return try_acquire_active_session(
-            session_id=session_key, surface=surface, config=_load_cfg(), registry_home=profile_home,
+            session_id=session_key, surface=surface,
+            config=_load_cfg() if config is None else config, registry_home=profile_home,
             metadata={"live_session_id": live_session_id},
             track_liveness=str(surface or "").strip().lower() == "desktop")
     except Exception as exc:
-        logger.warning("Failed to claim active session slot: %s", exc)
+        if strict_reservation:
+            logger.warning("Failed to claim provisional active-session reservation")
+        else:
+            logger.warning("Failed to claim active session slot: %s", exc)
         # Fail CLOSED: an errored claim has NOT proven the session unowned; lease-less = silent double-writer hole.
         # Fail CLOSED regardless of surface: per-session exclusivity is a correctness guarantee (see
         # PER_SESSION_EXCLUSIVE_SUBMIT), and a claim that errors out has NOT proven the session is unowned.
@@ -87,10 +223,18 @@ def _release_active_session_slot(session: dict | None) -> bool:
 
 
 def _own_live_lease_ids(*, exclude=None) -> set[str]:
-    """Snapshot leases still backed by this process's live session records."""
-    with _sessions_lock:
-        return {str(lease.lease_id) for session in _sessions.values()
-                if (lease := session.get("active_session_lease")) is not None and lease is not exclude}
+    """Snapshot runtime and in-flight leases without a handoff visibility gap."""
+    with _lifecycle_reservation_lock, _sessions_lock:
+        lease_ids = {
+            str(lease.lease_id) for session in _sessions.values()
+            if (lease := session.get("active_session_lease")) is not None and lease is not exclude
+        }
+        lease_ids.update(
+            str(lease.lease_id)
+            for lease, _key, _sid, _retained in _inflight_creation_reservations.values()
+            if lease is not exclude
+        )
+        return lease_ids
 
 
 @contextlib.contextmanager

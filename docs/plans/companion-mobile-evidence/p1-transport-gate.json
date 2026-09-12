@@ -1,0 +1,64 @@
+{
+  "schema": "companion-p1-transport-gate-v1",
+  "candidate": "dirty-shared-worktree",
+  "test": "tests/tui_gateway/test_companion_transport_integration.py::test_p1_real_transport_gate_mc09_mc11_mc12_mc13",
+  "verification": {
+    "command": "scripts/run_tests.sh -s tests/tui_gateway/test_companion_transport_integration.py",
+    "result": "1 passed, 0 failed"
+  },
+  "transport": "newline-delimited-json-rpc-stdio",
+  "production_entrypoint": "tui_gateway.entry.main",
+  "persistence": "temporary-HERMES_HOME/state.db",
+  "model": "local-synthetic-no-network-no-tools",
+  "privacy": {
+    "prompt_plaintext": "omitted",
+    "credentials_tokens": "omitted",
+    "cwd": "omitted"
+  },
+  "cases": {
+    "MC-09": {
+      "status": "pass",
+      "same_profile": true,
+      "same_project": true,
+      "same_cwd": true,
+      "same_logical_lineage": true,
+      "lineage": {
+        "root": "lineage-root",
+        "tip": "lineage-tip"
+      },
+      "history_before": 4,
+      "history_after": 6,
+      "accepted_runs": 1
+    },
+    "MC-11": {
+      "status": "pass",
+      "desktop_client_process_started": false,
+      "persisted_history_read": true,
+      "controlled_submit_completed": true
+    },
+    "MC-12": {
+      "status": "pass",
+      "independent_clients": 2,
+      "accepted_runs": 1,
+      "busy_or_not_admitted": 1,
+      "duplicate_runs": 0,
+      "lineage": {
+        "root": "lineage-root",
+        "tip": "lineage-tip"
+      }
+    },
+    "MC-13": {
+      "status": "pass",
+      "response_consumed_before_restart": false,
+      "admission_observed_before_process_loss": true,
+      "reconciled_by_same_request_id": true,
+      "operation_status": "interrupted_outcome_unknown",
+      "durable_operations": 1,
+      "blind_resubmits": 0,
+      "lineage": {
+        "root": "lineage-root",
+        "tip": "lineage-tip"
+      }
+    }
+  }
+}

@@ -106,7 +106,7 @@ const entityProjection: EntityProjection = {
         id: 'launch-checklist', profile: 'atlas', source_key: 'launch-checklist', state: 'needs_me', title: 'Approve launch checklist', brief: 'Review release gates.',
         evidence: [], next_action: 'Approve the checklist', owner: 'atlas', revision: 4, version: 5,
         created_at: '2026-09-01T10:00:00.000Z', updated_at: '2026-09-06T09:30:00.000Z', snoozed_until: null,
-        attention_due: true, attention_key: 'launch-checklist', approval: null, preparation_status: 'prepared', handoff_key: null,
+        attention_due: true, attention_key: 'launch-checklist', recommended_action: 'approve_preparation', approval: null, preparation_status: 'prepared', handoff_key: null,
         execution_link: null, tracker_evidence: null, completion_evidence: null
       },
       comments: [], decisions: [], tracker_status_history: []

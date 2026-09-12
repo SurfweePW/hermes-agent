@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { installDirectoryRefreshLifecycle } from './directory-refresh'
+import { BackendUpdateRequiredError, installDirectoryRefreshLifecycle } from './directory-refresh'
 
 afterEach(() => vi.useRealTimers())
 
@@ -20,7 +20,7 @@ describe('installDirectoryRefreshLifecycle', () => {
       refreshLibrary
     })
 
-    vi.advanceTimersByTime(25_000)
+    vi.advanceTimersByTime(30_000)
     expect(refreshWork).toHaveBeenCalledOnce()
     expect(refreshDirectory).toHaveBeenCalledOnce()
     expect(refreshAttention).toHaveBeenCalledOnce()
@@ -56,6 +56,43 @@ describe('installDirectoryRefreshLifecycle', () => {
     expect(refreshWork).toHaveBeenCalledOnce()
 
     finish()
+    lifecycle.destroy()
+  })
+
+  it('supports an awaited explicit refresh and records thirty-second freshness', async () => {
+    vi.useFakeTimers()
+    const refreshDirectory = vi.fn().mockResolvedValue(undefined)
+    const lifecycle = installDirectoryRefreshLifecycle({
+      isReady: () => true,
+      refreshWork: vi.fn().mockResolvedValue(undefined),
+      refreshDirectory,
+      refreshAttention: vi.fn().mockResolvedValue(undefined),
+      refreshLibrary: vi.fn()
+    })
+
+    await expect(lifecycle.refresh()).resolves.toBe('refreshed')
+    expect(lifecycle.isFresh()).toBe(true)
+    vi.advanceTimersByTime(30_001)
+    expect(lifecycle.isFresh()).toBe(false)
+    lifecycle.destroy()
+  })
+
+  it('reports an old backend once instead of treating it as an empty catalog', async () => {
+    const onBackendUpdateRequired = vi.fn()
+    const lifecycle = installDirectoryRefreshLifecycle({
+      isReady: () => true,
+      refreshWork: vi.fn().mockResolvedValue(undefined),
+      refreshDirectory: vi.fn().mockRejectedValue(new BackendUpdateRequiredError()),
+      refreshAttention: vi.fn().mockResolvedValue(undefined),
+      refreshLibrary: vi.fn(),
+      onBackendUpdateRequired
+    })
+
+    await lifecycle.refresh()
+    await lifecycle.refresh()
+
+    expect(onBackendUpdateRequired).toHaveBeenCalledOnce()
+    expect(onBackendUpdateRequired).toHaveBeenCalledWith('Backend update required for the Companion directory.')
     lifecycle.destroy()
   })
 })

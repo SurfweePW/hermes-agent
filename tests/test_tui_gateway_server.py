@@ -18843,6 +18843,7 @@ def test_slash_exec_concurrent_first_use_spawns_single_worker(monkeypatch):
 def test_session_close_rpc_claims_then_tears_down(monkeypatch):
     seen = []
     claimed = {"session_key": "k"}
+    monkeypatch.setattr(server, "_sess_nowait", lambda params, rid: (claimed, None))
     monkeypatch.setattr(server, "_pop_session_by_id", lambda sid: seen.append(sid) or claimed)
     monkeypatch.setattr(
         server,

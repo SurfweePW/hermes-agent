@@ -151,6 +151,7 @@ def test_companion_projects_lists_and_opens_empty_named_project(tmp_path):
                 "profile": listing["profile"],
             },
             "session_count": 0,
+            "session_ids": [],
             "last_active": 0.0,
         }
     ]
@@ -225,6 +226,7 @@ def test_companion_project_membership_matches_authoritative_project_sessions(tmp
     server._get_db().append_message("owned-session", "user", "hello")
 
     legacy = _call("projects.project_sessions", {"project_id": project["id"]})["project"]
+    listing = _call("companion.projects.list", {"include_discovered": False})
     detail = _call("companion.projects.get", {"id": project["id"]})
 
     legacy_ids = {
@@ -234,7 +236,32 @@ def test_companion_project_membership_matches_authoritative_project_sessions(tmp
         for session in group["sessions"]
     }
     assert {item["id"] for item in detail["membership"]["items"]} == legacy_ids
+    assert listing["items"][0]["session_ids"] == ["owned-session"]
     assert detail["membership"]["project"]["sessionCount"] == legacy["sessionCount"]
+
+
+def test_companion_project_membership_covers_archived_and_zero_message_roots(tmp_path):
+    folder = tmp_path / "complete-membership"
+    folder.mkdir()
+    project = _call(
+        "projects.create", {"name": "Complete membership", "folders": [str(folder)]}
+    )["project"]
+    db = server._get_db()
+    assert db is not None
+    assert db._conn is not None
+    db.create_session("empty-root", "cli", cwd=str(folder))
+    db.create_session("archived-root", "cli", cwd=str(folder))
+    db.append_message("archived-root", "user", "archived")
+    db._conn.execute(
+        "UPDATE sessions SET archived = 1 WHERE id = ?", ("archived-root",)
+    )
+    db._conn.commit()
+
+    listing = _call("companion.projects.list", {"include_discovered": False})
+    listed = next(item for item in listing["items"] if item["id"] == project["id"])
+
+    assert set(listed["session_ids"]) == {"empty-root", "archived-root"}
+    assert listing["coverage"]["membership"] == "complete"
 
 
 def test_companion_project_membership_reports_bounded_coverage_and_cursor(tmp_path):

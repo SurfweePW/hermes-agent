@@ -8,6 +8,7 @@ export interface SessionSecretStore {
   set(name: string, value: string): void | Promise<void>
   get(name: string): string | undefined | Promise<string | undefined>
   delete(name: string): void | Promise<void>
+  revoke(name: string): void | Promise<void>
   clear(): void | Promise<void>
 }
 
@@ -45,6 +46,9 @@ export function createSessionSecretStore(): SessionSecretStore {
     delete(name: string): void {
       secrets.delete(name)
     },
+    revoke(name: string): void {
+      secrets.delete(name)
+    },
     clear(): void {
       secrets.clear()
     },
@@ -58,6 +62,7 @@ export function createSessionSecretStore(): SessionSecretStore {
 }
 
 function createNativeSecretStore(bridge: GatewayTokenBridge): SessionSecretStore {
+  const revoked = new Set<string>()
   const assertGatewayToken = (name: string) => {
     if (name !== 'gateway-token') { throw new Error('Only the gateway token is supported.') }
   }
@@ -69,6 +74,7 @@ function createNativeSecretStore(bridge: GatewayTokenBridge): SessionSecretStore
 
       if (!value) { throw new Error('A secret value is required.') }
       await bridge.set(value)
+      revoked.delete(name)
     },
     async get(name: string): Promise<string | undefined> {
       assertGatewayToken(name)
@@ -78,6 +84,13 @@ function createNativeSecretStore(bridge: GatewayTokenBridge): SessionSecretStore
     async delete(name: string): Promise<void> {
       assertGatewayToken(name)
       await bridge.reset()
+    },
+    async revoke(name: string): Promise<void> {
+      assertGatewayToken(name)
+
+      if (revoked.has(name)) { return }
+      await bridge.reset()
+      revoked.add(name)
     },
     // Store destruction clears ephemeral session state only. Persistent native
     // state is removed exclusively by the explicit delete/reset operation.

@@ -9,6 +9,7 @@ export interface LibraryCapabilities {
   html_preview: 'sanitized_static_document'
   relationship_filters: ['collection', 'project', 'topic', 'session', 'status']
   evidence_pin: 'explicit_owner_reviewed_latest'
+  reference_resolution: 'exact_collection_relative_path'
 }
 
 export interface LibraryCollection {
@@ -103,6 +104,13 @@ export interface LibraryListResult {
   backend_namespace: string
 }
 
+export interface LibraryResolveResult {
+  available: boolean
+  artifact_id?: string
+  profile: string
+  backend_namespace: string
+}
+
 export interface LibraryDetail {
   artifact_id: string
   profile: string
@@ -179,6 +187,7 @@ export interface LibraryRelationshipContext {
 export interface LibraryGateway {
   libraryCapabilities(): Promise<LibraryCapabilities>
   libraryProfiles(): Promise<LibraryProfilesResult>
+  resolveLibraryReference(reference: string, profile?: string): Promise<LibraryResolveResult>
   listLibrary(options: LibraryListOptions): Promise<LibraryListResult>
   getLibraryArtifact(artifactId: string, profile?: string): Promise<LibraryDetail>
   previewLibraryArtifact(options: LibraryChunkOptions): Promise<LibraryChunk>
@@ -214,6 +223,45 @@ const strings = (value: unknown, method: string) => {
   if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) {throw new Error(`Malformed ${method} response.`)}
 
   return [...value] as string[]
+}
+
+const assertNoPathBearingFields = (value: unknown, method: string): void => {
+  if (Array.isArray(value)) {
+    for (const entry of value) {assertNoPathBearingFields(entry, method)}
+
+    return
+  }
+
+  if (!value || typeof value !== 'object') {return}
+
+  for (const [key, entry] of Object.entries(value)) {
+    const normalized = key
+      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+      .replace(/[^a-z0-9]+/gi, '_')
+      .replace(/^_+|_+$/g, '')
+      .toLowerCase()
+
+    const words = normalized.split('_').filter(Boolean)
+    const compact = words.join('')
+    const finalWord = words.at(-1)
+    const compactPathAlias = /^(?:(?:absolute|relative|canonical|local|source|target|input|output|root|directory|dir|file)(?:file)?)?path$/.test(compact)
+    const compactUriAlias = /^(?:file|source|target|input|output|download|upload|resource)?(?:url|uri)$/.test(compact)
+    const compactFileAlias = /^(?:source|target|input|output|local|origin|original)file$/.test(compact)
+
+    if (
+      words.includes('path')
+      || ['path', 'root', 'directory', 'dir', 'url', 'uri', 'file'].includes(normalized)
+      || ['root', 'directory', 'dir', 'url', 'uri'].includes(finalWord ?? '')
+      || (finalWord === 'file' && words.length > 1)
+      || compactPathAlias
+      || compactUriAlias
+      || compactFileAlias
+    ) {
+      throw new Error(`Malformed ${method} response: unexpected path-bearing field.`)
+    }
+
+    assertNoPathBearingFields(entry, method)
+  }
 }
 
 const previewPolicy = (value: unknown, method: string): LibraryPreviewPolicy => {
@@ -273,6 +321,7 @@ const version = (value: unknown, method: string): LibraryVersion => {
 
 export function validateLibraryProfiles(value: unknown): LibraryProfilesResult {
   const method = 'companion.library.profiles'
+  assertNoPathBearingFields(value, method)
   const raw = record(value, method)
 
   if (!Array.isArray(raw.items)) {throw new Error(`Malformed ${method} response.`)}
@@ -290,16 +339,32 @@ export function validateLibraryProfiles(value: unknown): LibraryProfilesResult {
 
 export function validateLibraryCapabilities(value: unknown): LibraryCapabilities {
   const method = 'companion.library.capabilities'
+  assertNoPathBearingFields(value, method)
   const raw = record(value, method)
   const relationshipFilters = ['collection', 'project', 'topic', 'session', 'status'] as const
 
-  if (raw.version !== 1 || raw.download_transport !== 'authenticated_json_rpc_base64_chunks' || raw.transfer_consistency !== 'signed_immutable_descriptor' || raw.html_preview !== 'sanitized_static_document' || raw.evidence_pin !== 'explicit_owner_reviewed_latest' || !Array.isArray(raw.relationship_filters) || raw.relationship_filters.length !== relationshipFilters.length || !raw.relationship_filters.every((entry, index) => entry === relationshipFilters[index])) {throw new Error(`Unsupported ${method} response.`)}
+  if (raw.version !== 1 || raw.download_transport !== 'authenticated_json_rpc_base64_chunks' || raw.transfer_consistency !== 'signed_immutable_descriptor' || raw.html_preview !== 'sanitized_static_document' || raw.evidence_pin !== 'explicit_owner_reviewed_latest' || raw.reference_resolution !== 'exact_collection_relative_path' || !Array.isArray(raw.relationship_filters) || raw.relationship_filters.length !== relationshipFilters.length || !raw.relationship_filters.every((entry, index) => entry === relationshipFilters[index])) {throw new Error(`Unsupported ${method} response.`)}
 
-  return { version: 1, max_page_size: integer(raw.max_page_size, method), max_chunk_size: integer(raw.max_chunk_size, method), download_transport: raw.download_transport, transfer_consistency: raw.transfer_consistency, html_preview: raw.html_preview, relationship_filters: ['collection', 'project', 'topic', 'session', 'status'], evidence_pin: raw.evidence_pin }
+  return { version: 1, max_page_size: integer(raw.max_page_size, method), max_chunk_size: integer(raw.max_chunk_size, method), download_transport: raw.download_transport, transfer_consistency: raw.transfer_consistency, html_preview: raw.html_preview, relationship_filters: ['collection', 'project', 'topic', 'session', 'status'], evidence_pin: raw.evidence_pin, reference_resolution: raw.reference_resolution }
+}
+
+export function validateLibraryResolve(value: unknown, expectedProfile?: string): LibraryResolveResult {
+  const method = 'companion.library.resolve'
+  assertNoPathBearingFields(value, method)
+  const raw = record(value, method)
+  const available = boolean(raw.available, method)
+  const profile = string(raw.profile, method)
+  const backend_namespace = string(raw.backend_namespace, method)
+
+  if (!profile || !backend_namespace || (expectedProfile !== undefined && profile !== expectedProfile)
+    || (available ? typeof raw.artifact_id !== 'string' || !raw.artifact_id : raw.artifact_id !== undefined)) {throw new Error(`Malformed ${method} response.`)}
+
+  return { available, profile, backend_namespace, ...(available ? { artifact_id: raw.artifact_id as string } : {}) }
 }
 
 export function validateLibraryList(value: unknown): LibraryListResult {
   const method = 'companion.library.list'
+  assertNoPathBearingFields(value, method)
   const raw = record(value, method)
   const coverageRaw = record(raw.coverage, method)
 
@@ -316,6 +381,7 @@ export function validateLibraryList(value: unknown): LibraryListResult {
 
 export function validateLibraryDetail(value: unknown): LibraryDetail {
   const method = 'companion.library.get'
+  assertNoPathBearingFields(value, method)
   const raw = record(value, method)
 
   if (!Array.isArray(raw.versions)) {throw new Error(`Malformed ${method} response.`)}
@@ -329,6 +395,7 @@ export function validateLibraryDetail(value: unknown): LibraryDetail {
 }
 
 export function validateLibraryChunk(value: unknown, method: 'companion.library.preview' | 'companion.library.download'): LibraryChunk {
+  assertNoPathBearingFields(value, method)
   const raw = record(value, method)
   const result: LibraryChunk = { artifact_id: string(raw.artifact_id, method), ...(raw.version_id === null || typeof raw.version_id === 'string' ? { version_id: raw.version_id as string | null } : {}) }
 

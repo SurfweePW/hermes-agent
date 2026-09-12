@@ -185,13 +185,6 @@ def _group_for(
     if business_project_id is None and binding and len(binding.related_business_project_ids) == 1:
         business_project_id = binding.related_business_project_ids[0]
     business_project = business_projects.get(business_project_id) if business_project_id else None
-    if business_project is not None:
-        return (
-            f"project:{business_project.canonical_id}",
-            {"kind": "project", "id": business_project.canonical_id,
-             "name": business_project.name, "collection": business_project.collection,
-             "objective": business_project.objective},
-        )
     project = topic.primary_project if topic else None
     if project is not None and not _source_authorized(
         project.namespace, backend, authorized_profiles
@@ -208,11 +201,27 @@ def _group_for(
     )
     if project is None and len(authorized_source_projects) == 1:
         project = authorized_source_projects[0]
+    if business_project is not None:
+        handoff = (
+            {
+                "source_id": project.source_id,
+                "namespace": project.namespace.to_dict(),
+            }
+            if project is not None
+            else {}
+        )
+        return (
+            f"project:{business_project.canonical_id}",
+            {"kind": "project", "id": business_project.canonical_id,
+             "name": business_project.name, "collection": business_project.collection,
+             "objective": business_project.objective, **handoff},
+        )
     return (
         f"project:{project.canonical_id}" if project else "project:__none__",
         {"kind": "project", "id": project.canonical_id if project else "__none__",
          "name": project.source_id if project else "No project",
-         "collection": None, "objective": None},
+         "collection": None, "objective": None,
+         **({"source_id": project.source_id, "namespace": project.namespace.to_dict()} if project else {})},
     )
 
 
@@ -355,6 +364,18 @@ def execute(
             card = cards_by_candidate[candidate.canonical_id]
             assessment, override = metadata[candidate.canonical_id]
             explanation = explanations[candidate.canonical_id]
+            source_binding = binding_by_work.get(card["id"])
+            source_session = (
+                source_binding.primary_session
+                if source_binding is not None
+                and source_binding.primary_session is not None
+                and _source_authorized(
+                    source_binding.primary_session.namespace,
+                    backend,
+                    authorized_profiles,
+                )
+                else None
+            )
             group_items.append({
                 "profile": profile,
                 "work_id": card["id"],
@@ -367,6 +388,11 @@ def execute(
                 "evidence": list(explanation.evidence),
                 "assessment": _assessment(assessment),
                 "override": _override(override, now, review_id),
+                **(
+                    {"source_session": source_session.to_dict()}
+                    if source_session is not None
+                    else {}
+                ),
             })
         groups.append({
             "id": ranked.group_id,

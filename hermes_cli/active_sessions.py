@@ -435,6 +435,7 @@ def _lease_entry(
 def try_acquire_active_session(
     *, session_id: str, surface: str, config: Any, metadata: Optional[dict[str, Any]] = None,
     registry_home: str | Path | None = None, track_liveness: bool = False,
+    persist_prune_on_refusal: bool = True,
 ) -> tuple[Optional[ActiveSessionLease], Optional[str]]:
     """Acquire an active-session slot: ``(lease, None)`` or ``(None, ActiveSessionRefusal)``.
 
@@ -444,7 +445,9 @@ def try_acquire_active_session(
     profile's registry. Ownership uncertainty fails CLOSED (SESSION_COORDINATION_UNAVAILABLE).
 
     Liveness tracking keeps richer desktop lifecycle semantics; ``registry_home`` lets profile-scoped
-    backends share the owning profile's registry even when launched from another home. See #94595.
+    backends share the owning profile's registry even when launched from another home.
+    ``persist_prune_on_refusal=False`` makes a refused strict reservation leave the registry bytes
+    untouched; successful acquisition still persists the canonical pruned result. See #94595.
     """
     max_sessions = resolve_max_concurrent_sessions(config)
     lease_id = uuid.uuid4().hex
@@ -487,7 +490,12 @@ def try_acquire_active_session(
             logger.info("Pruned %d stale active session lease(s)", pruned)
 
         def refuse(message: str, reason: str, log: str, *args) -> tuple[None, ActiveSessionRefusal]:
-            _write_entries(state_path, entries)  # persist the prune even when refusing
+            # Generic callers retain the historical eager cleanup. Strict
+            # reservation callers keep refusal/error paths observationally
+            # read-only; a later successful acquisition writes the canonical
+            # pruned registry under this same file lock.
+            if persist_prune_on_refusal:
+                _write_entries(state_path, entries)
             logger.info(log, *args)
             return None, ActiveSessionRefusal(message, reason)
 

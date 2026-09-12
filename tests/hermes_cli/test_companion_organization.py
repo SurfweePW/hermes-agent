@@ -249,6 +249,58 @@ def test_store_is_profile_local_stamped_private_and_additively_migrated(tmp_path
         OrganizationStore(path=path, profile="atlas")
 
 
+@pytest.mark.parametrize("profile", ["Atlas", " ../atlas ", "../atlas", "atlas/other", "default/"])
+def test_store_rejects_noncanonical_profile_ids_before_touching_storage(tmp_path, profile):
+    path = tmp_path / profile.replace("/", "-") / "organization.db"
+
+    with pytest.raises(OrganizationError, match="canonical profile"):
+        OrganizationStore(path=path, profile=profile)
+
+    assert not path.exists()
+
+
+def test_explicit_store_path_requires_explicit_canonical_profile(tmp_path):
+    path = tmp_path / "organization.db"
+
+    with pytest.raises(OrganizationError, match="profile is required"):
+        OrganizationStore(path=path)
+
+    assert not path.exists()
+
+
+def test_snapshot_envelope_is_bound_to_one_canonical_profile(tmp_path):
+    source = OrganizationStore(
+        profile_home=tmp_path / "source", profile="atlas", clock=lambda: NOW
+    )
+    source.create_topic(
+        Topic("topic", "business", "Name", "Objective"), actor="human:pawel"
+    )
+    envelope = json.loads(source.export_json())
+
+    assert envelope["owner_profile"] == "atlas"
+    forged = json.loads(json.dumps(envelope))
+    forged["owner_profile"] = "Atlas"
+    target_path = tmp_path / "target" / "organization.db"
+    target = OrganizationStore(path=target_path, profile="atlas")
+
+    with pytest.raises(OrganizationError, match="canonical profile"):
+        target.restore_json(canonical_json(forged))
+
+    assert json.loads(target.export_json())["records"] == []
+
+
+@pytest.mark.parametrize("profile", ["Atlas", "../atlas", "atlas/other"])
+def test_readonly_store_open_rejects_noncanonical_profile_before_open(tmp_path, profile):
+    path = tmp_path / "organization.db"
+    path.write_bytes(b"not sqlite")
+    before = path.read_bytes()
+
+    with pytest.raises(OrganizationError, match="canonical profile"):
+        OrganizationStore.list_existing(path, profile=profile)
+
+    assert path.read_bytes() == before
+
+
 def test_all_contracts_round_trip_with_deterministic_export_restore(tmp_path):
     store = OrganizationStore(profile_home=tmp_path / "source", profile="atlas", clock=lambda: NOW)
     ns = store.register_namespace(namespace(), actor="system:test")

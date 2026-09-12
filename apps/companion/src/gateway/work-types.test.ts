@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { FakeWorkGateway } from '../fixtures/fake-work-gateway'
 
-import { validateWorkCapability, validateWorkCard, validateWorkDetail, validateWorkList } from './work-types'
+import { validateWorkCapability, validateWorkCard, validateWorkCommentResult, validateWorkDecisionResult, validateWorkDetail, validateWorkList } from './work-types'
 
 describe('durable work contract validation', () => {
   it('validates explicit synthetic QA cards including preparation dispatch state', async () => {
@@ -13,18 +13,34 @@ describe('durable work contract validation', () => {
     for (const item of list.items) {
       expect(validateWorkDetail(await gateway.getWork('atlas', item.id), 'atlas', item.id).item).toEqual(item)
       expect(item.title).toContain('[SYNTHETIC QA]')
+      expect(['approve_preparation', 'request_changes', 'remind_in_2_hours']).toContain(item.recommended_action)
     }
   })
   it('fails closed for older incomplete contracts, malformed handoffs and foreign identities', async () => {
     const { item } = await new FakeWorkGateway().getWork('atlas', 'fixture-review')
 
-    for (const change of [{ preparation_status: undefined }, { preparation_status: 'running' }, { execution_link: { execution_ref: 'x' } }, { handoff_key: 5 }, { profile: 'other' }, { approval: { scope: 'publish' } }]) {
+    for (const change of [{ recommended_action: undefined }, { recommended_action: 'decline' }, { preparation_status: undefined }, { preparation_status: 'running' }, { execution_link: { execution_ref: 'x' } }, { handoff_key: 5 }, { profile: 'other' }, { approval: { scope: 'publish' } }]) {
       expect(() => validateWorkCard({ ...item, ...change }, 'atlas')).toThrow('Malformed durable work response')
     }
 
     expect(() => validateWorkList({ items: [item, item] }, 'atlas')).toThrow()
     expect(() => validateWorkDetail({ item, comments: [], decisions: [] }, 'atlas', 'wrong-id')).toThrow()
     expect(() => validateWorkCapability({ can_decide: 'true', reason: null })).toThrow()
+  })
+  it('validates server-issued mutation record identities without treating idempotency keys as record IDs', async () => {
+    const gateway = new FakeWorkGateway()
+    const detail = await gateway.getWork('atlas', 'fixture-review')
+    const decisionParams = { profile: 'atlas', id: detail.item.id, expected_version: detail.item.version, revision: detail.item.revision, action: 'approve_preparation' as const, idempotency_key: 'decision-idempotency-key' }
+    const decision = validateWorkDecisionResult(await gateway.decideWork(decisionParams), detail.item.id)
+
+    expect(decision.decision.id).not.toBe(decisionParams.idempotency_key)
+
+    const commentParams = { profile: 'atlas', id: detail.item.id, text: 'Persist exactly this comment', idempotency_key: 'comment-idempotency-key' }
+    const comment = validateWorkCommentResult(await gateway.commentWork(commentParams), detail.item.id)
+
+    expect(comment.comment.id).not.toBe(commentParams.idempotency_key)
+    expect(() => validateWorkDecisionResult({ decision: { ...decision.decision, id: '' } }, detail.item.id)).toThrow()
+    expect(() => validateWorkCommentResult({ comment: { ...comment.comment, card_id: 'other-card' } }, detail.item.id)).toThrow()
   })
   it('preserves current, completion and historical tracker evidence', async () => {
     const { item } = await new FakeWorkGateway().getWork('atlas', 'fixture-review')

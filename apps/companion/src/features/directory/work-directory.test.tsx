@@ -1,10 +1,11 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
+import { validateCompanionProjectList, validateCompanionSessionList } from '../../gateway/companion-client'
 import type { CompanionProject, CompanionProjectDetail, CompanionSession, CompanionSessionHistoryResult } from '../../gateway/types'
 
-import type { DirectorySnapshot, SourceCoverage } from './directory-store'
-import { WorkDirectory } from './work-directory'
+import { createDirectoryStore, type DirectoryGateway, type DirectorySnapshot, type SourceCoverage } from './directory-store'
+import { ChatsDirectory, WorkDirectory } from './work-directory'
 
 const project: CompanionProject = {
   id: 'project-1', title: 'Launch plan', profile: 'atlas', source: 'desktop-db', type: 'desktop_project', archived: false,
@@ -53,6 +54,183 @@ const props = (params: string, change: Partial<DirectorySnapshot> = {}) => ({
 })
 
 describe('WorkDirectory', () => {
+  it('groups raw gateway sessions by authoritative project-tree membership and keeps unmatched sessions visible', async () => {
+    const sessionPage = validateCompanionSessionList({
+      profile: 'atlas', backend_namespace: 'desktop-db', coverage: 'complete', has_more: false, next_cursor: null,
+      as_of: '2026-09-06T10:00:00Z', warnings: [],
+      items: [
+        { identity: { profile: 'atlas', backend_namespace: 'desktop-db', root_id: 'session-1' }, root_id: 'session-1', title: 'Grouped raw session', origin: 'desktop', archived: false, hidden: false, started_at: 1, last_active: 2, message_count: 3 },
+        { identity: { profile: 'atlas', backend_namespace: 'desktop-db', root_id: 'session-2' }, root_id: 'session-2', title: 'Unmatched raw session', origin: 'desktop', archived: false, hidden: false, started_at: 1, last_active: 2, message_count: 1 }
+      ]
+    }, 'atlas')
+    const projectPage = validateCompanionProjectList({
+      profile: 'atlas', backend_namespace: 'desktop-db', coverage: { named_projects: 'complete', membership: 'complete' },
+      has_more: false, next_cursor: null, as_of: '2026-09-06T10:00:00Z', warnings: [],
+      items: [{ id: 'project-1', name: 'Raw Desktop project', kind: 'desktop_project', archived: false, profile: 'atlas', backend_namespace: 'desktop-db', session_count: 1, session_ids: ['session-1'], last_active: 2 }]
+    }, 'atlas')
+    const gateway: Partial<DirectoryGateway> = {
+      listCompanionSessions: vi.fn(async () => sessionPage),
+      listCompanionProjects: vi.fn(async () => projectPage),
+      getCompanionSessionHistory: vi.fn(async () => history),
+      getCompanionProject: vi.fn(async () => projectDetail)
+    }
+    const store = createDirectoryStore()
+    await store.attach(gateway, ['atlas'])
+
+    const listing = props('chatView=projects', store.getSnapshot())
+    render(<ChatsDirectory {...listing} onOpenSession={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: /Raw Desktop project/ }))
+
+    expect(screen.getByRole('button', { name: /Grouped raw session/ })).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Unmatched raw session/ })).toBeTruthy()
+    expect(screen.getByText('Bez projektu')).toBeTruthy()
+  })
+
+  it('shows unknown project membership separately from verified unassigned sessions', () => {
+    render(<ChatsDirectory {...props('chatView=projects', {
+      sessions: [
+        { ...session, id: 'unknown', title: 'Unknown membership', project: undefined },
+        { ...session, id: 'unassigned', title: 'Verified unassigned', project: null }
+      ],
+      projects: [],
+      coverage: [{ ...coverage, complete: false, projectStatus: 'error', projectComplete: false }]
+    })} onOpenSession={vi.fn()} />)
+
+    expect(screen.getByText('Przypisanie projektu nieznane')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Unknown membership/ })).toBeTruthy()
+    expect(screen.getByText('Bez projektu')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Verified unassigned/ })).toBeTruthy()
+  })
+
+  it('loads older Rozmowy pages from existing coverage for the selected profile', () => {
+    const coderCoverage = { ...coverage, profile: 'coder', sessionsHasMore: true, sessionComplete: false }
+    const atlasCoverage = { ...coverage, sessionsHasMore: true, sessionComplete: false }
+    const listing = props('agent=atlas&chatView=recent', { coverage: [atlasCoverage, coderCoverage] })
+
+    render(<ChatsDirectory {...listing} onOpenSession={vi.fn()} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj starsze od Atlas' }))
+    expect(listing.onLoadOlder).toHaveBeenCalledWith('sessions', 'atlas')
+    expect(screen.queryByRole('button', { name: 'Wczytaj starsze od Coder' })).toBeNull()
+  })
+
+  it('loads later project pages and does not claim project view completeness early', () => {
+    const listing = props('agent=atlas&chatView=projects', {
+      projects: [], sessions: [],
+      coverage: [{ ...coverage, complete: false, projectCursor: 'projects-2', projectsHasMore: true, projectComplete: true }]
+    })
+
+    render(<ChatsDirectory {...listing} onOpenSession={vi.fn()} />)
+    expect(screen.getByText('Niepełne dane rozmów')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj więcej projektów od Atlas' }))
+    expect(listing.onLoadOlder).toHaveBeenCalledWith('projects', 'atlas')
+  })
+
+  it('writes the Rozmowy search to the backend-observed chat query parameter', () => {
+    const listing = props('chatView=recent')
+
+    render(<ChatsDirectory {...listing} onOpenSession={vi.fn()} />)
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Szukaj rozmów' }), {
+      target: { value: 'older session' }
+    })
+
+    const next = listing.onNavigate.mock.calls[0][0] as URLSearchParams
+    expect(next.get('chatQ')).toBe('older session')
+  })
+
+  it.each([
+    [{ id: 'project-1', title: 'Launch plan', profile: 'atlas' }, 'Atlas · Launch plan'],
+    [null, 'Atlas · Bez projektu'],
+    [undefined, 'Atlas · Projekt nieznany']
+  ])('renders a semantic saved-session title and truthful project metadata for %#', (membership, metadata) => {
+    const selectedSession = { ...session, project: membership } as CompanionSession
+    render(<ChatsDirectory {...props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', {
+      selectedSession, history, detailStatus: 'ready'
+    })} onOpenSession={vi.fn()} />)
+
+    expect(screen.getByRole('heading', { name: 'Launch research' })).toBeTruthy()
+    expect(screen.getByText(metadata)).toBeTruthy()
+  })
+
+  it('keeps the saved-session draft when Back returns to the list', () => {
+    const listing = props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', {
+      selectedSession: session, history, detailStatus: 'ready'
+    })
+    const onDraftChange = vi.fn()
+    render(<ChatsDirectory {...listing} draft="unsent session draft" onDraftChange={onDraftChange} onOpenSession={vi.fn()} />)
+
+    expect((screen.getByLabelText('Wiadomość do Atlas') as HTMLTextAreaElement).value).toBe('unsent session draft')
+    fireEvent.click(screen.getByRole('button', { name: 'Wróć do rozmów' }))
+    expect(listing.onBack).toHaveBeenCalledOnce()
+    expect(onDraftChange).not.toHaveBeenCalled()
+  })
+
+  it('keeps mobile Enter as a newline and submits a saved session once by button', async () => {
+    const onSubmitSession = vi.fn(async () => undefined)
+    render(<ChatsDirectory {...props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', {
+      selectedSession: session, history, detailStatus: 'ready'
+    })} draft="  continue named session  " onDraftChange={vi.fn()} onOpenSession={vi.fn()} onSubmitSession={onSubmitSession} />)
+    const composer = screen.getByLabelText('Wiadomość do Atlas')
+
+    fireEvent.keyDown(composer, { key: 'Enter' })
+    fireEvent.keyDown(composer, { key: 'Enter', ctrlKey: true, isComposing: true })
+    expect(onSubmitSession).not.toHaveBeenCalled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
+    await waitFor(() => expect(onSubmitSession).toHaveBeenCalledOnce())
+    expect(onSubmitSession).toHaveBeenCalledWith(session, '  continue named session  ')
+  })
+
+  it('shows sanitized retry feedback for a rejected saved-session submit without leaking its error', async () => {
+    const onSubmitSession = vi.fn(async () => {throw new Error('gateway rejected API_KEY=synthetic-secret cookie=session-token')})
+    render(<ChatsDirectory {...props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', {
+      selectedSession: session, history, detailStatus: 'ready'
+    })} draft="  preserve this  " onDraftChange={vi.fn()} onOpenSession={vi.fn()} onSubmitSession={onSubmitSession} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
+
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Wyślij wiadomość' }) as HTMLButtonElement).disabled).toBe(false))
+    expect(onSubmitSession).toHaveBeenCalledOnce()
+    expect(screen.getByRole('alert').textContent).toBe('Nie udało się wysłać wiadomości. Treść pozostała w polu — spróbuj ponownie.')
+    expect(screen.getByRole('heading', { name: 'Launch research' })).toBeTruthy()
+    expect(onSubmitSession).toHaveBeenCalledWith(session, '  preserve this  ')
+    expect((screen.getByLabelText('Wiadomość do Atlas') as HTMLTextAreaElement).value).toBe('  preserve this  ')
+    expect(document.body.textContent).not.toContain('synthetic-secret')
+  })
+
+  it('fences pending state and late submit failures by exact saved-session identity', async () => {
+    const sessionB: CompanionSession = {
+      ...session,
+      id: 'session-2',
+      title: 'Second conversation',
+      profile: 'coder',
+      source: 'backend-2',
+      project: null
+    }
+    let rejectA!: (error: Error) => void
+    const pendingA = new Promise<void>((_resolve, reject) => {rejectA = reject})
+    const onSubmitSession = vi.fn((item: CompanionSession) => item.id === session.id ? pendingA : Promise.resolve())
+    const sessions = [session, sessionB]
+    const viewA = props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', {
+      sessions, selectedSession: session, history, detailStatus: 'ready'
+    })
+    const { rerender } = render(<ChatsDirectory {...viewA} draft="Draft A" onDraftChange={vi.fn()} onOpenSession={vi.fn()} onSubmitSession={onSubmitSession} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Wyślij wiadomość' }) as HTMLButtonElement).disabled).toBe(true))
+
+    const viewB = props('chat=session-2&chatProfile=coder&chatSource=backend-2', {
+      sessions, selectedSession: sessionB, history: { ...history, session_id: sessionB.id, profile: sessionB.profile, source: sessionB.source }, detailStatus: 'ready'
+    })
+    rerender(<ChatsDirectory {...viewB} draft="Draft B" onDraftChange={vi.fn()} onOpenSession={vi.fn()} onSubmitSession={onSubmitSession} />)
+
+    expect(screen.getByRole('heading', { name: 'Second conversation' })).toBeTruthy()
+    expect((screen.getByRole('button', { name: 'Wyślij wiadomość' }) as HTMLButtonElement).disabled).toBe(false)
+    await act(async () => {rejectA(new Error('late failure from session A'))})
+
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect((screen.getByRole('button', { name: 'Wyślij wiadomość' }) as HTMLButtonElement).disabled).toBe(false)
+  })
+
   it('exposes Topics, Projects, and Sessions rows without claiming unsupported topics are empty', () => {
     const topics = props('section=topics', {
       topicCoverage: [{
@@ -216,7 +394,7 @@ describe('WorkDirectory', () => {
     expect(document.body.textContent).not.toContain('[sender|123]')
   })
 
-  it('renders compression summaries distinctly and keeps their content privacy-safe', () => {
+  it('renders compression summaries as collapsed statuses and keeps their content privacy-safe', () => {
     const compressed: CompanionSessionHistoryResult = {
       ...history,
       entries: [{ id: 'compressed', kind: 'compression', role: 'user', label: 'Compression summary', occurred_at: null, content: '[CONTEXT SUMMARY]:\n[Image attached at: /Users/alice/private/context.png]' }]
@@ -224,10 +402,117 @@ describe('WorkDirectory', () => {
 
     render(<WorkDirectory {...props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=history', { selectedSession: session, history: compressed, detailStatus: 'ready' })} />)
 
-    expect(screen.getByRole('complementary', { name: 'Compression summary' })).toBeTruthy()
-    expect(screen.getByText(/Generated context carried forward/)).toBeTruthy()
+    const disclosure = screen.getByRole('group')
+    expect(screen.getByText('Compression summary')).toBeTruthy()
+    expect(document.body.textContent).not.toContain('CONTEXT SUMMARY')
+    fireEvent.click(screen.getByText('Compression summary'))
+    expect(document.body.textContent).toContain('CONTEXT SUMMARY')
     expect(document.body.textContent).not.toContain('/Users/alice')
     expect(screen.queryByText('You')).toBeNull()
+    expect(disclosure.hasAttribute('open')).toBe(true)
+  })
+
+  it('uses the shared inert status disclosure for every persisted technical event', () => {
+    const unsafeHistory: CompanionSessionHistoryResult = {
+      ...history,
+      entries: [
+        { id: 'tool', kind: 'tool', role: null, label: '<img src=x onerror=alert(1)>', occurred_at: null, content: '<script>alert(1)</script>' },
+        { id: 'internal', kind: 'internal', role: null, label: 'Internal event', occurred_at: null, content: '[safe](https://example.com) [unsafe](javascript:alert(1))' },
+        { id: 'compression', kind: 'compression', role: null, label: 'Compression summary', occurred_at: null, content: '<svg onload=alert(1)>' }
+      ]
+    }
+
+    render(<ChatsDirectory {...props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', { selectedSession: session, history: unsafeHistory, detailStatus: 'ready' })} onOpenSession={vi.fn()} />)
+
+    expect(screen.getAllByRole('group')).toHaveLength(3)
+    expect(document.body.textContent).not.toContain('<script>')
+    expect(document.querySelector('img, script, svg')).toBeNull()
+
+    fireEvent.click(screen.getByText('<img src=x onerror=alert(1)>'))
+    expect(document.body.textContent).toContain('<script>alert(1)</script>')
+    expect(document.querySelector('img, script, svg')).toBeNull()
+
+    fireEvent.click(screen.getByText('Internal event'))
+    expect(screen.getByRole('link', { name: 'safe' }).getAttribute('href')).toBe('https://example.com')
+    expect(screen.queryByRole('link', { name: 'unsafe' })).toBeNull()
+
+    fireEvent.click(screen.getByText('Compression summary'))
+    expect(document.body.textContent).toContain('<svg onload=alert(1)>')
+    expect(document.querySelector('svg')).toBeNull()
+  })
+
+  it('preserves the saved-history anchor on prepend without announcing old rows', () => {
+    let scrollHeight = 1_200
+    const initial = { ...history, has_more: true, next_cursor: 'older', entries: history.entries.filter((entry) => entry.kind === 'message') }
+    const listing = props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', { selectedSession: session, history: initial, detailStatus: 'ready' })
+    const view = render(<ChatsDirectory {...listing} onOpenSession={vi.fn()} />)
+    const transcript = document.querySelector('.history-transcript') as HTMLDivElement
+    Object.defineProperties(transcript, {
+      clientHeight: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+      scrollTop: { configurable: true, value: 200, writable: true }
+    })
+    fireEvent.scroll(transcript)
+
+    scrollHeight = 1_450
+    const older = { ...initial, has_more: false, next_cursor: null, entries: [{ id: 'older', kind: 'message' as const, role: 'assistant' as const, content: 'Older row', label: null, occurred_at: null }, ...initial.entries] }
+    view.rerender(<ChatsDirectory {...props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', { selectedSession: session, history: older, detailStatus: 'ready' })} onOpenSession={vi.fn()} />)
+
+    expect(transcript.scrollTop).toBe(450)
+    expect(screen.queryByRole('button', { name: '↓ New messages' })).toBeNull()
+  })
+
+  it('follows saved-history appends only near bottom and announces them only while away', () => {
+    let scrollHeight = 1_200
+    const initial = { ...history, entries: history.entries.filter((entry) => entry.kind === 'message') }
+    const view = render(<ChatsDirectory {...props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', { selectedSession: session, history: initial, detailStatus: 'ready' })} onOpenSession={vi.fn()} />)
+    const transcript = document.querySelector('.history-transcript') as HTMLDivElement
+    Object.defineProperties(transcript, {
+      clientHeight: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, get: () => scrollHeight },
+      scrollTop: { configurable: true, value: 880, writable: true }
+    })
+    fireEvent.scroll(transcript)
+
+    scrollHeight = 1_400
+    const appended = { ...initial, entries: [...initial.entries, { id: 'new-near', kind: 'message' as const, role: 'assistant' as const, content: 'Near append', label: null, occurred_at: null }] }
+    view.rerender(<ChatsDirectory {...props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', { selectedSession: session, history: appended, detailStatus: 'ready' })} onOpenSession={vi.fn()} />)
+    expect(transcript.scrollTop).toBe(1_400)
+    expect(screen.queryByRole('button', { name: '↓ New messages' })).toBeNull()
+
+    transcript.scrollTop = 200
+    fireEvent.scroll(transcript)
+    scrollHeight = 1_600
+    const awayAppend = { ...appended, entries: [...appended.entries, { id: 'new-away', kind: 'message' as const, role: 'assistant' as const, content: 'Away append', label: null, occurred_at: null }] }
+    view.rerender(<ChatsDirectory {...props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', { selectedSession: session, history: awayAppend, detailStatus: 'ready' })} onOpenSession={vi.fn()} />)
+
+    expect(transcript.scrollTop).toBe(200)
+    fireEvent.click(screen.getByRole('button', { name: '↓ New messages' }))
+    expect(transcript.scrollTop).toBe(1_600)
+  })
+
+  it('restores saved-history positions by source, profile, and stored id across switches and remounts', () => {
+    const historyAt = (source: string, id: string) => ({ ...history, source, session_id: id, entries: [{ ...history.entries[0], id: `${source}-${id}` }] })
+    const sessionAt = (source: string, id: string) => ({ ...session, source, id })
+    const renderAt = (source: string, id: string) => <ChatsDirectory {...props(`chat=${id}&chatProfile=atlas&chatSource=${source}`, { selectedSession: sessionAt(source, id), history: historyAt(source, id), detailStatus: 'ready' })} onOpenSession={vi.fn()} />
+    const view = render(renderAt('source-a', 'same-id'))
+    const transcript = document.querySelector('.history-transcript') as HTMLDivElement
+    Object.defineProperties(transcript, {
+      clientHeight: { configurable: true, value: 300 },
+      scrollHeight: { configurable: true, value: 1_200 },
+      scrollTop: { configurable: true, value: 240, writable: true }
+    })
+    fireEvent.scroll(transcript)
+
+    view.rerender(renderAt('source-b', 'same-id'))
+    transcript.scrollTop = 510
+    fireEvent.scroll(transcript)
+    view.rerender(renderAt('source-a', 'same-id'))
+    expect(transcript.scrollTop).toBe(240)
+
+    view.unmount()
+    render(renderAt('source-a', 'same-id'))
+    expect((document.querySelector('.history-transcript') as HTMLDivElement).scrollTop).toBe(240)
   })
 
   it('never presents unknown project membership as verified absence', () => {

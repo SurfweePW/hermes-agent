@@ -18,6 +18,7 @@ def _capability() -> dict:
         "html_preview": "sanitized_static_document",
         "relationship_filters": ["collection", "project", "topic", "session", "status"],
         "evidence_pin": "explicit_owner_reviewed_latest",
+        "reference_resolution": "exact_collection_relative_path",
     }
 
 
@@ -28,7 +29,7 @@ def register(server) -> None:
         return server._ok(rid, _capability())
 
     server._methods["companion.library.capabilities"] = capabilities
-    for operation in ("profiles", "list", "get", "preview", "download", "pin_reviewed"):
+    for operation in ("profiles", "resolve", "list", "get", "preview", "download", "pin_reviewed"):
         def handler(rid, params, operation=operation):
             transport = current_transport()
             authorization = getattr(transport, "companion_owner_authorization", None)

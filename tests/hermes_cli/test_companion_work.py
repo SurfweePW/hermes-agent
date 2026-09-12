@@ -13,6 +13,7 @@ import pytest
 
 from hermes_cli.companion_work import resolve_store
 from hermes_cli.companion_work_store import WorkError, WorkStore, anchored_store_path
+from hermes_cli.companion_work_store_readonly import existing_card_ids
 from hermes_constants import mark_named_profile_deleted
 
 PAYLOAD = dict(title='Test preparation brief', brief='Synthetic test data, never production.',
@@ -59,7 +60,11 @@ def test_real_reopen_two_clients_and_exact_preparation_scope(tmp_path):
     card = proposed(cmo)
     browser = WorkStore(path, 'hoffeecmo')
     assert browser.get(card['id'])['item'] == card
+    assert card['recommended_action'] == 'approve_preparation'
+    with pytest.raises(WorkError, match='payload fields'):
+        browser.upsert('producer-policy-spoof', dict(PAYLOAD, recommended_action='request_changes'))
     result = decide(browser, card)
+    assert result['decision']['id'] != 'decision-1'
     reopened = WorkStore(path, 'hoffeecmo')
     assert reopened.list(preparation=True)['items'] == [result['item']]
     assert result['item']['approval'] == dict(revision=1, scope='preparation_only', decision_id=result['decision']['id'])
@@ -149,6 +154,38 @@ def test_closed_declines_stay_closed_and_changes_require_revision(tmp_path):
         store.propose(changes['id'], changes['version'])
     revised = store.upsert('other-source', dict(PAYLOAD, evidence=['fixture:new']), changes['version'])['item']
     assert store.propose(revised['id'], revised['version'])['item']['state'] == 'needs_me'
+
+
+def test_snoozed_attention_survives_revision_and_accepts_current_decision(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    now = [datetime(2026, 9, 5, tzinfo=timezone.utc)]
+    path = tmp_path / 'inbox.db'
+    store = WorkStore(path, 'hoffeecmo', clock=lambda: now[0])
+    card = proposed(store, 'snooze-revision-decision')
+    snoozed = decide(
+        store, card, action='snooze', key='snooze-before-revision',
+        snoozed_until=(now[0] + timedelta(hours=1)).isoformat(),
+    )['item']
+    revised = store.upsert(
+        snoozed['source_key'], dict(PAYLOAD, brief='Revision while snoozed'),
+        snoozed['version'],
+    )['item']
+    assert (revised['state'], revised['revision'], revised['version']) == (
+        'needs_me', 2, 4,
+    )
+    assert revised['snoozed_until'] == snoozed['snoozed_until']
+
+    now[0] += timedelta(hours=2)
+    decided = decide(
+        store, revised, action='request_changes', key='decision-after-revision',
+        reason='One more revision',
+    )['item']
+    assert (decided['state'], decided['revision'], decided['version']) == ('ideas', 2, 5)
+    assert existing_card_ids(path, 'hoffeecmo', [decided['id']]) == {
+        decided['id']
+    }
 
 
 def test_snooze_due_and_digest_receipts_survive_reopen(tmp_path):
@@ -268,16 +305,20 @@ def test_digest_exact_ack_survives_local_midnight(tmp_path):
 def test_comment_durable_idempotent_no_approval_or_version_mutation(tmp_path):
     store = WorkStore(tmp_path / 'inbox.db', 'hoffeecmo')
     card = proposed(store)
-    comment = store.comment(card['id'], 'Please check the evidence', 'comment-1')
-    assert store.comment(card['id'], 'Please check the evidence', 'comment-1') == comment
-    assert comment['comment']['actor'] == 'agent'
+    with pytest.raises(WorkError) as exc:
+        store.comment(card['id'], 'Please check the evidence', 'forged-comment')
+    assert exc.value.code == 4403
+    comment = store.comment(card['id'], 'Please check the evidence', 'comment-1', human_identity='owner:test')
+    assert comment['comment']['id'] != 'comment-1'
+    assert store.comment(card['id'], 'Please check the evidence', 'comment-1', human_identity='owner:test') == comment
+    assert comment['comment']['actor'] == 'human'
     reopened = WorkStore(store.path, 'hoffeecmo')
     detail = reopened.get(card['id'])
     assert detail['comments'] == [comment['comment']]
     assert detail['item'] == card
     assert detail['decisions'] == []
     with pytest.raises(WorkError):
-        store.comment(card['id'], 'Changed comment', 'comment-1')
+        store.comment(card['id'], 'Changed comment', 'comment-1', human_identity='owner:test')
 
 
 def test_profile_mismatch_and_id_not_visible_in_other_store(tmp_path):
@@ -790,6 +831,81 @@ def test_legacy_completed_row_keeps_migration_projection_but_cannot_authorize_ne
     assert migrated['tracker_status_history'] == []
 
 
+def test_existing_card_ids_accepts_real_lifecycle_rows_and_legacy_done_read_only(
+    tmp_path, monkeypatch,
+):
+    monkeypatch.setenv('HERMES_HOME', str(tmp_path))
+    path = tmp_path / 'inbox.db'
+    store = WorkStore(path, 'hoffeecmo')
+
+    ideas = store.upsert('lifecycle-ideas', PAYLOAD)['item']
+    needs_me = proposed(store, 'lifecycle-needs-me')
+    declined = decide(
+        store, proposed(store, 'lifecycle-declined'), action='decline', key='decline-lifecycle'
+    )['item']
+    approved = decide(
+        store, proposed(store, 'lifecycle-approved'), key='approve-lifecycle'
+    )['item']
+    unavailable = store.preparation_status_update(
+        approved['id'], approved['version'], approved['revision'], approved['handoff_key'], {
+            'state': 'status_unavailable',
+            'observed_at': '2026-09-06T10:00:00Z',
+            'evidence': ['tracker lookup unavailable'],
+        }, 'unavailable-lifecycle',
+    )['item']
+
+    linked_approval = decide(
+        store, proposed(store, 'lifecycle-linked'), key='approve-linked-lifecycle'
+    )['item']
+    linked = store.preparation_ack(
+        linked_approval['id'], linked_approval['version'], linked_approval['revision'],
+        linked_approval['handoff_key'], 'kanban:hoffee:linked', 'ack-linked-lifecycle',
+    )['item']
+
+    done_approval = decide(
+        store, proposed(store, 'lifecycle-done'), key='approve-done-lifecycle'
+    )['item']
+    done_linked = store.preparation_ack(
+        done_approval['id'], done_approval['version'], done_approval['revision'],
+        done_approval['handoff_key'], 'kanban:hoffee:done', 'ack-done-lifecycle',
+    )['item']
+    prepared = store.preparation_status_update(
+        done_linked['id'], done_linked['version'], done_linked['revision'],
+        done_linked['handoff_key'], {
+            'state': 'prepared', 'execution_ref': 'kanban:hoffee:done',
+            'observed_at': '2026-09-06T10:01:00Z',
+            'evidence': ['tracker reports prepared'],
+            'result_evidence': ['artifact:campaign-draft'],
+        }, 'prepared-done-lifecycle',
+    )['item']
+    done = store.complete(
+        prepared['id'], prepared['version'], 'trusted completion read-back'
+    )['item']
+
+    legacy_approval = decide(
+        store, proposed(store, 'lifecycle-legacy'), key='approve-legacy-lifecycle'
+    )['item']
+    legacy = store.preparation_ack(
+        legacy_approval['id'], legacy_approval['version'], legacy_approval['revision'],
+        legacy_approval['handoff_key'], 'kanban:hoffee:legacy-done', 'ack-legacy-lifecycle',
+    )['item']
+    with sqlite3.connect(path) as db:
+        db.execute(
+            "UPDATE work_cards SET state='done', version=version+1, "
+            "completion_evidence=?, tracker_evidence=NULL "
+            "WHERE id=?",
+            ('legacy tracker read-back', legacy['id']),
+        )
+
+    expected_ids = {
+        ideas['id'], needs_me['id'], declined['id'], unavailable['id'], linked['id'],
+        done['id'], legacy['id'],
+    }
+    before = path.read_bytes()
+    assert existing_card_ids(path, 'hoffeecmo', expected_ids) == expected_ids
+    assert path.read_bytes() == before
+
+
 def test_invalid_json_types_are_parameter_errors(tmp_path):
     store = WorkStore(tmp_path / 'inbox.db', 'hoffeecmo')
     with pytest.raises(WorkError) as exc:
@@ -951,6 +1067,7 @@ def test_real_owner_logout_revokes_already_open_rpc_authority(work_transport):
 
         assert logged_out.status_code == 302
         assert rpc(ws, 'capabilities')['can_decide'] is False
+        rpc(ws, 'comment', {}, error=4403)
         rpc(ws, 'decide', {}, error=4403)
 
 
@@ -963,11 +1080,13 @@ def test_real_shared_and_internal_transports_cannot_decide(work_transport, monke
             pass
     with a.websocket_connect('wss://work.example.test/api/ws?internal=' + internal_ws_credential()) as agent:
         assert rpc(agent, 'capabilities')['can_decide'] is False
+        rpc(agent, 'comment', {}, error=4403)
         rpc(agent, 'decide', {}, error=4403)
         rpc(agent, 'capabilities', {'human_identity': 'owner'}, error=-32602)
     monkeypatch.setattr(web.app.state, 'auth_required', False)
     with a.websocket_connect('wss://work.example.test/api/ws?token=' + web._SESSION_TOKEN) as shared:
         assert rpc(shared, 'capabilities')['can_decide'] is False
+        rpc(shared, 'comment', {}, error=4403)
         rpc(shared, 'decide', {}, error=4403)
 
 

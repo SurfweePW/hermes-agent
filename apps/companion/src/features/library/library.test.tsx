@@ -1,9 +1,9 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { useLayoutEffect } from 'react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { downloadOriginal, Library } from './library'
-import type { LibraryChunk, LibraryDetail, LibraryGateway, LibraryItem, LibraryListOptions, LibraryListResult } from './library-types'
+import { type LibraryChunk, type LibraryDetail, type LibraryGateway, type LibraryItem, type LibraryListOptions, type LibraryListResult, validateLibraryDetail, validateLibraryList, validateLibraryResolve } from './library-types'
 
 const artifactId = `art_${'a'.repeat(64)}`
 const versionId = `ver_${'b'.repeat(64)}`
@@ -14,12 +14,13 @@ const detail: LibraryDetail = { artifact_id: artifactId, profile: 'atlas', backe
 
 function encoded(value: string): string {return btoa(value)}
 
-const capabilities = (maxChunkSize: number) => ({ version: 1 as const, max_page_size: 2, max_chunk_size: maxChunkSize, download_transport: 'authenticated_json_rpc_base64_chunks' as const, transfer_consistency: 'signed_immutable_descriptor' as const, html_preview: 'sanitized_static_document' as const, relationship_filters: ['collection', 'project', 'topic', 'session', 'status'] as ['collection', 'project', 'topic', 'session', 'status'], evidence_pin: 'explicit_owner_reviewed_latest' as const })
+const capabilities = (maxChunkSize: number) => ({ version: 1 as const, max_page_size: 2, max_chunk_size: maxChunkSize, download_transport: 'authenticated_json_rpc_base64_chunks' as const, transfer_consistency: 'signed_immutable_descriptor' as const, html_preview: 'sanitized_static_document' as const, relationship_filters: ['collection', 'project', 'topic', 'session', 'status'] as ['collection', 'project', 'topic', 'session', 'status'], evidence_pin: 'explicit_owner_reviewed_latest' as const, reference_resolution: 'exact_collection_relative_path' as const })
 
 function gateway(overrides: Partial<LibraryGateway> = {}): LibraryGateway {
   return {
     libraryCapabilities: vi.fn().mockResolvedValue(capabilities(8)),
     libraryProfiles: vi.fn().mockResolvedValue({ items: [{ profile: 'atlas', configured: true }], backend_namespace: 'test', as_of: '2026-01-02T00:00:00Z' }),
+    resolveLibraryReference: vi.fn().mockResolvedValue({ available: true, artifact_id: artifactId, profile: 'atlas', backend_namespace: 'test' }),
     listLibrary: vi.fn().mockResolvedValue(complete()),
     getLibraryArtifact: vi.fn().mockResolvedValue(detail),
     previewLibraryArtifact: vi.fn().mockResolvedValue({ artifact_id: artifactId, version_id: versionId, data_base64: encoded('# report'), offset: 0, next_offset: 8, eof: true, size: 8, sha256: item.sha256, filename: item.filename, mime_type: item.mime_type, descriptor: 'signed-transfer', preview: item.preview }),
@@ -29,17 +30,35 @@ function gateway(overrides: Partial<LibraryGateway> = {}): LibraryGateway {
   }
 }
 
-describe('Library', () => {
-  it('opens a uniquely matched work asset directly from its Library reference', async () => {
-    const onNavigate = vi.fn()
-    const params = new URLSearchParams('libraryProfile=atlas&libraryQ=report.md&libraryOpen=%2Fworkspace%2Freport.md')
+afterEach(() => vi.restoreAllMocks())
 
-    render(<Library gateway={gateway()} onNavigate={onNavigate} params={params} />)
+describe('Library', () => {
+  it('opens only the artifact returned by the exact full-reference resolver', async () => {
+    const onNavigate = vi.fn()
+    const reference = 'library:docs/nested/report.md'
+    const resolveLibraryReference = vi.fn().mockResolvedValue({ available: true, artifact_id: artifactId, profile: 'atlas', backend_namespace: 'test' })
+    const params = new URLSearchParams(`libraryProfile=atlas&libraryOpen=${encodeURIComponent(reference)}`)
+
+    render(<Library gateway={gateway({ resolveLibraryReference })} onNavigate={onNavigate} params={params} />)
 
     await waitFor(() => expect(onNavigate).toHaveBeenCalledTimes(1))
     const next = onNavigate.mock.calls[0][0] as URLSearchParams
     expect(next.get('libraryArtifact')).toBe(artifactId)
     expect(next.has('libraryOpen')).toBe(false)
+    expect(resolveLibraryReference).toHaveBeenCalledWith(reference, 'atlas')
+  })
+
+  it('reports an unavailable exact reference without basename fallback', async () => {
+    const onNavigate = vi.fn()
+    const listLibrary = vi.fn().mockResolvedValue(complete([item, { ...item, artifact_id: `art_${'f'.repeat(64)}` }]))
+    render(<Library gateway={gateway({ listLibrary, resolveLibraryReference: vi.fn().mockResolvedValue({ available: false, profile: 'atlas', backend_namespace: 'test' }) })} onNavigate={onNavigate} params={new URLSearchParams('libraryProfile=atlas&libraryOpen=library%3Adocs%2Fmissing%2Freport.md')} />)
+
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('unavailable'))
+    expect(onNavigate).not.toHaveBeenCalled()
+  })
+
+  it('rejects path-bearing fields from exact resolver responses', () => {
+    expect(() => validateLibraryResolve({ available: true, artifact_id: artifactId, profile: 'atlas', backend_namespace: 'test', relative_path: 'private/report.md' }, 'atlas')).toThrow(/path-bearing field/i)
   })
 
   it('refreshes explicitly and when the lifecycle refresh token changes', async () => {
@@ -77,6 +96,8 @@ describe('Library', () => {
     expect(screen.getByText('report-2.md')).toBeTruthy()
     expect(listLibrary).toHaveBeenNthCalledWith(1, expect.objectContaining({ search: 'report', type: 'markdown', collection: 'docs', reviewed: true, limit: 2 }))
     expect(listLibrary).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: 'page-2', search: 'report', limit: 2 }))
+    expect(screen.getAllByText('Source: Documents · Agent/profile: atlas')).toHaveLength(2)
+    expect(screen.getAllByText(`Reviewed version: ${versionId} · 8 B`)).toHaveLength(2)
     expect((screen.getByLabelText('Project') as HTMLInputElement).disabled).toBe(false)
     expect((screen.getByLabelText('Topic') as HTMLInputElement).disabled).toBe(false)
     expect((screen.getByLabelText('Session') as HTMLInputElement).disabled).toBe(false)
@@ -91,6 +112,20 @@ describe('Library', () => {
     expect(next.get('libraryArtifact')).toBe(artifactId)
     expect(next.get('libraryProfile')).toBe('atlas')
     expect(next.get('libraryVersion')).toBe(versionId)
+  })
+
+  it('does not fall back to Latest when a requested retained version is missing', async () => {
+    const missingVersion = `ver_${'9'.repeat(64)}`
+    const previewLibraryArtifact = vi.fn()
+    const downloadLibraryArtifact = vi.fn()
+    render(<Library gateway={gateway({ previewLibraryArtifact, downloadLibraryArtifact })} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas&libraryVersion=${missingVersion}`)} />)
+
+    expect((await screen.findByRole('alert')).textContent).toContain(`Requested retained version ${missingVersion} is unavailable.`)
+    expect(screen.getByText(missingVersion)).toBeTruthy()
+    expect(screen.queryByText(/Latest live version/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Load safe preview' })).toBeNull()
+    expect(previewLibraryArtifact).not.toHaveBeenCalled()
+    expect(downloadLibraryArtifact).not.toHaveBeenCalled()
   })
 
   it('suppresses stale detail actions when history selects another profile artifact', async () => {
@@ -260,6 +295,56 @@ describe('Library', () => {
     expect(document.body.textContent).not.toContain('safe</p>')
   })
 
+  it('integrity-verifies PDF bytes before creating a sandboxed object URL and revokes it on unmount', async () => {
+    const pdf = '%PDF-1.4\n%%EOF'
+    const pdfPreview = { kind: 'pdf' as const, preview_available: true }
+    const pdfDetail = { ...detail, filename: 'review copy.pdf', latest: { ...detail.latest, filename: 'review copy.pdf', size: pdf.length, sha256: '4f1949e95440af0ece666ebd5f399c1d77d22de639950784d349fa5feb47dca5', mime_type: 'application/pdf', preview: pdfPreview } }
+
+    const fake = gateway({
+      libraryCapabilities: vi.fn().mockResolvedValue(capabilities(64)),
+      getLibraryArtifact: vi.fn().mockResolvedValue(pdfDetail),
+      previewLibraryArtifact: vi.fn().mockResolvedValue({ artifact_id: artifactId, version_id: versionId, data_base64: encoded(pdf), offset: 0, next_offset: pdf.length, eof: true, size: pdf.length, sha256: pdfDetail.latest.sha256, filename: pdfDetail.filename, mime_type: 'application/pdf', descriptor: 'pdf-transfer', preview: pdfPreview })
+    })
+
+    const digest = vi.spyOn(globalThis.crypto.subtle, 'digest')
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:verified-pdf')
+    const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
+    const view = render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}`)} />)
+
+    await screen.findByText(pdfDetail.filename)
+    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+
+    const frame = await screen.findByTitle(`PDF preview of ${pdfDetail.filename}`)
+    expect(frame.getAttribute('src')).toBe('blob:verified-pdf')
+    expect(frame.getAttribute('sandbox')).toBe('')
+    expect(digest).toHaveBeenCalledOnce()
+    expect(digest).toHaveBeenCalledWith('SHA-256', expect.any(ArrayBuffer))
+    expect(createObjectURL).toHaveBeenCalledOnce()
+    expect((createObjectURL.mock.calls[0][0] as Blob).type).toBe('application/pdf')
+
+    view.unmount()
+    expect(revokeObjectURL.mock.calls.filter(([url]) => url === 'blob:verified-pdf')).toHaveLength(1)
+  })
+
+  it('renders JSON as an explicit inert plain-text fallback', async () => {
+    const json = '{"script":"<img src=x onerror=alert(1)>"}'
+    const jsonPreview = { kind: 'text' as const, preview_available: true }
+    const jsonDetail = { ...detail, filename: 'receipt.json', latest: { ...detail.latest, filename: 'receipt.json', mime_type: 'application/json', preview: jsonPreview } }
+    const fake = gateway({
+      libraryCapabilities: vi.fn().mockResolvedValue(capabilities(1024)),
+      getLibraryArtifact: vi.fn().mockResolvedValue(jsonDetail),
+      previewLibraryArtifact: vi.fn().mockResolvedValue({ artifact_id: artifactId, version_id: versionId, data_base64: encoded(json), offset: 0, next_offset: json.length, eof: true, size: json.length, sha256: '7eb369fc33c1b63a59e05de5bbbea22f98099ec2feffc21dce39b8fbc3758bab', filename: 'receipt.json', mime_type: 'application/json', descriptor: 'signed-transfer', preview: jsonPreview })
+    })
+
+    render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}`)} />)
+    await screen.findByText('receipt.json')
+    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+
+    expect(await screen.findByText('JSON is shown as inert plain text; no embedded content is executed.')).toBeTruthy()
+    expect(screen.getByText(json)).toBeTruthy()
+    expect(document.querySelector('.library-preview img')).toBeNull()
+  })
+
   it('rejects an HTML preview if the backend sandbox contract is not inert', async () => {
     const unsafeHtml = '<script>alert(1)</script>'
     const htmlDetail = { ...detail, filename: 'unsafe.html', latest: { ...detail.latest, filename: 'unsafe.html', mime_type: 'text/html', preview: { kind: 'html' as const, preview_available: true } } }
@@ -281,7 +366,7 @@ describe('Library', () => {
       calls.push(offset)
       const part = payload.slice(offset, offset + chunk_size)
 
-      return { artifact_id: artifactId, version_id: versionId, data_base64: encoded(part), offset, next_offset: offset + part.length, eof: offset + part.length === payload.length, size: payload.length, sha256: item.sha256, filename: 'original.txt', mime_type: 'text/plain', descriptor: 'signed-transfer' }
+      return { artifact_id: artifactId, version_id: versionId, data_base64: encoded(part), offset, next_offset: offset + part.length, eof: offset + part.length === payload.length, size: payload.length, sha256: '72399361da6a7754fec986dca5b7cbaf1c810a28ded4abaf56b2106d06cb78b0', filename: 'original.txt', mime_type: 'text/plain', descriptor: 'signed-transfer' }
     }) })
 
     const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:download')
@@ -294,6 +379,52 @@ describe('Library', () => {
     expect(createObjectURL).toHaveBeenCalledOnce()
     expect(click).toHaveBeenCalledOnce()
     expect(revokeObjectURL).toHaveBeenCalledWith('blob:download')
+  })
+
+  it('sanitizes the response filename and derives MIME from verified bytes instead of trusting RPC metadata', async () => {
+    const payload = '%PDF-1.4 safe'
+    const fake = gateway({
+      libraryCapabilities: vi.fn().mockResolvedValue(capabilities(64)),
+      downloadLibraryArtifact: vi.fn().mockResolvedValue({ artifact_id: artifactId, version_id: versionId, data_base64: encoded(payload), offset: 0, next_offset: payload.length, eof: true, size: payload.length, sha256: '160a6c2fd11e5cac5cf602020bcd0ec1103e5ba0909a49007f20b71196bbaf58', filename: '..\\..\\evil\r\nContent-Type: text/html.pdf', mime_type: 'text/html', descriptor: 'signed-transfer' })
+    })
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:safe-download')
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+    let downloadName = ''
+    click.mockImplementation(function (this: HTMLAnchorElement) {downloadName = this.download})
+
+    await downloadOriginal(fake, artifactId)
+
+    const blob = createObjectURL.mock.calls[0][0] as Blob
+    expect(blob.type).toBe('application/pdf')
+    expect(downloadName).toBe('evil__Content-Type_ text_html.pdf')
+  })
+
+  it.each([
+    ['table.csv', 'a,b\n1,2\n', 'text/csv', '492d5ea496056f1a6a6592241032fab764c321596317930b4fa0e1e8bc3b7470'],
+    ['bundle.zip', 'PK\x03\x04archive', 'application/octet-stream', 'dcc1841c1b0e90ad511c0379c285b5a0ee835538758f374d1025b2319b90c705'],
+    ['disguised.pdf', '<html>unsafe</html>', 'application/octet-stream', 'fd9da466e93958cd71683e55b776e25fa51df05c45dff3b6bbdcf0312bb6384a'],
+    ['disguised.png', 'not a png', 'application/octet-stream', '2aade9c49b9414c70f452b226271ef5066e2894cdd0557f54857819fb7bcc782']
+  ])('uses a safe download MIME for %s', async (filename, payload, expectedMime, sha256) => {
+    const fake = gateway({ libraryCapabilities: vi.fn().mockResolvedValue(capabilities(64)), downloadLibraryArtifact: vi.fn().mockResolvedValue({ artifact_id: artifactId, data_base64: encoded(payload), offset: 0, next_offset: payload.length, eof: true, size: payload.length, sha256, filename, mime_type: 'text/html', descriptor: 'signed-transfer' }) })
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL').mockReturnValue('blob:safe-mime')
+    vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => undefined)
+
+    await downloadOriginal(fake, artifactId)
+
+    expect((createObjectURL.mock.calls[0][0] as Blob).type).toBe(expectedMime)
+  })
+
+  it('refuses an original download whose bytes do not match the declared digest', async () => {
+    const fake = gateway({
+      libraryCapabilities: vi.fn().mockResolvedValue(capabilities(16)),
+      downloadLibraryArtifact: vi.fn().mockResolvedValue({ artifact_id: artifactId, version_id: versionId, data_base64: encoded('tampered'), offset: 0, next_offset: 8, eof: true, size: 8, sha256: '0'.repeat(64), filename: 'original.txt', mime_type: 'text/plain', descriptor: 'signed-transfer' })
+    })
+    const createObjectURL = vi.spyOn(URL, 'createObjectURL')
+    createObjectURL.mockClear()
+
+    await expect(downloadOriginal(fake, artifactId)).rejects.toThrow('failed integrity verification')
+    expect(createObjectURL).not.toHaveBeenCalled()
+    createObjectURL.mockRestore()
   })
 
   it('shows list errors and unsupported preview messages honestly', async () => {
@@ -317,5 +448,22 @@ describe('Library', () => {
     expect((screen.getByLabelText('Date') as HTMLSelectElement).value).toBe('any')
     expect((screen.getByLabelText('Status') as HTMLSelectElement).value).toBe('all')
     expect(screen.queryByText('Filters active')).toBeNull()
+  })
+
+  it.each([
+    ['relative_path', (raw: unknown) => validateLibraryList(raw), { ...complete(), items: [{ ...item, relative_path: 'private/report.md' }] }],
+    ['absolutePath', (raw: unknown) => validateLibraryDetail(raw), { ...detail, absolutePath: '/Users/alice/private/report.md' }],
+    ['file_url', (raw: unknown) => validateLibraryList(raw), { ...complete(), metadata: { file_url: 'file:///private/report.md' } }],
+    ['uri', (raw: unknown) => validateLibraryDetail(raw), { ...detail, provenanceEnvelope: { uri: 'file:///private/report.md' } }],
+    ['filepath', (raw: unknown) => validateLibraryList(raw), { ...complete(), metadata: { filepath: '/private/report.md' } }],
+    ['source_file', (raw: unknown) => validateLibraryDetail(raw), { ...detail, metadata: { source_file: '/private/report.md' } }],
+    ['canonical-file-path', (raw: unknown) => validateLibraryList(raw), { ...complete(), metadata: { 'canonical-file-path': '/private/report.md' } }],
+    ['resourceUri', (raw: unknown) => validateLibraryDetail(raw), { ...detail, metadata: { resourceUri: 'file:///private/report.md' } }]
+  ])('rejects unexpected %s path-bearing fields in an RPC response', (_kind, validate, raw) => {
+    expect(() => validate(raw)).toThrow(/path-bearing field/i)
+  })
+
+  it('does not reject legitimate non-path metadata whose names merely contain similar text', () => {
+    expect(() => validateLibraryList({ ...complete(), metadata: { filename: 'report.md', profile: 'atlas', file_size: 8, source_label: 'scanner', url_label: 'canonical source' } })).not.toThrow()
   })
 })

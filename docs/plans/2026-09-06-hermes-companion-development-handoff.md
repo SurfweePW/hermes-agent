@@ -1,5 +1,7 @@
 # Hermes Companion — Final Product Specification and Development Handoff
 
+> **Superseded in part — 2026-09-09:** The current mobile implementation plan is [Companion mobile continuity](2026-09-09-companion-mobile-continuity-implementation.md). It replaces decision-first navigation, read-only-only conversations, Telegram dependence and the ban on a mobile composer with Chats/Decisions/Files and canonical session continuation. This document's safety, evidence, organization and decision requirements remain regression requirements; the new plan maps every old acceptance criterion. Neither document is deployment authorization or proof of passing tests.
+
 **Prepared for:** Pawel Weber and the development team
 **Version:** 1.0 · 2026-09-06
 **Status:** Final recommended product contract for implementation. Not a deployment or test-pass certificate.

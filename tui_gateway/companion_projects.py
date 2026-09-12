@@ -206,6 +206,283 @@ def _resolve_profile(server, raw: Any) -> tuple[str, Path]:
     return raw, candidate
 
 
+def _canonical_creation_directory(raw: Any) -> str:
+    """Return one existing absolute directory with no caller-visible path repair."""
+    if not isinstance(raw, str) or not raw or raw != raw.strip():
+        raise CompanionProjectsError("project workspace unavailable", 4404)
+    candidate = Path(raw)
+    try:
+        if not candidate.is_absolute() or candidate.resolve(strict=True) != candidate:
+            raise CompanionProjectsError("project workspace unavailable", 4404)
+        if not candidate.is_dir() or not os.access(candidate, os.R_OK | os.X_OK):
+            raise CompanionProjectsError("project workspace unavailable", 4404)
+    except CompanionProjectsError:
+        raise
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise CompanionProjectsError("project workspace unavailable", 4404) from exc
+    return str(candidate)
+
+
+class _CreationDirectoryGuard:
+    """Pin and revalidate every directory identity in a creation path."""
+
+    def __init__(self, path: str):
+        self.path = Path(path)
+        self.fd: int | None = None
+        self.chain: tuple[tuple[str, int, int], ...] = ()
+
+    def open(self) -> None:
+        current = Path(self.path.anchor)
+        paths = [current]
+        for component in self.path.parts[1:]:
+            current /= component
+            paths.append(current)
+        try:
+            identities = []
+            for candidate in paths:
+                value = os.lstat(candidate)
+                if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
+                    raise CompanionProjectsError("project workspace unavailable", 4404)
+                identities.append((str(candidate), value.st_dev, value.st_ino))
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_CLOEXEC", 0)
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_DIRECTORY", 0)
+            )
+            self.fd = os.open(self.path, flags)
+            held = os.fstat(self.fd)
+            if (held.st_dev, held.st_ino) != identities[-1][1:]:
+                raise CompanionProjectsError("project workspace unavailable", 4404)
+            self.chain = tuple(identities)
+            self.validate()
+        except CompanionProjectsError:
+            self.close()
+            raise
+        except OSError as exc:
+            self.close()
+            raise CompanionProjectsError("project workspace unavailable", 4404) from exc
+
+    def validate(self) -> None:
+        try:
+            if self.fd is None or not self.chain:
+                raise CompanionProjectsError("project workspace changed", 4404)
+            held = os.fstat(self.fd)
+            if (held.st_dev, held.st_ino) != self.chain[-1][1:]:
+                raise CompanionProjectsError("project workspace changed", 4404)
+            for raw_path, device, inode in self.chain:
+                current = os.lstat(raw_path)
+                if (
+                    stat.S_ISLNK(current.st_mode)
+                    or not stat.S_ISDIR(current.st_mode)
+                    or (current.st_dev, current.st_ino) != (device, inode)
+                ):
+                    raise CompanionProjectsError("project workspace changed", 4404)
+            if not os.access(self.path, os.R_OK | os.X_OK):
+                raise CompanionProjectsError("project workspace unavailable", 4404)
+        except CompanionProjectsError:
+            raise
+        except OSError as exc:
+            raise CompanionProjectsError("project workspace changed", 4404) from exc
+
+    def close(self) -> None:
+        if self.fd is not None:
+            os.close(self.fd)
+            self.fd = None
+
+
+class _HeldCreationWorkspace(dict):
+    """Creation projection backed by held store and directory identities."""
+
+    def __init__(
+        self,
+        value: dict[str, Any],
+        *,
+        directory: _CreationDirectoryGuard,
+        project_guard: "_SourceGuard | None",
+        project_conn: Any,
+        project_fingerprint: str | None,
+    ):
+        super().__init__(value)
+        self._directory = directory
+        self._project_guard = project_guard
+        self._project_conn = project_conn
+        self._project_fingerprint = project_fingerprint
+        self.invalid = False
+
+    @property
+    def identity(self) -> tuple[Any, ...]:
+        project_identity = None
+        if self._project_guard is not None and self._project_guard.opened is not None:
+            opened = self._project_guard.opened
+            project_identity = (opened.st_dev, opened.st_ino)
+        return (project_identity, self._project_fingerprint, self._directory.chain)
+
+    def validate(self) -> None:
+        from hermes_cli import projects_db as pdb
+
+        try:
+            self._directory.validate()
+            if self._project_guard is None:
+                return
+            self._project_guard.validate()
+            row = self._project_conn.execute(
+                "SELECT * FROM projects WHERE id = ?", (self["project_id"],)
+            ).fetchone()
+            if row is None or row["id"] != self["project_id"] or bool(row["archived"]):
+                raise CompanionProjectsError("project workspace changed", 4404)
+            fingerprint = json.dumps(
+                pdb._load_project(self._project_conn, row).to_dict(),
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if fingerprint != self._project_fingerprint:
+                raise CompanionProjectsError("project workspace changed", 4404)
+        except CompanionProjectsError:
+            self.invalid = True
+            raise
+
+
+@contextlib.contextmanager
+def hold_creation_workspace(server, profile: str, project_id: str | None):
+    """Hold the exact project store and directory identities through admission."""
+    from hermes_cli import projects_db as pdb
+    from hermes_cli.config import load_config_path_readonly
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    selected, home = _resolve_profile(server, profile)
+    if selected != profile:
+        raise CompanionProjectsError("project profile unavailable", 4403)
+    try:
+        config = load_config_path_readonly(home / "config.yaml", fail_closed=True)
+    except Exception as exc:
+        raise CompanionProjectsError("profile configuration unavailable", 5072) from exc
+    if not isinstance(config, dict):
+        raise CompanionProjectsError("profile configuration unavailable", 5072)
+
+    project_guard = None
+    project_context = None
+    project_context_entered = False
+    project_conn = None
+    project_fingerprint = None
+    directory = None
+    workspace = None
+    failure: BaseException | None = None
+    try:
+        workspace_none = project_id is None
+        if workspace_none:
+            raw_cwd = (
+                server._profile_configured_cwd(home)
+                or server._launch_configured_cwd()
+                or os.environ.get("TERMINAL_CWD")
+                or os.getcwd()
+            )
+            cwd = _canonical_creation_directory(raw_cwd)
+            persisted_cwd = None
+            git_root = None
+        else:
+            project_guard = _SourceGuard(home, "projects.db")
+            project_guard.open()
+            if project_guard.opened is None:
+                raise CompanionProjectsError("project not found", 4404)
+            project_context = pdb.connect_readonly(project_guard.path)
+            project_conn = project_context.__enter__()
+            project_context_entered = True
+            project_guard.validate()
+            if project_conn is None:
+                raise CompanionProjectsError("project not found", 4404)
+            row = project_conn.execute(
+                "SELECT * FROM projects WHERE id = ?", (project_id,)
+            ).fetchone()
+            if row is None or row["id"] != project_id or bool(row["archived"]):
+                raise CompanionProjectsError("project not found", 4404)
+            project = pdb._load_project(project_conn, row)
+            primaries = [folder.path for folder in project.folders if folder.is_primary]
+            if (
+                not project.primary_path
+                or len(primaries) != 1
+                or primaries[0] != project.primary_path
+            ):
+                raise CompanionProjectsError("project workspace unavailable", 4404)
+            cwd = _canonical_creation_directory(project.primary_path)
+            persisted_cwd = cwd
+            git_root = cwd
+            project_fingerprint = json.dumps(
+                project.to_dict(), sort_keys=True, separators=(",", ":")
+            )
+
+        directory = _CreationDirectoryGuard(cwd)
+        directory.open()
+        token = set_hermes_home_override(home)
+        try:
+            row_model, model_config = server._workdir_row_model_config(
+                {
+                    "model_override": None,
+                    "create_reasoning_override": None,
+                    "create_service_tier_override": None,
+                    "parent_session_id": None,
+                    "room_plumbing": False,
+                    "follow_profile_config": False,
+                    "workspace_none": workspace_none,
+                }
+            )
+        finally:
+            reset_hermes_home_override(token)
+        workspace = _HeldCreationWorkspace(
+            {
+                "profile": profile,
+                "profile_home": str(home),
+                "project_id": project_id,
+                "cwd": cwd,
+                "persisted_cwd": persisted_cwd,
+                "git_repo_root": git_root,
+                "workspace_none": workspace_none,
+                "config": config,
+                "model": row_model,
+                "model_config": model_config,
+            },
+            directory=directory,
+            project_guard=project_guard,
+            project_conn=project_conn,
+            project_fingerprint=project_fingerprint,
+        )
+        workspace.validate()
+        yield workspace
+    except BaseException as exc:
+        failure = exc
+        raise
+    finally:
+        if directory is not None:
+            directory.close()
+        try:
+            if project_context is not None and project_context_entered:
+                exit_failure = failure
+                if exit_failure is None and workspace is not None and workspace.invalid:
+                    exit_failure = CompanionProjectsError(
+                        "project database source changed", 4404
+                    )
+                try:
+                    project_context.__exit__(
+                        type(exit_failure) if exit_failure is not None else None,
+                        exit_failure,
+                        exit_failure.__traceback__ if exit_failure is not None else None,
+                    )
+                except ValueError as exc:
+                    if exit_failure is None:
+                        raise CompanionProjectsError(
+                            "project database source changed", 4404
+                        ) from exc
+        finally:
+            if project_guard is not None:
+                project_guard.close()
+
+
+def resolve_creation_workspace(server, profile: str, project_id: str | None) -> dict[str, Any]:
+    """Resolve a strict owner-visible creation target without project-store writes."""
+    with hold_creation_workspace(server, profile, project_id) as workspace:
+        return {**workspace, "_identity": workspace.identity}
+
+
 _CURSOR_KEY = secrets.token_bytes(32)
 _SNAPSHOTS: OrderedDict[str, dict[str, Any]] = OrderedDict()
 _SNAPSHOT_LOCK = threading.Lock()
@@ -435,6 +712,18 @@ def _project_sessions(project: dict | None) -> list[dict]:
     ]
 
 
+def _project_session_ids(project: dict | None) -> list[str] | None:
+    """Project Desktop membership onto persisted lineage-root identities."""
+    if project is None:
+        return None
+    return list(
+        dict.fromkeys(
+            str(session.get("_lineage_root_id") or session["id"])
+            for session in _project_sessions(project)
+        )
+    )
+
+
 def _build_tree(
     server, db, conn, *, session_limit: int
 ) -> tuple[dict, bool, bool, str, str | None]:
@@ -450,10 +739,10 @@ def _build_tree(
                 limit=_SESSION_FETCH_BATCH,
                 offset=offset,
                 order_by_last_active=True,
-                min_message_count=1,
+                min_message_count=0,
                 include_children=False,
                 exclude_sources=server._PROJECT_TREE_EXCLUDED_SOURCES,
-                include_archived=False,
+                include_archived=True,
                 compact_rows=True,
             )
             rows.extend(batch)
@@ -572,6 +861,7 @@ def _named_item(project: dict, node: dict | None, profile: str, backend: str) ->
         "kind": "desktop_project",
         **_namespaces(profile, backend),
         "session_count": node.get("sessionCount", 0) if node else None,
+        "session_ids": _project_session_ids(node),
         "last_active": float(node.get("lastActive") or 0) if node else None,
     }
 
@@ -586,6 +876,7 @@ def _discovered_item(node: dict, profile: str, backend: str) -> dict:
         "folders": ([{"path": path, "label": None, "is_primary": True}] if path else []),
         **_namespaces(profile, backend),
         "session_count": int(node.get("sessionCount") or 0),
+        "session_ids": _project_session_ids(node),
         "last_active": float(node.get("lastActive") or 0),
     }
 

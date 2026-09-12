@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { App, libraryAssetParams } from './app'
-import { createFakeGateway } from './fixtures/fake-gateway'
+import { createFakeGateway, FakeCompanionGateway } from './fixtures/fake-gateway'
 import { createFakeWorkGateway, FakeWorkGateway } from './fixtures/fake-work-gateway'
 import type { OwnerAuthBridge } from './security/owner-auth'
 import type { SessionSecretStore } from './security/secret-store'
@@ -22,17 +22,41 @@ async function readyDirectoryStore() {
   return store
 }
 
+async function readyOwnerDirectoryStore(gateway = new FakeWorkGateway()) {
+  const ownerAuth: OwnerAuthBridge = {
+    ownerSignIn: vi.fn(async () => ({ signedIn: true })),
+    ownerStatus: vi.fn(),
+    ownerSignOut: vi.fn(),
+    ownerWebSocketUrl: vi.fn(async () => 'wss://fixture.invalid/api/ws?ticket=owner')
+  }
+
+  const values = new Map<string, string>()
+
+  const store = createCompanionStore({
+    gatewayFactory: () => gateway,
+    ownerAuthBridge: ownerAuth,
+    storage: {
+      getItem: (key) => values.get(key) ?? null,
+      setItem: (key, value) => {values.set(key, value)},
+      removeItem: (key) => {values.delete(key)}
+    }
+  })
+
+  await store.configureOwner({ baseUrl: 'https://fixture.invalid' })
+
+  return { store, gateway }
+}
+
 const libraryArtifactId = `art_${'a'.repeat(64)}`
 
 describe('App', () => {
-  it('opens a work asset by filename while retaining its full Library reference', () => {
-    const params = libraryAssetParams('hoffeecmo', 'data/cmo/recommendations/a6-report.md')
+  it('retains the explicit full Library reference for exact server resolution', () => {
+    const params = libraryAssetParams('hoffeecmo', 'library:recommendations/a6-report.md')
 
     expect(Object.fromEntries(params)).toEqual({
       view: 'library',
       libraryProfile: 'hoffeecmo',
-      libraryQ: 'a6-report.md',
-      libraryOpen: 'data/cmo/recommendations/a6-report.md'
+      libraryOpen: 'library:recommendations/a6-report.md'
     })
   })
 
@@ -41,11 +65,103 @@ describe('App', () => {
   it('keeps durable work in Needs Me, shows the old-server boundary and preserves runtime attention', async () => {
     const store = await readyStore()
     render(<App store={store} />)
-    fireEvent.click(screen.getAllByRole('button', { name: /^!Needs Me|Needs Me/ })[0])
-    expect(screen.getByRole('heading', { name: 'Decision inbox' })).toBeTruthy()
+    fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje' })[0])
+    expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
     expect(screen.getByText(/does not support the durable work inbox/)).toBeTruthy()
     expect(screen.getByText('Runtime-local attention')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Kanban' })).toBeNull()
+  })
+
+  it('shows one canonical decision badge for the same Work and runtime-attention record', async () => {
+    const gateway = new FakeWorkGateway()
+    vi.spyOn(gateway, 'listAttention').mockResolvedValue({
+      items: [{
+        id: 'synthetic:review:2', kind: 'approval', profile: 'atlas', runtime_session_id: 'runtime-review',
+        stored_session_id: 'synthetic-session-1', title: 'Review', detail: 'Same canonical ask',
+        occurred_at: 1, actionable: true, resolution: 'approval',
+        work_ref: { profile: 'atlas', id: 'fixture-review' }
+      }],
+      scope: 'This gateway runtime only'
+    })
+    const store = createCompanionStore({ gatewayFactory: () => gateway, storage: { getItem: () => null, setItem: () => undefined } })
+    await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
+
+    render(<App store={store} />)
+
+    expect(screen.getAllByRole('button', { name: 'Decyzje, 1 items' })).toHaveLength(2)
+  })
+
+  it('routes an authoritative project priority through the existing directory contract', async () => {
+    const gateway = new FakeWorkGateway()
+    Object.assign(gateway, { listNeedsMePriorities: vi.fn(async () => ({
+      profile: 'atlas', backend_namespace: 'priority-aggregate-default', sort: 'recommended' as const,
+      policy_version: 'v1', review_id: null, group_by: 'project' as const, as_of: '2026-09-01T00:00:00Z',
+      coverage: { work: 'complete', organization: 'complete', authorization_filtered: true },
+      groups: [{
+        id: 'wrapper-id', eligibility: 'assessed' as const, eligible_action_count: 1, why_here: 'Project review',
+        group: { kind: 'project' as const, id: 'canonical-priority-project', source_id: 'synthetic-project-1', namespace: { backend_id: 'fixture-mac-mini', profile: 'atlas' }, name: 'Companion project', collection: null, objective: null },
+        items: [{ profile: 'atlas', work_id: 'fixture-review', candidate_id: 'candidate-review', eligibility: 'assessed' as const, why_here: 'Project review', next_step: 'Decide', trade_off: 'Wait', assessed_at: null, evidence: [], assessment: null, override: null }]
+      }]
+    })) })
+    const store = createCompanionStore({ gatewayFactory: () => gateway, storage: { getItem: () => null, setItem: () => undefined } })
+    await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
+    window.history.replaceState({}, '', '/?view=needs')
+    render(<App store={store} />)
+
+    fireEvent.click(screen.getByRole('button', { name: /Prepare a sample campaign brief/ }))
+    await screen.findByRole('button', { name: 'Otwórz projekt' })
+    fireEvent.click(screen.getByRole('button', { name: 'Otwórz projekt' }))
+
+    await waitFor(() => expect(Object.fromEntries(new URLSearchParams(window.location.search))).toMatchObject({
+      view: 'work', section: 'projects', focus: 'synthetic-project-1', focusProfile: 'atlas', focusSource: 'fixture-mac-mini'
+    }))
+    await waitFor(() => expect(screen.getByText('[SYNTHETIC QA] Companion project')).toBeTruthy())
+  })
+
+  it('does not badge or render stale runtime attention while disconnected', async () => {
+    const gateway = new FakeCompanionGateway()
+    vi.spyOn(gateway, 'listAttention').mockResolvedValue({
+      items: [{
+        id: 'runtime-attention:approval:1', kind: 'approval', profile: 'atlas', runtime_session_id: 'runtime-attention',
+        stored_session_id: 'stored-attention', title: 'Runtime-local attention', detail: 'Approve this runtime request',
+        occurred_at: 1, actionable: true, resolution: 'approval'
+      }],
+      scope: 'This gateway runtime only'
+    })
+    const store = createCompanionStore({ gatewayFactory: () => gateway, storage: { getItem: () => null, setItem: () => undefined } })
+    await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
+    render(<App store={store} />)
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Decyzje, 1 items' }))[0])
+    expect(screen.getByText('Approve this runtime request')).toBeTruthy()
+
+    gateway.close()
+
+    await waitFor(() => expect(store.getSnapshot().phase).toBe('disconnected'))
+    expect(screen.queryByText('Approve this runtime request')).toBeNull()
+    expect(screen.queryByRole('button', { name: /Decyzje, 1 items/ })).toBeNull()
+  })
+
+  it('shows fresh runtime attention when a retained Work source fails to refresh', async () => {
+    const gateway = new FakeWorkGateway()
+    vi.spyOn(gateway, 'listAttention').mockResolvedValue({
+      items: [{
+        id: 'runtime-after-work-outage', kind: 'approval', profile: 'atlas', runtime_session_id: 'runtime-review',
+        stored_session_id: 'synthetic-session-1', title: 'Fresh runtime approval', detail: 'Visible after the Work-only outage',
+        occurred_at: 2, actionable: true, resolution: 'approval',
+        work_ref: { profile: 'atlas', id: 'fixture-review' }
+      }],
+      scope: 'This gateway runtime only'
+    })
+    const { store } = await readyOwnerDirectoryStore(gateway)
+    render(<App store={store} />)
+    vi.spyOn(gateway, 'listWork').mockRejectedValue(new Error('Work refresh failed'))
+
+    await store.work.refresh()
+    await store.refreshAttention()
+    fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje, 1 items' })[0])
+
+    expect(await screen.findByText('Visible after the Work-only outage')).toBeTruthy()
+    expect(store.work.getSnapshot().sources.find((source) => source.profile === 'atlas')?.status).toBe('error')
   })
 
   it('refreshes an open directory on foreground return without duplicating work refreshes', async () => {
@@ -82,7 +198,7 @@ describe('App', () => {
     const directoryRefresh = vi.spyOn(store.directory, 'refresh')
     const attentionRefresh = vi.spyOn(store, 'refreshAttention')
     render(<App store={store} />)
-    const navigation = screen.getAllByRole('button', { name: 'Work' })[0]
+    const navigation = screen.getAllByRole('button', { name: 'Rozmowy' })[0]
     navigation.focus()
 
     vi.advanceTimersByTime(30_000)
@@ -163,6 +279,7 @@ describe('App', () => {
       get: () => token,
       set: (_name, value) => { token = value },
       delete: () => { token = undefined },
+      revoke: () => { token = undefined },
       clear: () => undefined
     }
 
@@ -184,6 +301,7 @@ describe('App', () => {
       get: () => token,
       set: (_name, value) => { token = value },
       delete: () => { token = undefined },
+      revoke: () => { token = undefined },
       clear: () => undefined
     }
 
@@ -203,6 +321,7 @@ describe('App', () => {
       get: () => { throw new Error('corrupt ciphertext') },
       set: () => undefined,
       delete: vi.fn(),
+      revoke: vi.fn(),
       clear: () => undefined
     }
 
@@ -273,28 +392,28 @@ describe('App', () => {
     expect(screen.queryByRole('button', { name: /Conversation|Chat/ })).toBeNull()
   })
 
-  it('keeps primary navigation locked while Work URLs and filter focus stay stable', async () => {
+  it('uses Rozmowy, Decyzje, and Pliki navigation while retaining compatible URLs', async () => {
     vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(760)
     const scrollWindow = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
     const focusMain = vi.spyOn(HTMLElement.prototype, 'focus')
     render(<App store={await readyDirectoryStore()} />)
-    const workButtons = screen.getAllByRole('button', { name: 'Work' })
+    const chatsButtons = screen.getAllByRole('button', { name: 'Rozmowy' })
+    expect(screen.getAllByRole('button', { name: /^Decyzje/ })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: 'Pliki' })).toHaveLength(2)
+    expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Rozmowy')
+    expect(chatsButtons[0].getAttribute('aria-current')).toBe('page')
     scrollWindow.mockClear()
-    fireEvent.click(workButtons[0])
+
+    fireEvent.click(screen.getAllByRole('button', { name: /^Decyzje/ })[0])
     await waitFor(() => expect(screen.getByRole('main')).toBe(document.activeElement))
     expect(scrollWindow).toHaveBeenCalledWith({ top: 0 })
     expect(focusMain).toHaveBeenCalledWith({ preventScroll: true })
-    expect(workButtons[0].getAttribute('aria-current')).toBe('page')
+    expect(window.location.search).toBe('?view=needs')
+    expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Decyzje')
+
+    fireEvent.click(screen.getAllByRole('button', { name: 'Rozmowy' })[0])
     expect(window.location.search).toBe('?view=work')
     expect(screen.queryByRole('button', { name: /Conversation|Chat/ })).toBeNull()
-
-    fireEvent.click(screen.getByRole('tab', { name: 'Projects' }))
-    const searchInput = screen.getByLabelText('Search titles')
-    searchInput.focus()
-    fireEvent.change(searchInput, { target: { value: 'Companion' } })
-    expect(document.activeElement).toBe(searchInput)
-    expect(new URLSearchParams(window.location.search).get('q')).toBe('Companion')
-    expect(screen.getByRole('button', { name: /Companion project/ })).toBeTruthy()
   })
 
   it('restores a direct read-only session history URL without activating chat', async () => {
@@ -303,11 +422,64 @@ describe('App', () => {
     const setBrowseQuery = vi.spyOn(store.directory, 'setBrowseQuery')
     render(<App store={store} />)
 
-    expect(await screen.findByRole('heading', { name: '[SYNTHETIC QA] Desktop research session' })).toBeTruthy()
+    expect(await screen.findByText('[SYNTHETIC QA] Desktop research session')).toBeTruthy()
     expect(setBrowseQuery).toHaveBeenCalledWith(expect.objectContaining({ archive: 'all' }))
     expect(screen.getByText('Synthetic request for read-only QA.')).toBeTruthy()
-    expect(screen.getByText(/Viewing history does not resume or activate this session/)).toBeTruthy()
+    expect(screen.getByText(/Atlas · \[SYNTHETIC QA\] Companion project/)).toBeTruthy()
     expect(screen.queryByLabelText('Message Atlas')).toBeNull()
+  })
+
+  it('returns from a catalog live chat to the exact Chats directory state', async () => {
+    const expandedKey = JSON.stringify(['fixture-mac-mini', 'atlas', 'synthetic-project-1'])
+
+    const params = new URLSearchParams({
+      view: 'work', chat: 'synthetic-session-1', chatProfile: 'atlas', chatSource: 'fixture-mac-mini',
+      chatQ: 'synthetic', chatView: 'projects', agent: 'atlas', chatExpanded: JSON.stringify([expandedKey]), chatScroll: '240'
+    })
+
+    window.history.replaceState({}, '', `/?${params}`)
+    const { store } = await readyOwnerDirectoryStore()
+    render(<App store={store} />)
+    const main = screen.getByRole('main')
+
+    expect(await screen.findByText('Synthetic request for read-only QA.')).toBeTruthy()
+    main.scrollTop = 240
+    fireEvent.change(screen.getByLabelText('Wiadomość do Atlas'), { target: { value: 'Continue safely' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
+    expect(await screen.findByRole('button', { name: 'Back to Atlas sessions' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Back to Atlas sessions' }))
+
+    expect((await screen.findByRole('searchbox', { name: 'Szukaj rozmów' }) as HTMLInputElement).value).toBe('synthetic')
+    expect(screen.getByRole('button', { name: /Companion project/ }).getAttribute('aria-expanded')).toBe('true')
+    expect(new URLSearchParams(window.location.search).get('chat')).toBeNull()
+    await waitFor(() => expect(main.scrollTop).toBe(240))
+  })
+
+  it('forwards the Rozmowy chat query to the authoritative session search', async () => {
+    window.history.replaceState({}, '', '/?view=work&chatQ=older%20session')
+    const store = await readyDirectoryStore()
+    const setBrowseQuery = vi.spyOn(store.directory, 'setBrowseQuery')
+
+    render(<App store={store} />)
+
+    await waitFor(() => expect(setBrowseQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ search: 'older session', archive: 'all' })
+    ))
+  })
+
+  it('reaches the full session archive from the normal Rozmowy search control', async () => {
+    const store = await readyDirectoryStore()
+    const setBrowseQuery = vi.spyOn(store.directory, 'setBrowseQuery')
+    render(<App store={store} />)
+
+    fireEvent.change(screen.getByRole('searchbox', { name: 'Szukaj rozmów' }), {
+      target: { value: 'archived conversation' }
+    })
+
+    await waitFor(() => expect(setBrowseQuery).toHaveBeenCalledWith(
+      expect.objectContaining({ search: 'archived conversation', archive: 'all' })
+    ))
+    expect(new URLSearchParams(window.location.search).get('chatQ')).toBe('archived conversation')
   })
 
   it('restores topic filters and a source-bound topic deep link', async () => {
@@ -330,6 +502,20 @@ describe('App', () => {
     })
   })
 
+  it.each([
+    ['project', 'projects', 'synthetic-project-1', 'fixture-mac-mini', '[SYNTHETIC QA] Companion project', 'Read-only source detail'],
+    ['topic', 'topics', 'synthetic-topic-1', 'fixture-organization-db', '[SYNTHETIC QA] Companion launch', 'Read-only organization detail']
+  ])('renders the legacy Work %s deep-link target instead of the Chats directory', async (_kind, section, focus, source, title, note) => {
+    window.history.replaceState({}, '', `/?view=work&section=${section}&focus=${focus}&focusProfile=atlas&focusSource=${source}&tab=overview`)
+    const store = await readyDirectoryStore()
+
+    render(<App store={store} />)
+
+    expect(await screen.findByRole('heading', { name: title })).toBeTruthy()
+    expect(screen.getByText(note)).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: 'Rozmowy' })).toBeNull()
+  })
+
   it('retries a cold-start directory deep link after the gateway attaches', async () => {
     window.history.replaceState({}, '', '/?view=work&section=sessions&focus=synthetic-session-1&focusProfile=atlas&focusSource=fixture-mac-mini&tab=history')
     const store = createCompanionStore({ gatewayFactory: createFakeWorkGateway, storage: { getItem: () => null, setItem: () => undefined } })
@@ -339,7 +525,7 @@ describe('App', () => {
     expect(openSession).not.toHaveBeenCalled()
     await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
 
-    expect(await screen.findByRole('heading', { name: '[SYNTHETIC QA] Desktop research session' })).toBeTruthy()
+    expect(await screen.findByText('[SYNTHETIC QA] Desktop research session')).toBeTruthy()
     expect(openSession).toHaveBeenCalledOnce()
   })
 
@@ -408,5 +594,86 @@ describe('App', () => {
     fireEvent.change(input, { target: { value: 'Check this' } })
     fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
     await waitFor(() => expect(screen.getAllByText(/I received: “Check this”/).length).toBeGreaterThan(0))
+  })
+
+  it('opens persisted history without resume and continues it once from Rozmowy', async () => {
+    const { store, gateway } = await readyOwnerDirectoryStore()
+    const history = vi.spyOn(gateway, 'getCompanionSessionHistory')
+    const resume = vi.spyOn(gateway, 'resumeSession')
+    const continuation = vi.spyOn(gateway, 'continueCompanionSession')
+    render(<App store={store} />)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
+    expect(await screen.findByText('Synthetic request for read-only QA.')).toBeTruthy()
+    expect(history).toHaveBeenCalledWith('atlas', 'synthetic-session-1', undefined, 'fixture-mac-mini')
+    expect(resume).not.toHaveBeenCalled()
+
+    fireEvent.change(screen.getByLabelText('Wiadomość do Atlas'), { target: { value: 'Kontynuuj dokładnie tutaj' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
+
+    await waitFor(() => expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Conversation'))
+    expect(continuation).toHaveBeenCalledOnce()
+    expect(continuation).toHaveBeenCalledWith(expect.objectContaining({
+      backend_namespace: 'fixture-mac-mini', profile: 'atlas', stored_session_id: 'synthetic-session-1', text: 'Kontynuuj dokładnie tutaj'
+    }))
+    expect(screen.getByText('Synthetic request for read-only QA.')).toBeTruthy()
+  })
+
+  it('keeps a failed saved-session send in Rozmowy with sanitized retry feedback', async () => {
+    const { store, gateway } = await readyOwnerDirectoryStore()
+    const continuation = vi.spyOn(gateway, 'continueCompanionSession').mockRejectedValueOnce(new Error('gateway rejected API_KEY=synthetic-secret cookie=synthetic-cookie token=synthetic-token'))
+    render(<App store={store} />)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
+    fireEvent.change(screen.getByLabelText('Wiadomość do Atlas'), { target: { value: '  preserve this  ' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
+
+    await waitFor(() => expect(continuation).toHaveBeenCalledOnce())
+    expect(await screen.findByText('Nie udało się wysłać wiadomości. Treść pozostała w polu — spróbuj ponownie.')).toBeTruthy()
+    expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Rozmowy')
+    expect(continuation).toHaveBeenCalledWith(expect.objectContaining({ text: 'preserve this' }))
+    expect((screen.getByLabelText('Wiadomość do Atlas') as HTMLTextAreaElement).value).toBe('  preserve this  ')
+    expect(JSON.stringify(store.getSnapshot())).not.toContain('synthetic-secret')
+    expect(document.body.textContent).not.toContain('synthetic-secret')
+    expect(document.body.textContent).not.toContain('synthetic-cookie')
+    expect(document.body.textContent).not.toContain('synthetic-token')
+  })
+
+  it('absorbs an expected persisted-continuation rejection from the active composer', async () => {
+    const { store, gateway } = await readyOwnerDirectoryStore()
+    const continuation = vi.spyOn(gateway, 'continueCompanionSession')
+    render(<App store={store} />)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
+    fireEvent.change(screen.getByLabelText('Wiadomość do Atlas'), { target: { value: 'Pierwsza wiadomość' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
+    await waitFor(() => expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Conversation'))
+    await waitFor(() => expect(continuation).toHaveBeenCalledOnce())
+
+    continuation.mockRejectedValueOnce(new Error('secret continuation detail'))
+    fireEvent.change(screen.getByLabelText('Message Atlas'), { target: { value: 'Nie wysyłaj ponownie' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/could not reach the gateway/i))
+    expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Conversation')
+    expect(continuation).toHaveBeenCalledTimes(2)
+    expect(document.body.textContent).not.toContain('secret continuation detail')
+  })
+
+  it('preserves a saved-session draft through Back and reopening the same logical session', async () => {
+    const { store } = await readyOwnerDirectoryStore()
+    render(<App store={store} />)
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
+    const composer = await screen.findByLabelText('Wiadomość do Atlas')
+    fireEvent.change(composer, { target: { value: 'Nie wysyłaj jeszcze' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Wróć do rozmów' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
+
+    expect((await screen.findByLabelText('Wiadomość do Atlas') as HTMLTextAreaElement).value).toBe('Nie wysyłaj jeszcze')
   })
 })

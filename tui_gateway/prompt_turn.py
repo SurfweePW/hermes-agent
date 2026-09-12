@@ -81,12 +81,18 @@ def _plan_goal_compression_recovery(
 
 def _admit_prompt_turn(
     sid: str, session: dict, text: Any, image_paths: list[str] | None,
-    queued_prompt_generation: int | None) -> tuple[list[str], Any] | None:
+    queued_prompt_generation: int | None, terminal_callback=None,
+) -> tuple[list[str], Any, Any] | None:
     """Ownership + liveness gate every turn source must cross; ``(images, agent)`` or None.
     Synthesized turns (auto-continue, wake-ups) call ``_run_prompt_submit`` directly — the
     bypass that once let a second backend run a duplicate turn."""
     # When the session already holds its lease this is a cheap dict check. See #94778.
     if (ownership_refusal := _ensure_active_session_slot(sid, session)) is not None:
+        raw_claim = session.get("_durable_turn_claim")
+        if _emit_unstarted_durable_creation_failure(
+            sid, session, raw_claim, terminal_callback
+        ):
+            return None
         logger.info(
             "Refusing turn for session %s at _run_prompt_submit: %s",
             session.get("session_key") or sid,
@@ -95,24 +101,84 @@ def _admit_prompt_turn(
             session["running"] = False
         _emit("error", sid, {"message": str(ownership_refusal)})
         return None
+    durable_claim = None
+    if "_durable_turn_claim" in session:
+        try:
+            from tui_gateway.companion_turns import TurnClaim, mark_running, read_turn
+
+            durable_claim = TurnClaim.from_wire(session["_durable_turn_claim"])
+            with _session_db(session) as db:
+                if db is None:
+                    raise RuntimeError("session database is unavailable")
+                mark_running(db, durable_claim, runtime_id=sid)
+        except Exception as exc:
+            duplicate_running = False
+            creation = _is_durable_creation_claim(
+                durable_claim or session.get("_durable_turn_claim")
+            )
+            if durable_claim is not None:
+                with contextlib.suppress(Exception):
+                    with _session_db(session) as db:
+                        duplicate_running = bool(
+                            db is not None
+                            and (read_turn(db, durable_claim.operation_id) or {}).get("state") == "running"
+                        )
+            if creation:
+                if not duplicate_running and _emit_unstarted_durable_creation_failure(
+                    sid,
+                    session,
+                    durable_claim or session.get("_durable_turn_claim"),
+                    terminal_callback,
+                ):
+                    return None
+                logger.warning(_DURABLE_CREATION_FAILURE_MESSAGE)
+                if duplicate_running:
+                    return None
+            else:
+                logger.warning(
+                    "Refusing turn without durable lineage admission: %s", exc, exc_info=True
+                )
+            if not duplicate_running:
+                with session["history_lock"]:
+                    session["running"] = False
+                if durable_claim is not None:
+                    with contextlib.suppress(Exception):
+                        _settle_session_durable_turn(session, "failed", durable_claim)
+            _emit("error", sid, {"message": (
+                _DURABLE_CREATION_FAILURE_MESSAGE if creation else str(exc)
+            )})
+            return None
+    creation_liveness_refusal = False
     with session["history_lock"]:
         if session.get("_closing") or (
             queued_prompt_generation is not None
             and int(session.get("_queued_prompt_generation", 0)) != queued_prompt_generation):
-            session["running"] = False
-            return None
-        images = list(session.get("attached_images", []) if image_paths is None else image_paths)
-        if image_paths is None:
-            session["attached_images"] = []
-        inflight = session.get("inflight_turn")
-        # A retained failed turn (see _fail_inflight_turn) is a stale leftover
-        # by the time a new turn starts — replace it, never append onto it.
-        if not isinstance(inflight, dict) or inflight.get("status") == "error":
-            _start_inflight_turn(session, text)
-        agent = session["agent"]
-        with contextlib.suppress(Exception):
-            agent.clear_interrupt()
-    return images, agent
+            creation_liveness_refusal = _is_durable_creation_claim(durable_claim)
+            if not creation_liveness_refusal:
+                session["running"] = False
+            if durable_claim is not None and not creation_liveness_refusal:
+                with contextlib.suppress(Exception):
+                    _settle_session_durable_turn(session, "cancelled", durable_claim)
+            if not creation_liveness_refusal:
+                return None
+        if not creation_liveness_refusal:
+            images = list(session.get("attached_images", []) if image_paths is None else image_paths)
+            if image_paths is None:
+                session["attached_images"] = []
+            inflight = session.get("inflight_turn")
+            # A retained failed turn (see _fail_inflight_turn) is a stale leftover
+            # by the time a new turn starts — replace it, never append onto it.
+            if not isinstance(inflight, dict) or inflight.get("status") == "error":
+                _start_inflight_turn(session, text)
+            agent = session["agent"]
+            with contextlib.suppress(Exception):
+                agent.clear_interrupt()
+    if creation_liveness_refusal:
+        _emit_unstarted_durable_creation_failure(
+            sid, session, durable_claim, terminal_callback
+        )
+        return None
+    return images, agent, durable_claim
 
 
 def _record_turn_marker(session: dict, text: Any) -> str:
@@ -425,6 +491,7 @@ class _TurnRun:
     one_turn_restore: Any
     terminal_callback: Any
     receipt_committed: bool
+    durable_claim: Any = None
     scopes: _TurnScopes = dataclasses.field(default_factory=_TurnScopes)
     result: Any = None  # read after the finally for leftover /steer
     tts_queue: Any = None
@@ -623,11 +690,51 @@ def _absorb_turn_result(
     return status_note
 
 
+def _sanitize_durable_creation_result(st: _TurnRun) -> None:
+    """Replace a failed creation result wholesale before any downstream boundary."""
+    result = st.result
+    if (
+        _is_durable_creation_claim(st.durable_claim)
+        and isinstance(result, dict)
+        and (result.get("error") or result.get("failed"))
+    ):
+        st.result = {
+            "final_response": "",
+            "error": _DURABLE_CREATION_FAILURE_MESSAGE,
+            "failed": True,
+        }
+
+
 def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None, cols: int):
     """``(payload, raw, status)`` for message.complete; retains/clears the inflight turn and
     settles the hosted-room terminal receipt."""
     result, agent = st.result, st.agent
     raw, status, last_reasoning = _turn_outcome(result)
+    creation_failure = status == "error" and _is_durable_creation_claim(st.durable_claim)
+    if creation_failure:
+        payload = {
+            "text": "",
+            "usage": {},
+            "status": "error",
+            "error": _DURABLE_CREATION_FAILURE_MESSAGE,
+            "recoverable": True,
+        }
+        with session["history_lock"]:
+            # A creation failure must not preserve the submitted prompt, partial output,
+            # classification, or any other private turn state for resume replay.
+            session["inflight_turn"] = None
+            _fail_inflight_turn(session, _DURABLE_CREATION_FAILURE_MESSAGE)
+            st.error_retained = True
+            st.error_detail = " " + _DURABLE_CREATION_FAILURE_MESSAGE
+        if st.terminal_callback is not None:
+            st.receipt_attempted = True
+            st.terminal_callback({
+                "status": "failed", "text": "", "error": _DURABLE_CREATION_FAILURE_MESSAGE
+            })
+            st.receipt_committed = True
+        if st.receipt_committed:
+            _retire_turn_marker(session, st.marker_key)
+        return payload, "", "error"
     payload = {"text": raw, "usage": _get_usage(agent), "status": status}
     if last_reasoning:
         payload["reasoning"] = last_reasoning
@@ -682,6 +789,39 @@ def _complete_turn_payload(session: dict, st: _TurnRun, status_note: str | None,
 
 def _recover_turn_exception(sid: str, session: dict, st: _TurnRun, e: BaseException) -> None:
     """Except-path of the turn: crash log, history restore, terminal error frame."""
+    if _is_durable_creation_claim(st.durable_claim):
+        # Never cross a print/log/event/callback/retention boundary with exception data
+        # from a newly-created durable session.
+        logger.warning(_DURABLE_CREATION_FAILURE_MESSAGE)
+        if st.terminal_callback is not None and not st.receipt_attempted:
+            st.receipt_attempted = True
+            try:
+                st.terminal_callback({
+                    "status": "failed", "text": "", "error": _DURABLE_CREATION_FAILURE_MESSAGE
+                })
+                st.receipt_committed = True
+            except Exception:
+                logger.warning("hosted room terminal receipt commit failed")
+        with session["history_lock"]:
+            session["inflight_turn"] = None
+            _fail_inflight_turn(session, _DURABLE_CREATION_FAILURE_MESSAGE)
+        _emit("message.complete", sid, {
+            "text": "",
+            "usage": {},
+            "status": "error",
+            "error": _DURABLE_CREATION_FAILURE_MESSAGE,
+            "recoverable": True,
+        })
+        if st.receipt_committed:
+            _retire_turn_marker(session, st.marker_key)
+        st.error_retained = True
+        st.error_detail = " " + _DURABLE_CREATION_FAILURE_MESSAGE
+        st.result = {
+            "final_response": "",
+            "error": _DURABLE_CREATION_FAILURE_MESSAGE,
+            "failed": True,
+        }
+        return
     import traceback
     with contextlib.suppress(Exception):
         os.makedirs(os.path.dirname(_CRASH_LOG), exist_ok=True)
@@ -752,6 +892,25 @@ def _finish_turn(sid: str, session: dict, st: _TurnRun) -> None:
         from tools.terminal_scope import reset_terminal_scope
         reset_terminal_scope(scopes.terminal)
     _clear_session_context(scopes.session_tokens)
+    outcome = "failed"
+    if isinstance(st.result, dict):
+        status = _result_status(st.result)
+        outcome = {"complete": "completed", "interrupted": "cancelled"}.get(status, "failed")
+    elif st.result is not None and not st.error_retained:
+        outcome = "completed"
+    try:
+        _settle_session_durable_turn(session, outcome, st.durable_claim)
+    except Exception as exc:
+        if _is_durable_creation_claim(st.durable_claim):
+            message = (
+                _CREATION_COORDINATION_UNKNOWN_MESSAGE
+                if type(exc) is RuntimeError
+                and exc.args == (_CREATION_COORDINATION_UNKNOWN_MESSAGE,)
+                else _DURABLE_CREATION_FAILURE_MESSAGE
+            )
+            logger.warning(message)
+        else:
+            logger.exception("durable lineage turn settlement failed")
 
 
 def _run_prompt_submit(
@@ -759,10 +918,12 @@ def _run_prompt_submit(
     display_metadata: dict | None = None, image_paths: list[str] | None = None,
     queued_prompt_generation: int | None = None,
     terminal_callback: Callable[[dict[str, Any]], None] | None = None) -> bool:
-    admitted = _admit_prompt_turn(sid, session, text, image_paths, queued_prompt_generation)
+    admitted = _admit_prompt_turn(
+        sid, session, text, image_paths, queued_prompt_generation, terminal_callback
+    )
     if admitted is None:
         return False
-    images, agent = admitted
+    images, agent, durable_claim = admitted
     # The ONE INFO record proving a prompt was accepted by THIS process; ties ui sid,
     # session_key and the agent's live session_id together.  No prompt content is logged.
     _turn_started_monotonic = time.monotonic()
@@ -784,12 +945,14 @@ def _run_prompt_submit(
         # before any tool can commission a child (delegate_task captures it as authority).
         transport_token = bind_transport(session.get("transport"))
         runtime_session_token = _current_runtime_session_record.set(session)
-        st = _TurnRun(
-            session["agent"], session.pop("one_turn_model_restore", None), terminal_callback,
-            receipt_committed=terminal_callback is None)
-        st.marker_key = _record_turn_marker(session, text)
+        st = None
         goal_followup = None
         try:
+            st = _TurnRun(
+                session["agent"], session.pop("one_turn_model_restore", None), terminal_callback,
+                receipt_committed=terminal_callback is None, durable_claim=durable_claim)
+            st.marker_key = _record_turn_marker(session, text)
+            goal_followup = None
             prepared = _prepare_turn_input(sid, session, st, text, images)
             if prepared is None:
                 return
@@ -797,6 +960,7 @@ def _run_prompt_submit(
             _invoke_agent(
                 sid, session, st, prompt, run_message, streamer, images, display_kind,
                 display_metadata)
+            _sanitize_durable_creation_result(st)
             status_note = _absorb_turn_result(
                 sid, session, st, text, display_kind, display_metadata)
             payload, raw, status = _complete_turn_payload(session, st, status_note, cols)
@@ -808,11 +972,25 @@ def _run_prompt_submit(
             # structured control snapshot now so the Desktop card never paints the pre-judge turn count.
             _publish_session_control_snapshot(sid, session, only_if_present=True)
         except Exception as e:
-            _recover_turn_exception(sid, session, st, e)
+            if st is None:
+                _emit_unstarted_durable_creation_failure(
+                    sid, session, durable_claim, terminal_callback, outcome="failed"
+                )
+            else:
+                _recover_turn_exception(sid, session, st, e)
         finally:
-            _finish_turn(sid, session, st)
+            # st is None only if _TurnRun/marker initialization itself failed; recovery
+            # above handled it.  Reset ContextVars exactly once on every exit path.
+            if st is not None:
+                _finish_turn(sid, session, st)
             _current_runtime_session_record.reset(runtime_session_token)
             reset_transport(transport_token)
+            if st is None:
+                with session["history_lock"]:
+                    session["running"] = False
+                    session["last_active"] = time.time()
+                    _clear_inflight_turn(session)
+                return
             # A stale interim closure must not fire during a later turn.
             st.agent.interim_assistant_callback = None
             with session["history_lock"]:
@@ -841,18 +1019,48 @@ def _run_prompt_submit(
                         session.pop("_active_turn_marker_key", None)
                     session.pop("_hosted_room_task", None)
             session.pop("_auto_continue_scheduled", None)
-            _emit_settled_session_info(sid, session, st.agent)
+            if not (
+                _is_durable_creation_claim(st.durable_claim)
+                and status == "error"
+            ):
+                _emit_settled_session_info(sid, session, st.agent)
         _run_post_turn_followups(rid, sid, session, st.result, goal_followup)
-    run_thread = threading.Thread(target=run, daemon=True)
+    try:
+        run_thread = threading.Thread(target=run, daemon=True)
+    except Exception:
+        if _emit_unstarted_durable_creation_failure(
+            sid, session, durable_claim, terminal_callback
+        ):
+            return False
+        raise
+    start_failed = False
     with _sessions_lock:
         registered = _sessions.get(sid)
         can_start = not session.get("_closing") and (registered is None or registered is session)
         if can_start:
             session["_run_thread"] = run_thread
-            run_thread.start()
+            try:
+                run_thread.start()
+            except Exception:
+                if not _is_durable_creation_claim(durable_claim):
+                    raise
+                if session.get("_run_thread") is run_thread:
+                    session.pop("_run_thread", None)
+                start_failed = True
+    if start_failed:
+        _emit_unstarted_durable_creation_failure(
+            sid, session, durable_claim, terminal_callback
+        )
+        return False
     if not can_start:
+        if _emit_unstarted_durable_creation_failure(
+            sid, session, durable_claim, terminal_callback
+        ):
+            return False
         with session["history_lock"]:
             session["running"] = False
+        with contextlib.suppress(Exception):
+            _settle_session_durable_turn(session, "failed", durable_claim)
     return can_start
 
 

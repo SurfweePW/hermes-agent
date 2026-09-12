@@ -1,13 +1,17 @@
-import { describe, expect, it } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import {
   buildGatewayWebSocketUrl,
+  createGatewayResourceRevocation,
+  installGatewayConnectionLifecycle,
   isAllowedAndroidGatewayTransport,
   parseGatewayBaseUrl,
   persistGatewayBaseUrl,
   redactGatewayUrl,
   serializeGatewayConnection
 } from './connection'
+
+afterEach(() => vi.restoreAllMocks())
 
 describe('gateway connection configuration', () => {
   it('limits Android dogfood HTTP to literal Tailscale CGNAT addresses', () => {
@@ -124,5 +128,51 @@ describe('gateway connection configuration', () => {
     expect(diagnostic).not.toContain('operator')
     expect(diagnostic).not.toContain('super-secret')
     expect(diagnostic).not.toContain('session-secret')
+  })
+})
+
+describe('gateway lifecycle', () => {
+  it('reconnects once on foreground with a freshly loaded persisted token and never moves focus', async () => {
+    const input = document.createElement('input')
+    document.body.append(input)
+    input.focus()
+    const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
+    const loadToken = vi.fn().mockResolvedValueOnce('persisted-one').mockResolvedValueOnce('persisted-two')
+    const connect = vi.fn().mockResolvedValue(undefined)
+    const lifecycle = installGatewayConnectionLifecycle({ isConnected: () => false, loadToken, connect })
+
+    visibility.mockReturnValue('visible')
+    document.dispatchEvent(new Event('visibilitychange'))
+    window.dispatchEvent(new Event('online'))
+    await lifecycle.whenIdle()
+
+    expect(loadToken).toHaveBeenCalledOnce()
+    expect(connect).toHaveBeenCalledWith('persisted-one')
+    expect(document.activeElement).toBe(input)
+
+    document.dispatchEvent(new Event('visibilitychange'))
+    await lifecycle.whenIdle()
+    expect(connect).toHaveBeenLastCalledWith('persisted-two')
+    lifecycle.destroy()
+    input.remove()
+  })
+
+  it('revokes an open stream and download before clearing the persisted token', async () => {
+    const order: string[] = []
+    const socket = { close: vi.fn(() => order.push('stream')) }
+    const download = new AbortController()
+    download.signal.addEventListener('abort', () => order.push('download'))
+    const resetToken = vi.fn(async () => {order.push('token')})
+    const revocation = createGatewayResourceRevocation(resetToken)
+
+    revocation.trackStream(socket)
+    revocation.trackDownload(download)
+    await revocation.revoke()
+    await revocation.revoke()
+
+    expect(socket.close).toHaveBeenCalledOnce()
+    expect(download.signal.aborted).toBe(true)
+    expect(resetToken).toHaveBeenCalledOnce()
+    expect(order).toEqual(['stream', 'download', 'token'])
   })
 })

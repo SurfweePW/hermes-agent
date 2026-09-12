@@ -84,6 +84,7 @@ def rpc_call(ctx, operation: str, **params):
 def test_methods_and_capability_negotiation_are_registered(library_context):
     assert {
         "companion.library.capabilities",
+        "companion.library.resolve",
         "companion.library.list",
         "companion.library.get",
         "companion.library.preview",
@@ -100,6 +101,7 @@ def test_methods_and_capability_negotiation_are_registered(library_context):
         "html_preview": "sanitized_static_document",
         "relationship_filters": ["collection", "project", "topic", "session", "status"],
         "evidence_pin": "explicit_owner_reviewed_latest",
+        "reference_resolution": "exact_collection_relative_path",
     }
     token = bind_transport(OwnerTransport(library_context.authorization))
     try:
@@ -346,6 +348,101 @@ def test_list_search_filter_detail_and_retained_versions_are_profile_namespaced(
     assert str(ctx.root) not in encoded
     assert "token=" not in encoded.lower()
     assert '"url"' not in encoded
+
+
+def test_raw_list_and_get_rpc_payloads_never_expose_filesystem_paths(library_context):
+    ctx = library_context
+    nested = ctx.root / "private" / "reports"
+    nested.mkdir(parents=True)
+    (nested / "receipt.txt").write_text("receipt", encoding="utf-8")
+
+    listed = rpc_call(ctx, "list")["result"]
+    artifact_id = listed["items"][0]["artifact_id"]
+    detail = rpc_call(ctx, "get", artifact_id=artifact_id)["result"]
+    encoded = json.dumps({"list": listed, "detail": detail}).lower()
+
+    assert "relative_path" not in encoded
+    assert "absolute_path" not in encoded
+    assert '"path"' not in encoded
+    assert '"root"' not in encoded
+    assert str(ctx.root).lower() not in encoded
+
+
+def test_exact_reference_resolution_uses_collection_and_relative_path(library_context):
+    ctx = library_context
+    other = ctx.root.parent / "other-output"
+    other.mkdir()
+    (ctx.root / "a").mkdir()
+    (other / "b").mkdir()
+    (ctx.root / "a" / "report.pdf").write_bytes(b"artifact A")
+    (other / "b" / "report.pdf").write_bytes(b"artifact B")
+    ctx.configure({
+        "docs-a": {"name": "A", "root": str(ctx.root)},
+        "docs-b": {"name": "B", "root": str(other)},
+    })
+
+    resolved = rpc_call(ctx, "resolve", reference="library:docs-a/a/report.pdf")["result"]
+    listed = rpc_call(ctx, "list", collection="docs-a")["result"]
+
+    assert resolved["available"] is True
+    assert resolved["artifact_id"] == listed["items"][0]["artifact_id"]
+    assert resolved["profile"] == "atlas"
+    assert resolved["backend_namespace"] == "library-test-backend"
+    encoded = json.dumps(resolved).lower()
+    assert "relative_path" not in encoded
+    assert '"path"' not in encoded
+    assert "provenance" not in encoded
+    assert "report.pdf" not in encoded
+    assert str(ctx.root).lower() not in encoded
+
+
+def test_missing_exact_reference_does_not_fall_back_to_basename(library_context):
+    ctx = library_context
+    (ctx.root / "existing").mkdir()
+    (ctx.root / "existing" / "report.pdf").write_bytes(b"basename collision")
+
+    result = rpc_call(
+        ctx, "resolve", reference="library:docs/missing/report.pdf"
+    )["result"]
+
+    assert result == {
+        "available": False,
+        "profile": "atlas",
+        "backend_namespace": "library-test-backend",
+    }
+
+
+def test_safe_provenance_redacts_embedded_paths_and_credential_assignments():
+    source = {
+        "summary": "Reviewed /Users/alice/Private Reports/final report.pdf and C:\\Users\\alice\\Secret Reports\\final report.txt via file:///var/tmp/input.csv",
+        "network_source": r"Fetched \\fileserver\Private Share\Quarterly Reports\Q2 final.pdf, owner approved",
+        "details": "api_key=plain-secret password: hunter2 Authorization: Bearer abc.def.ghi",
+        "accessToken": "opaque-token-value",
+        "keyboard_layout": "Polish programmer",
+        "token_budget": 8192,
+        "note": "Bearer is a role name when it has no credential after it",
+    }
+
+    sanitized = companion_library._safe_provenance(source)
+    encoded = json.dumps(sanitized)
+
+    assert "/Users/alice" not in encoded
+    assert "final report.pdf" not in encoded
+    assert "C:\\Users\\alice" not in encoded
+    assert "final report.txt" not in encoded
+    assert "fileserver" not in encoded
+    assert "Private Share" not in encoded
+    assert "Q2 final.pdf" not in encoded
+    assert "file:///var/tmp" not in encoded
+    assert "plain-secret" not in encoded
+    assert "hunter2" not in encoded
+    assert "abc.def.ghi" not in encoded
+    assert sanitized["accessToken"] == "[REDACTED]"
+    assert sanitized["keyboard_layout"] == "Polish programmer"
+    assert sanitized["token_budget"] == 8192
+    assert sanitized["note"] == "Bearer is a role name when it has no credential after it"
+    assert "Reviewed " in sanitized["summary"]
+    assert " owner approved" in sanitized["network_source"]
 
 
 def test_cursor_is_bounded_and_bound_to_exact_profile_and_filters(library_context):

@@ -2,29 +2,138 @@ import { describe, expect, it, vi } from 'vitest'
 
 import type { WorkCard, WorkGateway } from '../../gateway/work-types'
 
-import { createWorkStore } from './work-store'
+import { canonicalDecisionCount, createWorkStore, distinctRuntimeAttention, verifiedWorkProfiles } from './work-store'
 
 const card: WorkCard = {
-  id: 'stable-id', profile: 'cmo', source_key: 'campaign:1', state: 'needs_me', title: 'Campaign', brief: 'Prepare', evidence: ['https://example.org'], next_action: 'Review', owner: 'Pawel', revision: 2, version: 4, created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z', snoozed_until: null, attention_due: true, attention_key: 'key', approval: null, preparation_status: 'not_authorized', handoff_key: null, execution_link: null, tracker_evidence: null, completion_evidence: null
+  id: 'stable-id', profile: 'cmo', source_key: 'campaign:1', state: 'needs_me', title: 'Campaign', brief: 'Prepare', evidence: ['https://example.org'], next_action: 'Review', owner: 'Pawel', revision: 2, version: 4, created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z', snoozed_until: null, attention_due: true, attention_key: 'key', recommended_action: 'approve_preparation', approval: null, preparation_status: 'not_authorized', handoff_key: null, execution_link: null, tracker_evidence: null, completion_evidence: null
 }
 
 function setup(canDecide = true) {
   let current = { ...card }
+  let recordSequence = 0
+  const comments: Awaited<ReturnType<WorkGateway['getWork']>>['comments'] = []
+  const decisions: Awaited<ReturnType<WorkGateway['getWork']>>['decisions'] = []
 
   const gateway: WorkGateway = {
     workCapabilities: vi.fn(async () => ({ can_decide: canDecide, reason: canDecide ? null : 'Human dashboard login required' })),
     listWork: vi.fn(async () => ({ items: [current] })),
-    getWork: vi.fn(async () => ({ item: current, comments: [], decisions: [], tracker_status_history: [] })),
-    decideWork: vi.fn(async () => {current = { ...current, state: 'in_progress', version: 5 };
+    getWork: vi.fn(async () => ({ item: current, comments: [...comments], decisions: [...decisions], tracker_status_history: [] })),
+    decideWork: vi.fn(async (params) => {
+      const decision = { id: `10000000-0000-4000-8000-${String(++recordSequence).padStart(12, '0')}`, card_id: current.id, revision: current.revision, action: params.action, actor: 'human', reason: params.reason ?? '', snoozed_until: params.snoozed_until ?? null, created_at: '2026-09-01T00:01:00Z', scope: params.action === 'approve_preparation' ? 'preparation_only' as const : 'none' as const }
+      decisions.push(decision); current = { ...current, state: 'in_progress', version: 5 }
 
- return { item: current } }),
-    commentWork: vi.fn(async () => ({ comment: {} }))
+      return { item: current, decision }
+    }),
+    commentWork: vi.fn(async (params) => {
+      const comment = { id: `20000000-0000-4000-8000-${String(++recordSequence).padStart(12, '0')}`, card_id: current.id, revision: current.revision, actor: 'human' as const, text: params.text, created_at: '2026-09-01T00:01:00Z' }
+      comments.push(comment)
+
+      return { comment }
+    })
   }
 
   return { gateway, store: createWorkStore(), revise: () => {current = { ...current, revision: 3, version: 6 } } }
 }
 
 describe('verified work store', () => {
+  const verifiedCmo = new Set(['cmo'])
+
+  it('counts one canonical decision badge without duplicating a Work record surfaced by Attention', () => {
+    const items = [
+      { ...card, id: 'work-a', attention_key: 'attention-a' },
+      { ...card, id: 'work-b', attention_key: 'attention-b' },
+      { ...card, id: 'history', state: 'done' as const, attention_due: false, attention_key: 'attention-history' }
+    ]
+
+    const attention = [
+      { id: 'runtime-approval-old-key', profile: 'cmo', actionable: true, kind: 'approval' as const, work_ref: { profile: 'cmo', id: 'work-a' } },
+      { id: 'runtime-question', profile: 'cmo', actionable: true, kind: 'question' as const },
+      { id: 'runtime-error', profile: 'cmo', actionable: true, kind: 'error' as const }
+    ]
+
+    expect(canonicalDecisionCount(items, attention, verifiedCmo)).toBe(3)
+    expect(distinctRuntimeAttention(items, attention, verifiedCmo).map((item) => item.id)).toEqual(['runtime-question', 'runtime-error'])
+  })
+
+  it('keeps a due decision in the badge when owner mutation is unavailable', () => {
+    const readOnlyDue = {
+      id: 'work-a', profile: 'cmo', actionable: false, bucket: 'needs_me' as const,
+      attentionKey: 'attention-a'
+    }
+
+    const attention = [{ id: 'runtime-approval', profile: 'cmo', actionable: true, kind: 'approval' as const, work_ref: { profile: 'cmo', id: 'work-a' } }]
+
+    expect(canonicalDecisionCount([readOnlyDue], attention, verifiedCmo)).toBe(1)
+    expect(distinctRuntimeAttention([readOnlyDue], attention, verifiedCmo)).toEqual([])
+  })
+
+  it('treats retained snooze metadata as due once attention_due is true', () => {
+    const dueSnooze = { ...card, id: 'due-snooze', attention_key: 'runtime-snooze', snoozed_until: '2026-09-01T02:00:00Z', attention_due: true }
+    const projectedDue = { id: 'due-view', profile: 'cmo', actionable: true, bucket: 'needs_me' as const, attentionKey: 'runtime-view', attentionDue: true, snoozedUntil: '2026-09-01T02:00:00Z' }
+
+    const attention = [
+      { id: 'old-runtime-snooze', profile: 'cmo', actionable: true, kind: 'approval' as const, work_ref: { profile: 'cmo', id: 'due-snooze' } },
+      { id: 'old-runtime-view', profile: 'cmo', actionable: true, kind: 'approval' as const, work_ref: { profile: 'cmo', id: 'due-view' } }
+    ]
+
+    expect(canonicalDecisionCount([dueSnooze, projectedDue], attention, verifiedCmo)).toBe(2)
+    expect(distinctRuntimeAttention([dueSnooze, projectedDue], attention, verifiedCmo)).toEqual([])
+  })
+
+  it('keeps stale runtime Attention suppressed after canonical Work is snoozed, done or declined', () => {
+    const items = [
+      { ...card, id: 'future-snooze', attention_key: '2026-09-02:2:1', snoozed_until: '2099-09-01T02:00:00Z', attention_due: false },
+      { ...card, id: 'done', state: 'done' as const, attention_key: '2026-09-02:3:0', attention_due: false },
+      { ...card, id: 'declined', state: 'declined' as const, attention_key: '2026-09-02:4:0', attention_due: false }
+    ]
+    const attention = [
+      { id: '2026-09-01:2:0', profile: 'cmo', actionable: true, kind: 'approval' as const, work_ref: { profile: 'cmo', id: 'future-snooze' } },
+      { id: '2026-09-01:2:0', profile: 'cmo', actionable: true, kind: 'approval' as const, work_ref: { profile: 'cmo', id: 'done' } },
+      { id: '2026-09-01:3:0', profile: 'cmo', actionable: true, kind: 'approval' as const, work_ref: { profile: 'cmo', id: 'declined' } },
+      { id: 'unrelated-runtime', profile: 'cmo', actionable: true, kind: 'question' as const }
+    ]
+
+    expect(distinctRuntimeAttention(items, attention, verifiedCmo).map((item) => item.id)).toEqual(['unrelated-runtime'])
+    expect(canonicalDecisionCount(items, attention, verifiedCmo)).toBe(1)
+  })
+
+  it('keeps runtime Attention without an explicit canonical Work reference', () => {
+    const transitioned = { ...card, id: 'work-a', attention_key: '2026-09-02:3:1', state: 'done' as const, attention_due: false }
+    const absent = { id: '2026-09-01:2:0', profile: 'cmo', actionable: true, kind: 'approval' as const }
+    const unrelated = { ...absent, id: 'other-runtime', work_ref: { profile: 'cmo', id: 'work-b' } }
+
+    expect(distinctRuntimeAttention([transitioned], [absent, unrelated], verifiedCmo)).toEqual([absent, unrelated])
+  })
+
+  it('fails open when retained Work belongs to a source whose refresh failed', () => {
+    const retained = { ...card, id: 'work-a', state: 'done' as const, attention_due: false }
+    const freshRuntime = { id: 'runtime-approval', profile: 'cmo', actionable: true, kind: 'approval' as const, work_ref: { profile: 'cmo', id: 'work-a' } }
+
+    expect(distinctRuntimeAttention([retained], [freshRuntime], new Set())).toEqual([freshRuntime])
+    expect(canonicalDecisionCount([retained], [freshRuntime], new Set())).toBe(1)
+  })
+
+  it.each(['loading', 'unsupported', 'error'] as const)('does not trust retained source verification while the global Work status is %s', (status) => {
+    const profiles = verifiedWorkProfiles({
+      status,
+      sources: [{ profile: 'cmo', incomplete: false, status: 'verified', lastSuccess: '2026-09-01T00:00:00Z', message: null }]
+    })
+
+    expect([...profiles]).toEqual([])
+  })
+
+  it('keeps authority per profile after a partially successful refresh', () => {
+    const profiles = verifiedWorkProfiles({
+      status: 'verified',
+      sources: [
+        { profile: 'atlas', incomplete: false, status: 'verified', lastSuccess: '2026-09-01T00:00:00Z', message: null },
+        { profile: 'cmo', incomplete: true, status: 'error', lastSuccess: '2026-08-31T00:00:00Z', message: 'Refresh failed' }
+      ]
+    })
+
+    expect([...profiles]).toEqual(['atlas'])
+  })
+
   it('shows actual dispatch, full decision history and snooze suppression across refreshes', async () => {
     const { FakeWorkGateway } = await import('../../fixtures/fake-work-gateway')
     const gateway = new FakeWorkGateway(); const store = createWorkStore()
@@ -62,20 +171,22 @@ describe('verified work store', () => {
     expect(JSON.stringify(store.getSnapshot())).not.toContain('https://example.org')
   })
 
-  it('uses authoritative profile/id/version/revision and reads back mutations', async () => {
+  it('uses authoritative profile/id/version/revision and reads back server-generated record IDs', async () => {
     const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
     expect(await store.decide({ action: 'approve_preparation' })).toBe(true)
     expect(gateway.decideWork).toHaveBeenCalledWith({ profile: 'cmo', id: 'stable-id', expected_version: 4, revision: 2, action: 'approve_preparation', idempotency_key: expect.any(String) })
+    expect(store.getSnapshot().selected?.decisionHistory?.at(-1)?.id).not.toBe(vi.mocked(gateway.decideWork).mock.calls[0]?.[0].idempotency_key)
     expect(gateway.getWork).toHaveBeenLastCalledWith('cmo', 'stable-id')
     expect(store.getSnapshot().selected?.status).toBe('in_progress')
-    await store.comment('Focused persisted discussion')
+    expect(await store.comment('Focused persisted discussion')).toBe(true)
     expect(gateway.commentWork).toHaveBeenCalledWith({ profile: 'cmo', id: 'stable-id', text: 'Focused persisted discussion', idempotency_key: expect.any(String) })
+    expect(store.getSnapshot().selected?.discussion?.at(-1)?.id).not.toBe(vi.mocked(gateway.commentWork).mock.calls[0]?.[0].idempotency_key)
   })
   it('respects the human capability boundary without falling back to tool approvals', async () => {
     const { gateway, store } = setup(false); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
     expect(store.getSnapshot().message).toBe('Human dashboard login required')
     expect(store.getSnapshot().selected?.actionable).toBe(false)
-    expect(await store.decide({ action: 'decline' })).toBe(false)
+    expect(await store.decide({ action: 'request_changes', comment: 'Not authorized' })).toBe(false)
     expect(gateway.decideWork).not.toHaveBeenCalled()
   })
   it('refreshes stale revisions and requires a new explicit decision', async () => {
@@ -86,10 +197,45 @@ describe('verified work store', () => {
     expect(store.getSnapshot().message).toMatch(/Nothing was automatically retried/)
     expect(gateway.decideWork).toHaveBeenCalledTimes(1)
   })
+  it('does not confirm a decision when readback omits the exact server record ID', async () => {
+    const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
+    vi.mocked(gateway.decideWork).mockImplementation(async (params) => ({ decision: { id: 'server-missing-from-readback', card_id: params.id, revision: params.revision, action: params.action, actor: 'human', reason: params.reason ?? '', snoozed_until: params.snoozed_until ?? null, created_at: '2026-09-01T00:01:00Z', scope: params.action === 'approve_preparation' ? 'preparation_only' : 'none' } }))
+
+    expect(await store.decide({ action: 'approve_preparation' })).toBe(false)
+    expect(store.getSnapshot().message).toMatch(/could not be confirmed/i)
+    expect(gateway.decideWork).toHaveBeenCalledTimes(1)
+  })
+  it('rejects an idempotency key echoed as the record UUID even when readback repeats it', async () => {
+    const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
+    vi.mocked(gateway.decideWork).mockImplementation(async (params) => {
+      const decision = { id: params.idempotency_key, card_id: params.id, revision: params.revision, action: params.action, actor: 'human', reason: params.reason ?? '', snoozed_until: params.snoozed_until ?? null, created_at: '2026-09-01T00:01:00Z', scope: params.action === 'approve_preparation' ? 'preparation_only' as const : 'none' as const }
+      vi.mocked(gateway.getWork).mockResolvedValue({ item: { ...card, state: 'in_progress', version: 5 }, comments: [], decisions: [decision], tracker_status_history: [] })
+
+      return { decision }
+    })
+
+    expect(await store.decide({ action: 'approve_preparation' })).toBe(false)
+    expect(gateway.decideWork).toHaveBeenCalledTimes(1)
+    expect(gateway.getWork).toHaveBeenCalledTimes(1)
+    expect(store.getSnapshot().message).toMatch(/could not be confirmed/i)
+  })
+  it('does not retry an unconfirmed timeout automatically', async () => {
+    const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
+    vi.mocked(gateway.decideWork).mockRejectedValue(new Error('timeout'))
+
+    expect(await store.decide({ action: 'approve_preparation' })).toBe(false)
+    expect(gateway.decideWork).toHaveBeenCalledTimes(1)
+    expect(store.getSnapshot().message).toMatch(/may already have reached the server/i)
+  })
   it('keeps the exact mutation target locked until readback finishes', async () => {
     const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
     let finish!: () => void
-    vi.mocked(gateway.getWork).mockImplementation(() => new Promise((resolve) => {finish = () => resolve({ item: { ...card, state: 'in_progress' }, comments: [], decisions: [], tracker_status_history: [] })}))
+    const getVerifiedWork = vi.mocked(gateway.getWork).getMockImplementation()!
+    vi.mocked(gateway.getWork).mockImplementation(async (...args) => {
+      await new Promise<void>((resolve) => {finish = resolve})
+
+      return getVerifiedWork(...args)
+    })
     const result = store.decide({ action: 'approve_preparation' })
     await vi.waitFor(() => expect(finish).toBeTypeOf('function'))
     expect(store.getSnapshot().pending).toBe(true)
@@ -105,7 +251,7 @@ describe('verified work store', () => {
     await store.refresh()
     expect(store.getSnapshot().status).toBe('error')
     expect(store.getSnapshot().selected?.id).toBe('stable-id')
-    expect(await store.decide({ action: 'decline' })).toBe(false)
+    expect(await store.decide({ action: 'request_changes', comment: 'Offline' })).toBe(false)
     store.disconnect()
     expect(store.getSnapshot().status).toBe('offline')
     expect(await store.comment('Do not send')).toBe(false)
@@ -113,18 +259,22 @@ describe('verified work store', () => {
   it('does not enable duplicate submissions or let late responses cross connections', async () => {
     const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
     let finish!: () => void
-    vi.mocked(gateway.decideWork).mockImplementation(() => new Promise((resolve) => {finish = () => resolve({})}))
+    vi.mocked(gateway.decideWork).mockImplementation((params) => new Promise((resolve) => {finish = () => resolve({ decision: { id: '30000000-0000-4000-8000-000000000001', card_id: params.id, revision: params.revision, action: params.action, actor: 'human', reason: params.reason ?? '', snoozed_until: params.snoozed_until ?? null, created_at: '2026-09-01T00:01:00Z', scope: params.action === 'approve_preparation' ? 'preparation_only' : 'none' } })}))
     const pending = store.decide({ action: 'approve_preparation' })
     expect(store.getSnapshot().pending).toBe(true)
-    expect(await store.decide({ action: 'decline' })).toBe(false)
+    expect(await store.decide({ action: 'request_changes', comment: 'Duplicate' })).toBe(false)
     store.disconnect(); finish(); await pending
     expect(store.getSnapshot().status).toBe('offline')
     expect(gateway.decideWork).toHaveBeenCalledTimes(1)
   })
-  it('sends snooze and change reason exactly, with server revalidation', async () => {
+  it('maps the fixed reminder to a two-hour server snooze and revalidates it', async () => {
     const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
-    await store.decide({ action: 'snooze', snoozedUntil: '2099-09-05T12:00:00Z', comment: 'Later' })
-    expect(gateway.decideWork).toHaveBeenCalledWith(expect.objectContaining({ action: 'snooze', snoozed_until: '2099-09-05T12:00:00Z', reason: 'Later', profile: 'cmo', id: 'stable-id' }))
+    vi.useFakeTimers(); vi.setSystemTime(new Date('2026-09-05T10:00:00Z'))
+
+    try {
+      expect(await store.decide({ action: 'remind_in_2_hours' })).toBe(true)
+      expect(gateway.decideWork).toHaveBeenCalledWith(expect.objectContaining({ action: 'snooze', snoozed_until: '2026-09-05T12:00:00.000Z', profile: 'cmo', id: 'stable-id' }))
+    } finally {vi.useRealTimers()}
   })
   it('detects old server capability instead of fabricating an empty success', async () => {
     const { gateway, store } = setup(); vi.mocked(gateway.workCapabilities).mockRejectedValue({ code: -32601 })
@@ -156,7 +306,29 @@ describe('verified work store', () => {
     expect(listNeedsMePriorities).toHaveBeenCalledWith('cmo', undefined, 'topic')
     expect(store.getSnapshot().items[0]?.priority).toMatchObject({
       work_id: 'stable-id', topicName: 'Launch', topicCollection: 'Growth',
+      group: { kind: 'topic', id: 'topic-1', profile: 'cmo', backend_namespace: 'test' },
       groupOrder: 0, itemOrder: 0, why_here: 'Unblocks launch'
+    })
+  })
+
+  it('preserves the authoritative project handoff identity instead of the wrapper group id', async () => {
+    const { gateway, store } = setup()
+
+    const listNeedsMePriorities = vi.fn(async () => ({
+      profile: 'cmo', backend_namespace: 'desktop:production', sort: 'recommended' as const,
+      policy_version: 'v1', review_id: null, group_by: 'project' as const, as_of: '2026-09-01T00:00:00Z',
+      coverage: { work: 'complete', organization: 'complete', authorization_filtered: true },
+      groups: [{
+        id: 'project-wrapper:not-a-route', eligibility: 'assessed' as const, eligible_action_count: 1, why_here: 'Project decision',
+        group: { kind: 'project' as const, id: 'canonical-project-42', source_id: 'desktop-project-7', namespace: { backend_id: 'desktop:exact', profile: 'project-owner' }, name: 'Autumn', collection: null, objective: null },
+        items: [{ profile: 'cmo', work_id: 'stable-id', candidate_id: 'candidate-1', eligibility: 'assessed' as const, why_here: 'Review', next_step: 'Decide', trade_off: 'Wait', assessed_at: null, evidence: [], assessment: null, override: null }]
+      }]
+    }))
+
+    await store.attach(Object.assign(gateway, { listNeedsMePriorities }), ['cmo'])
+
+    expect(store.getSnapshot().items[0]?.priority?.group).toEqual({
+      kind: 'project', id: 'canonical-project-42', source_id: 'desktop-project-7', profile: 'project-owner', backend_namespace: 'desktop:exact'
     })
   })
   it('uses the exact owner mutation contract and defers reordered rows until detail closes', async () => {

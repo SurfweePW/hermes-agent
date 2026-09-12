@@ -155,6 +155,29 @@ export function createDirectoryStore(): DirectoryStore {
 
   const projection = () => ({ sessions: [...sessions.values()], projects: [...projects.values()], topics: [...topics.values()], coverage: [...coverage.values()], topicCoverage: [...topicCoverage.values()] })
 
+  const reconcileProjectMembership = (profile: string, authoritativeAbsence: boolean) => {
+    const membership = new Map<string, CompanionProject>()
+
+    for (const project of projects.values()) {
+      if (project.profile !== profile || project.session_ids === null || project.session_ids === undefined) {continue}
+
+      for (const sessionId of project.session_ids) {
+        membership.set(sourceKey(project.source, project.profile, sessionId), project)
+      }
+    }
+
+    for (const [key, session] of sessions) {
+      if (session.profile !== profile) {continue}
+      const project = membership.get(key)
+      sessions.set(key, {
+        ...session,
+        project: project
+          ? { id: project.id, title: project.title, profile: project.profile }
+          : authoritativeAbsence ? null : session.project ?? undefined
+      })
+    }
+  }
+
   const purgeUnauthorized = () => {
     ++epoch; gateway = null; profiles = []; selection = null; refreshInFlight = null
     sessions.clear(); projects.clear(); topics.clear(); coverage.clear(); topicCoverage.clear()
@@ -221,7 +244,10 @@ export function createDirectoryStore(): DirectoryStore {
 
     const [sessionSettled, projectSettled] = await Promise.allSettled([
       append === 'projects' ? null : client.listCompanionSessions({ profile, limit: 50, view: browseQuery.archive === 'current' ? 'active' : browseQuery.archive, ...(browseQuery.search ? { search: browseQuery.search } : {}), ...(browseQuery.sources.length ? { sources: browseQuery.sources } : {}), ...(browseQuery.origins.length ? { origins: browseQuery.origins } : {}), ...(append === 'sessions' && previous.sessionCursor ? { cursor: previous.sessionCursor } : {}) }),
-      append === 'sessions' ? null : client.listCompanionProjects({ profile, limit: 50, ...(browseQuery.archive !== 'all' ? { archived: browseQuery.archive === 'archived' } : {}), ...(append === 'projects' && previous.projectCursor ? { cursor: previous.projectCursor } : {}) })
+      // Session visibility and project lifecycle are independent. Fetch every
+      // project so an active session in an archived project (or the inverse)
+      // is never misclassified as authoritatively unassigned.
+      append === 'sessions' ? null : client.listCompanionProjects({ profile, limit: 50, ...(append === 'projects' && previous.projectCursor ? { cursor: previous.projectCursor } : {}) })
     ])
 
     if (generation !== epoch || gateway !== client) {return}
@@ -238,9 +264,15 @@ export function createDirectoryStore(): DirectoryStore {
     }
 
     if (sessionResult) {
+      const retainedSessions = new Map(sessions)
+
       if (append !== 'sessions') {for (const [key, item] of sessions) {if (item.profile === profile) {sessions.delete(key)}}}
 
-      for (const item of sessionResult.sessions) {sessions.set(sourceKey(item.source, item.profile, item.id), item)}
+      for (const item of sessionResult.sessions) {
+        const key = sourceKey(item.source, item.profile, item.id)
+        const retainedProject = retainedSessions.get(key)?.project
+        sessions.set(key, !item.project && retainedProject ? { ...item, project: retainedProject } : item)
+      }
     }
 
     if (projectResult) {
@@ -255,6 +287,10 @@ export function createDirectoryStore(): DirectoryStore {
     const projectComplete = projectResult ? projectResult.coverage.complete : previous.projectComplete
     const sessionStatus = sessionError ? failureStatus(sessionError) : (sessionResult ? 'ready' : previous.sessionStatus)
     const projectStatus = projectError ? failureStatus(projectError) : (projectResult ? 'ready' : previous.projectStatus)
+
+    if (sessionResult || projectResult) {
+      reconcileProjectMembership(profile, projectStatus === 'ready' && projectComplete && !projectsHasMore)
+    }
 
     const status: DirectoryStatus = sessionStatus === 'ready' && projectStatus === 'ready'
       ? 'ready'
@@ -284,6 +320,71 @@ export function createDirectoryStore(): DirectoryStore {
       projectStatus
     })
     publish(projection())
+  }
+
+  const loadProjectSearchMembership = async (client: DirectoryGateway, profile: string, generation: number) => {
+    const query = browseQuery.search.toLocaleLowerCase()
+    const matchingProjects = [...projects.values()].filter((project) => project.profile === profile
+      && project.title.toLocaleLowerCase().includes(query))
+    const projectBySession = new Map<string, CompanionProject>()
+
+    for (const project of matchingProjects) {
+      for (const sessionId of project.session_ids ?? []) {
+        projectBySession.set(sourceKey(project.source, project.profile, sessionId), project)
+      }
+    }
+    if (projectBySession.size === 0) {return}
+
+    let cursor: string | undefined
+    const requestedCursors = new Set<string>()
+    let pageCount = 0
+    let authoritativeComplete = true
+    try {
+      do {
+        if (cursor) {
+          if (requestedCursors.has(cursor)) {throw new Error('Project session search replayed a cursor.')}
+          requestedCursors.add(cursor)
+        }
+        if (++pageCount > 100) {throw new Error('Project session search exceeded the 100-page safety limit.')}
+        const page = await client.listCompanionSessions({
+          profile,
+          limit: 50,
+          view: browseQuery.archive === 'current' ? 'active' : browseQuery.archive,
+          ...(browseQuery.sources.length ? { sources: browseQuery.sources } : {}),
+          ...(browseQuery.origins.length ? { origins: browseQuery.origins } : {}),
+          ...(cursor ? { cursor } : {})
+        })
+        if (generation !== epoch || gateway !== client) {return}
+        authoritativeComplete = authoritativeComplete && page.coverage.complete
+        for (const item of page.sessions) {
+          const key = sourceKey(item.source, item.profile, item.id)
+          const project = projectBySession.get(key)
+          if (project) {
+            sessions.set(key, { ...item, project: { id: project.id, title: project.title, profile: project.profile } })
+          }
+        }
+        const nextCursor = page.has_more && page.next_cursor ? page.next_cursor : undefined
+        if (nextCursor && (nextCursor === cursor || requestedCursors.has(nextCursor))) {
+          throw new Error('Project session search made no pagination progress.')
+        }
+        cursor = nextCursor
+      } while (cursor)
+
+      if (!authoritativeComplete) {throw new Error('Project session membership coverage is incomplete.')}
+      publish(projection())
+    } catch (error) {
+      if (generation !== epoch || gateway !== client) {return}
+      const previous = coverage.get(profile) ?? pendingCoverage(profile)
+      coverage.set(profile, {
+        ...previous,
+        complete: false,
+        sessionComplete: false,
+        sessionStatus: failureStatus(error),
+        status: failureStatus(error),
+        message: 'Project session matches could not be completely verified.'
+      })
+      publish(projection())
+    }
   }
 
   const loadEntityProjection = async (client: DirectoryGateway, kind: 'project' | 'session' | 'topic', profile: string, id: string, source: string, selectedTopic?: TopicDetail): Promise<EntityProjection> => {
@@ -491,7 +592,7 @@ export function createDirectoryStore(): DirectoryStore {
 
     if (!client || !profiles.includes(profile)) {return}
 
-    const known = source
+    let known = source
       ? sessions.get(sourceKey(source, profile, id))
       : [...sessions.values()].find((item) => item.profile === profile && item.id === id)
 
@@ -500,6 +601,26 @@ export function createDirectoryStore(): DirectoryStore {
     publish({ selectedSession: preserve ? snapshot.selectedSession ?? known ?? null : known ?? null, selectedProject: null, selectedTopic: null, entityProjection: { status: 'loading', complete: false, work: [], needsMe: [], message: null }, topicSourceDetails: [], ...(preserve ? {} : { history: null }), detailStatus: 'loading', detailMessage: null })
 
     try {
+      if (!known) {
+        const lookup = await client.listCompanionSessions({
+          profile,
+          limit: 50,
+          view: 'all',
+          search: id,
+          ...(source ? { sources: [source] } : {})
+        })
+
+        if (generation !== epoch || gateway !== client) {return}
+        const matches = lookup.sessions.filter((item) => item.id === id && item.profile === profile && (!source || item.source === source))
+
+        if (matches.length !== 1) {throw new Error('Exact session identity could not be resolved.')}
+        known = matches[0]
+        sessions.set(sourceKey(known.source, known.profile, known.id), known)
+        reconcileProjectMembership(profile, false)
+        known = sessions.get(sourceKey(known.source, known.profile, known.id)) ?? known
+        publish({ ...projection(), selectedSession: known })
+      }
+
       const result = await client.getCompanionSessionHistory(profile, id, undefined, source)
 
       if (generation !== epoch || gateway !== client) {return}
@@ -637,6 +758,10 @@ export function createDirectoryStore(): DirectoryStore {
         for (const profile of profiles) {
           while (gateway && coverage.get(profile)?.projectsHasMore) {await this.loadOlder('projects', profile)}
         }
+        const generation = epoch
+        if (gateway) {
+          await Promise.all(profiles.map((profile) => loadProjectSearchMembership(gateway!, profile, generation)))
+        }
       }
     },
     async loadOlder(kind, profile) {
@@ -671,7 +796,7 @@ export function createDirectoryStore(): DirectoryStore {
         if (generation !== epoch || gateway !== client) {return}
         const seen = new Set(current.entries.map((entry) => entry.id))
         const coverageMessage = [current.coverage.message, next.coverage.message].filter((item): item is string => Boolean(item))
-        publish({ history: { ...next, entries: [...current.entries, ...next.entries.filter((entry) => !seen.has(entry.id))], coverage: { ...next.coverage, complete: current.coverage.complete && next.coverage.complete, message: [...new Set(coverageMessage)].join(' ') || null } }, detailStatus: 'ready' })
+        publish({ history: { ...next, entries: [...next.entries.filter((entry) => !seen.has(entry.id)), ...current.entries], coverage: { ...next.coverage, complete: current.coverage.complete && next.coverage.complete, message: [...new Set(coverageMessage)].join(' ') || null } }, detailStatus: 'ready' })
       } catch (error) {
         if (generation === epoch && gateway === client) {
           if (errorCode(error) === 4403) {

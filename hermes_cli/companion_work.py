@@ -14,7 +14,7 @@ from hermes_cli.companion_work_store import (
     WorkError, WorkStore, anchored_store_path)
 
 DECISION_AUTH_REASON = ('Owner sign-in required: use an authorized dashboard session and a fresh '
-                        'single-use ticket. Shared tokens and agent/internal clients cannot decide.')
+                        'single-use ticket. Shared tokens and agent/internal clients cannot mutate decisions.')
 FIELDS = {
     'capabilities': set(),
     'list': {'states', 'include_snoozed'},
@@ -125,7 +125,7 @@ def execute(operation, params, *, owner_authorization=None):
                 'grants_authority': False,
             },
         }
-    if operation == 'decide' and not owner:
+    if operation in {'comment', 'decide'} and not owner:
         raise WorkError(DECISION_AUTH_REASON, 4403)
     store = resolve_store(params.get('profile'))
     p = {k: v for k, v in params.items() if k != 'profile'}
@@ -139,7 +139,7 @@ def execute(operation, params, *, owner_authorization=None):
         if operation == 'propose':
             return store.propose(p['id'], p['expected_version'])
         if operation == 'comment':
-            return store.comment(p['id'], p['text'], p['idempotency_key'], human_identity=human_identity)
+            return store.comment(p['id'], p['text'], p['idempotency_key'], human_identity=owner)
         if operation == 'decide':
             p['card_id'] = p.pop('id')
             return store.decide(**p, human_identity=owner)

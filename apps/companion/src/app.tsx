@@ -2,8 +2,9 @@ import { type FormEvent, useEffect, useMemo, useRef, useState, useSyncExternalSt
 
 import { NeedsMe } from './features/attention/needs-me'
 import { Conversation } from './features/conversation/conversation'
+import { transcriptSessionKey } from './features/conversation/transcript-scroll'
 import { installDirectoryRefreshLifecycle } from './features/directory/directory-refresh'
-import { WorkDirectory } from './features/directory/work-directory'
+import { ChatsDirectory, WorkDirectory } from './features/directory/work-directory'
 import { Library } from './features/library/library'
 import type { LibraryRelationshipContext } from './features/library/library-types'
 import { Recovery } from './features/recovery/recovery'
@@ -11,6 +12,7 @@ import { Roster, type Teammate } from './features/roster/roster'
 import { TeammateDetails } from './features/roster/teammate-details'
 import { OwnerSignIn } from './features/work/owner-sign-in'
 import { WorkInbox } from './features/work/work-inbox'
+import { canonicalDecisionCount, distinctRuntimeAttention, verifiedWorkProfiles } from './features/work/work-store'
 import { createFakeWorkGateway } from './fixtures/fake-work-gateway'
 import { hasOriginalRouteCapability, openOriginalRoute } from './gateway/original-route'
 import { type CompanionStore, createCompanionStore } from './state/companion-store'
@@ -23,20 +25,19 @@ const fixtureMode = import.meta.env.VITE_COMPANION_FIXTURE === 'true'
 const defaultStore = createCompanionStore(fixtureMode ? { gatewayFactory: createFakeWorkGateway } : {})
 
 const screenTitles: Record<Screen, string> = {
-  needs: 'Needs Me', work: 'Work', library: 'Library', teammates: 'Teammates', conversation: 'Conversation', details: 'Teammate Details', recovery: 'Recovery'
+  needs: 'Decyzje', work: 'Rozmowy', library: 'Pliki', teammates: 'Teammates', conversation: 'Conversation', details: 'Teammate Details', recovery: 'Recovery'
 }
 
 function initialScreen(): Screen {
   const view = new URLSearchParams(window.location.search).get('view') as Screen | null
 
-  return view && primaryScreens.has(view) ? view : 'needs'
+  return view && primaryScreens.has(view) ? view : 'work'
 }
 
 export function libraryAssetParams(profile: string, reference: string): URLSearchParams {
   const params = new URLSearchParams()
   params.set('view', 'library')
   params.set('libraryProfile', profile)
-  params.set('libraryQ', reference.split('/').at(-1) ?? reference)
   params.set('libraryOpen', reference)
 
   return params
@@ -55,7 +56,9 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
   const restoredDirectoryFocus = useRef('')
   const restoredLibraryRelationship = useRef('')
   const selected = companion.teammates.find((teammate) => teammate.id === companion.selectedTeammateId)
-  const attentionCount = companion.attentionItems.length + work.items.filter((item) => item.bucket === 'needs_me').length + Number(companion.phase === 'disconnected')
+  const authoritativeWorkProfiles = verifiedWorkProfiles(work)
+  const runtimeAttention = companion.phase === 'ready' ? distinctRuntimeAttention(work.items, companion.attentionItems, authoritativeWorkProfiles) : []
+  const attentionCount = canonicalDecisionCount(work.items, runtimeAttention, authoritativeWorkProfiles)
 
   useEffect(() => {
     const lifecycle = installDirectoryRefreshLifecycle({
@@ -96,7 +99,7 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
       const params = new URLSearchParams(window.location.search)
       const view = params.get('view') as Screen | null
       setLocationSearch(window.location.search)
-      setScreen(view && primaryScreens.has(view) ? view : 'needs')
+      setScreen(view && primaryScreens.has(view) ? view : 'work')
     }
 
     window.addEventListener('popstate', restore)
@@ -206,11 +209,14 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
     const profile = params.get('focusProfile')
     const source = params.get('focusSource') ?? undefined
     const section = params.get('section')
+    const chat = params.get('chat') ?? (section === 'sessions' ? focus : null)
+    const chatProfile = params.get('chatProfile') ?? (section === 'sessions' ? profile : null)
+    const chatSource = params.get('chatSource') ?? (section === 'sessions' ? source : null)
     const requestedVisibility = params.get('visibility') ?? params.get('archive')
 
     const archive = (['current', 'all', 'hidden', 'archived'].includes(requestedVisibility ?? '')
       ? requestedVisibility
-      : section === 'sessions' ? 'all' : 'current') as 'current' | 'all' | 'hidden' | 'archived'
+      : section === 'sessions' || params.has('chatQ') ? 'all' : 'current') as 'current' | 'all' | 'hidden' | 'archived'
 
     const collections = params.getAll('collection').filter(Boolean)
     const lifecycles = params.getAll('lifecycle').filter((value): value is 'active' | 'completed' | 'archived' => ['active', 'completed', 'archived'].includes(value))
@@ -218,16 +224,24 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
     const topicSort = params.get('sort') === 'name' ? 'name' : 'updated'
     const sources = params.getAll('source').filter(Boolean).sort()
     const origins = params.getAll('origin').filter(Boolean).sort()
-    const key = JSON.stringify([params.get('q') ?? '', archive, section, source, profile, focus, sources, origins, collections, lifecycles, verified, topicSort])
+    const search = params.get('chatQ') ?? params.get('q') ?? ''
+    const key = JSON.stringify([search, archive, section, source, profile, focus, chat, chatProfile, chatSource, sources, origins, collections, lifecycles, verified, topicSort])
 
     if (restoredDirectoryFocus.current === key) {return}
     restoredDirectoryFocus.current = key
     let active = true
 
     void (async () => {
-      await store.directory.setBrowseQuery({ search: params.get('q') ?? '', archive, sources, origins, collections, lifecycles, verified, topicSort })
+      await store.directory.setBrowseQuery({ search, archive, sources, origins, collections, lifecycles, verified, topicSort })
 
       if (!active || restoredDirectoryFocus.current !== key) {return}
+
+      if (chat && chatProfile && chatSource) {
+        mainRef.current?.scrollTo?.({ top: 0 })
+        await store.directory.openSession(chatProfile, chat, chatSource)
+
+        return
+      }
 
       if (!focus || !profile) {
         store.directory.clearDetail()
@@ -263,21 +277,59 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
     }
 
     if (screen === 'conversation') {
-      const activeSession = companion.recentSessions.find((session) => session.id === companion.storedSessionId || session.resolved_id === companion.storedSessionId)
+      const activeTarget = companion.activeSession?.target
+      const directorySession = activeTarget
+        ? [directory.selectedSession, ...directory.sessions].find((session) => session?.id === activeTarget.stored_session_id
+            && session.profile === activeTarget.profile && session.source === activeTarget.backend_namespace)
+        : directory.selectedSession?.id === companion.storedSessionId
+          ? directory.selectedSession
+          : directory.sessions.find((session) => session.id === companion.storedSessionId)
+      const projectLabel = directorySession?.project === null
+        ? 'Bez projektu'
+        : directorySession?.project?.title ?? 'Projekt nieznany'
 
       return selected
-        ? <Conversation approval={companion.pendingApproval} connected={companion.phase === 'ready'} draft={companion.draft} messages={companion.messages} onApproval={(choice) => void store.respondToApproval(choice)} onBackToSessions={() => setScreen('details')} onDraftChange={store.setDraft} onInterrupt={() => void store.interrupt()} onSubmit={() => void store.submitDraft()} sessionTitle={activeSession?.title || 'Main conversation'} streamingText={companion.streamingText} teammate={selected} turnStatus={companion.turnStatus} />
+        ? <Conversation approval={companion.pendingApproval} connected={companion.phase === 'ready'} draft={companion.draft} messages={companion.messages} onApproval={(choice) => void store.respondToApproval(choice)} onBackToSessions={() => {
+            const params = new URLSearchParams(locationSearch)
+
+            if (params.get('view') === 'work' && params.has('chat')) {
+              params.delete('chat'); params.delete('chatProfile'); params.delete('chatSource')
+              window.history.pushState({}, '', `${window.location.pathname}?${params.toString()}`)
+              setLocationSearch(window.location.search)
+              setScreen('work')
+            } else {setScreen('details')}
+          }} onDraftChange={store.setDraft} onInterrupt={() => void store.interrupt()} onSubmit={() => void store.submitDraft().catch(() => undefined)} projectLabel={projectLabel} sessionKey={transcriptSessionKey(companion.activeSession?.target?.backend_namespace ?? '', companion.activeSession?.target?.profile ?? selected.id, companion.activeSession?.target?.stored_session_id ?? companion.storedSessionId ?? 'canonical')} sessionTitle={companion.activeSession?.title ?? 'Conversation title unavailable'} streamingText={companion.streamingText} teammate={selected} turnStatus={companion.turnStatus} />
         : <ChooseTeammate onBack={() => setScreen('teammates')} />
     }
 
     if (screen === 'needs') {return <>
       {companion.phase !== 'ready' && <button className="button reconnect-button" disabled={companion.phase === 'recovering'} onClick={() => void store.recover()} type="button">Reconnect to verify work</button>}
       <OwnerSignIn baseUrl={companion.baseUrl} onOwnerConnect={store.connectOwner} onOwnerSignOut={store.signOutOwner} ownerConnected={companion.connectionMode === 'owner' && companion.phase === 'ready'} />
-      <WorkInbox {...work} onClose={store.work.close} onComment={store.work.comment} onDecision={store.work.decide} onGroupBy={(groupBy) => void store.work.setGroupBy(groupBy)} onOpen={(profile, id) => void store.work.open(profile, id)} onOpenArtifact={(profile, reference) => navigate('library', libraryAssetParams(profile, reference))} onPriority={store.work.setPriority} onRefresh={() => void store.work.refresh()} onRestorePriority={store.work.restoreRecommended} />
-      <NeedsMe items={companion.attentionItems} onOpen={(item) => { if (companion.phase === 'ready') {void store.openAttention(item).then(() => setScreen('conversation'))} }} onRefresh={() => void store.refreshAttention()} scope={companion.attentionScope} />
+      <WorkInbox {...work} onClose={store.work.close} onComment={store.work.comment} onDecision={store.work.decide} onGroupBy={(groupBy) => void store.work.setGroupBy(groupBy)} onOpen={(profile, id) => void store.work.open(profile, id)} onOpenArtifact={(profile, reference) => navigate('library', libraryAssetParams(profile, reference))} onOpenProject={(project) => navigate('work', new URLSearchParams({ view: 'work', section: 'projects', focus: project.source_id, focusProfile: project.profile, focusSource: project.backend_namespace }))} onOpenSourceSession={(source) => navigate('work', new URLSearchParams({ view: 'work', section: 'sessions', focus: source.id, focusProfile: source.profile, focusSource: source.backend }))} onPriority={store.work.setPriority} onRefresh={() => void store.work.refresh()} onRestorePriority={store.work.restoreRecommended} />
+      <NeedsMe items={runtimeAttention} onOpen={(item) => { if (companion.phase === 'ready') {void store.openAttention(item).then(() => setScreen('conversation'))} }} onRefresh={() => void store.refreshAttention()} scope={companion.attentionScope} />
     </>}
 
-    if (screen === 'work') {return <WorkDirectory {...(hasOriginalRouteCapability() ? { onOpenOriginal: openOriginalRoute } : {})} onBack={store.directory.clearDetail} onLoadOlder={(kind, profile) => void store.directory.loadOlder(kind, profile)} onLoadOlderHistory={() => void store.directory.loadOlderHistory()} onLoadOlderProjectSessions={() => void store.directory.loadOlderProjectSessions()} onNavigate={navigateParams} onRefresh={() => void store.directory.refresh()} params={new URLSearchParams(locationSearch)} snapshot={directory} />}
+    if (screen === 'work') {
+      const params = new URLSearchParams(locationSearch)
+
+      const directoryProps = {
+        ...(hasOriginalRouteCapability() ? { onOpenOriginal: openOriginalRoute } : {}),
+        onBack: store.directory.clearDetail,
+        onLoadOlder: (kind: 'sessions' | 'projects' | 'topics', profile: string) => void store.directory.loadOlder(kind, profile),
+        onLoadOlderHistory: () => void store.directory.loadOlderHistory(),
+        onLoadOlderProjectSessions: () => void store.directory.loadOlderProjectSessions(),
+        onNavigate: navigateParams,
+        onRefresh: () => void store.directory.refresh(),
+        params,
+        snapshot: directory
+      }
+
+      if (params.get('section') === 'projects' || params.get('section') === 'topics') {
+        return <WorkDirectory {...directoryProps} />
+      }
+
+      return <ChatsDirectory {...directoryProps} draft={companion.draft} onActivateSessionDraft={store.activateSessionDraft} onDraftChange={store.setDraft} onOpenSession={(item) => { store.activateSessionDraft({ backend_namespace: item.source, profile: item.profile, stored_session_id: item.id }); params.set('view', 'work'); params.set('chat', item.id); params.set('chatProfile', item.profile); params.set('chatSource', item.source); params.set('chatScroll', String(mainRef.current?.scrollTop ?? 0)); navigateParams(params) }} {...(companion.connectionMode === 'owner' ? { onSubmitSession: async (item, text) => { await store.openPersistedSession({ backend_namespace: item.source, profile: item.profile, stored_session_id: item.id }, text, item.title); setScreen('conversation') } } : {})} />
+    }
 
     if (screen === 'library') {return <Library gateway={store.library} onNavigate={navigateParams} params={new URLSearchParams(locationSearch)} refreshToken={libraryRefreshToken} relationshipContext={libraryRelationshipContext} />}
 
@@ -292,23 +344,23 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
       <aside className="left-rail">
         <Wordmark />
         <nav aria-label="Main navigation" className="primary-nav">
-          <NavButton active={screen === 'needs' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Needs Me" onClick={() => navigate('needs')} />
-          <NavButton active={screen === 'work'} icon="◇" label="Work" onClick={() => navigate('work')} />
-          <NavButton active={screen === 'library'} icon="▤" label="Library" onClick={() => navigate('library')} />
+          <NavButton active={screen === 'work'} icon="◇" label="Rozmowy" onClick={() => navigate('work')} />
+          <NavButton active={screen === 'needs' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Decyzje" onClick={() => navigate('needs')} />
+          <NavButton active={screen === 'library'} icon="▤" label="Pliki" onClick={() => navigate('library')} />
         </nav>
         <div className="rail-roster"><div className="rail-section-title"><span>Teammates</span><span>{companion.teammates.length}</span></div><Roster compact onSelect={openTeammate} teammates={companion.teammates} /></div>
         <div className="connection"><span aria-hidden="true" /><div><strong>Companion is ready</strong><small>{companion.teammates.length} teammates · v{__COMPANION_VERSION__}</small></div></div>
       </aside>
-      <main aria-label={screenTitles[screen]} className={`main-content${screen === 'conversation' ? ' main-content--conversation' : ''}`} ref={mainRef} tabIndex={-1}>
+      <main aria-label={screenTitles[screen]} className={`main-content${screen === 'conversation' || screen === 'work' && new URLSearchParams(locationSearch).has('chat') ? ' main-content--conversation' : ''}`} ref={mainRef} tabIndex={-1}>
         <h1 className="sr-only">Hermes Companion</h1>
         {screen !== 'conversation' && <header className="desktop-topbar"><div><span>Hermes Companion · v{__COMPANION_VERSION__}</span><strong>{screenTitles[screen]}</strong></div><span aria-label="Profile: Companion user" className="avatar avatar--user" role="img">CU</span></header>}
         {companion.error && <div className="decision-toast" role="alert">{companion.error}</div>}
         {content}
       </main>
       <nav aria-label="Mobile navigation" className="bottom-nav">
-        <NavButton active={screen === 'needs' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Needs Me" onClick={() => navigate('needs')} />
-        <NavButton active={screen === 'work'} icon="◇" label="Work" onClick={() => navigate('work')} />
-        <NavButton active={screen === 'library'} icon="▤" label="Library" onClick={() => navigate('library')} />
+        <NavButton active={screen === 'work'} icon="◇" label="Rozmowy" onClick={() => navigate('work')} />
+        <NavButton active={screen === 'needs' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Decyzje" onClick={() => navigate('needs')} />
+        <NavButton active={screen === 'library'} icon="▤" label="Pliki" onClick={() => navigate('library')} />
       </nav>
     </div>
   )
@@ -330,7 +382,7 @@ function Wordmark() { return <div className="wordmark"><span aria-hidden="true" 
 function BuildStamp() { return <small className="build-stamp">v{__COMPANION_VERSION__} · {__COMPANION_GIT_COMMIT__.slice(0, 8)}</small> }
 interface NavButtonProps { active: boolean; icon: string; label: string; onClick: () => void; badge?: string }
 
-function NavButton({ active, icon, label, onClick, badge }: NavButtonProps) { return <button aria-current={active ? 'page' : undefined} className={`nav-button${active ? ' nav-button--active' : ''}`} onClick={onClick} type="button"><span aria-hidden="true" className="nav-button__icon">{icon}</span><span>{label}</span>{badge && <span aria-label={`${badge} items`} className="nav-badge">{badge}</span>}</button> }
+function NavButton({ active, icon, label, onClick, badge }: NavButtonProps) { return <button aria-current={active ? 'page' : undefined} aria-label={badge ? `${label}, ${badge} items` : undefined} className={`nav-button${active ? ' nav-button--active' : ''}`} onClick={onClick} type="button"><span aria-hidden="true" className="nav-button__icon">{icon}</span><span>{label}</span>{badge && <span aria-hidden="true" className="nav-badge">{badge}</span>}</button> }
 
 function TeammatesHome({ teammates, attentionCount, onSelect, onNeedsMe, onQuickTask }: { teammates: readonly Teammate[]; attentionCount: number; onSelect: (teammate: Teammate) => void; onNeedsMe: () => void; onQuickTask: (teammateId: string, text: string) => void }) {
   const atlasId = teammates.find((teammate) => teammate.id === 'atlas')?.id ?? teammates[0]?.id ?? ''

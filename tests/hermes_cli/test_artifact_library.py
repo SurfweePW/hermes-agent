@@ -347,6 +347,31 @@ def test_manifest_cannot_redirect_retained_object_lookup(tmp_path):
     assert store.list_versions(item["artifact_id"]) == []
 
 
+def test_over_nested_manifest_is_ignored_without_hiding_valid_versions(tmp_path):
+    root = tmp_path / "root"; root.mkdir()
+    (root / "tampered.txt").write_bytes(b"tampered manifest")
+    (root / "valid.txt").write_bytes(b"valid manifest")
+    store = library(tmp_path, ("safe", "Safe", root))
+    tampered = store.pin_reviewed("safe", "tampered.txt", provenance="nest-here")
+    valid = store.pin_reviewed("safe", "valid.txt", provenance={"source": "fixture"})
+
+    manifest_path = store.storage_root / tampered["retained_manifest"]
+    raw = manifest_path.read_text(encoding="utf-8")
+    marker = '"provenance":"nest-here"'
+    assert marker in raw
+    nested = "[" * 2_000 + "null" + "]" * 2_000
+    manifest_path.write_text(
+        raw.replace(marker, f'"provenance":{nested}'),
+        encoding="utf-8",
+    )
+
+    restarted = library(tmp_path, ("safe", "Safe", root))
+    assert restarted.list_versions(tampered["artifact_id"]) == []
+    assert [item["version_id"] for item in restarted.list_versions(valid["artifact_id"])] == [
+        valid["version_id"]
+    ]
+
+
 def test_deterministic_export_and_private_permissions(tmp_path):
     root = tmp_path / "root"; root.mkdir()
     (root / "z.md").write_bytes(b"z")

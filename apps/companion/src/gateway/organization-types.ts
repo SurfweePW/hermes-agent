@@ -80,10 +80,11 @@ export interface NeedsMePriorityItem {
   evidence: string[]
   assessment: PriorityAssessment | null
   override: PriorityOverrideView | null
+  source_session?: { namespace: { backend_id: string; profile: string }; persisted_session_id: string; lineage_root_id: string; resolved_tip_id?: string | null }
 }
 export interface NeedsMePriorityGroup {
   id: string
-  group: { kind: NeedsMeGroupBy; id: string; name: string; collection: string | null; objective: string | null }
+  group: { kind: NeedsMeGroupBy; id: string; name: string; collection: string | null; objective: string | null; source_id?: string; namespace?: { backend_id: string; profile: string } }
   eligibility: PriorityEligibility
   eligible_action_count: number
   why_here: string
@@ -173,6 +174,11 @@ function item(value: unknown, profile: string): NeedsMePriorityItem {
     || !['work_id', 'candidate_id', 'why_here', 'next_step', 'trade_off'].every((key) => text(value[key]))
     || !eligibility(value.eligibility) || !nullableText(value.assessed_at) || !textArray(value.evidence)) {return malformed()}
 
+  if (value.source_session !== undefined && (!record(value.source_session) || !record(value.source_session.namespace)
+    || !['backend_id', 'profile'].every((key) => text((value.source_session as Record<string, unknown>).namespace && ((value.source_session as Record<string, unknown>).namespace as Record<string, unknown>)[key]))
+    || !['persisted_session_id', 'lineage_root_id'].every((key) => text((value.source_session as Record<string, unknown>)[key]))
+    || !((value.source_session as Record<string, unknown>).resolved_tip_id === undefined || nullableText((value.source_session as Record<string, unknown>).resolved_tip_id)))) {return malformed()}
+
   return { ...(value as unknown as NeedsMePriorityItem), assessment: assessment(value.assessment), override: override(value.override) }
 }
 
@@ -190,6 +196,14 @@ export function validateNeedsMePriorities(value: unknown, profile: string): Need
 
     if (!record(raw.group) || !['topic', 'session', 'project'].includes(raw.group.kind as string)
       || !text(raw.group.id) || !text(raw.group.name) || !nullableText(raw.group.collection) || !nullableText(raw.group.objective)) {return malformed()}
+
+    if (raw.group.kind === 'project') {
+      const hasSourceId = Object.prototype.hasOwnProperty.call(raw.group, 'source_id')
+      const hasNamespace = Object.prototype.hasOwnProperty.call(raw.group, 'namespace')
+
+      if (hasSourceId !== hasNamespace || (hasSourceId && (!text(raw.group.source_id) || !record(raw.group.namespace)
+        || !text(raw.group.namespace.backend_id) || !text(raw.group.namespace.profile)))) {return malformed()}
+    }
 
     const items = raw.items.map((entry) => item(entry, profile))
 

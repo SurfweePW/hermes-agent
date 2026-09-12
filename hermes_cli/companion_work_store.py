@@ -10,16 +10,16 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 import hashlib
 import json
-import os
 from pathlib import Path
 import sqlite3
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from hermes_constants import assert_named_profile_home_live
-
 STATES = frozenset({'ideas', 'in_progress', 'needs_me', 'done', 'declined'})
 ACTIONS = frozenset({'approve_preparation', 'request_changes', 'snooze', 'decline'})
+DECISION_OPTIONS = frozenset({'approve_preparation', 'request_changes', 'remind_in_2_hours'})
+DEFAULT_RECOMMENDED_ACTION = 'approve_preparation'
+assert DEFAULT_RECOMMENDED_ACTION in DECISION_OPTIONS
 TRACKER_STATES = frozenset({
     'linked_awaiting_triage', 'preparing', 'prepared', 'blocked', 'status_unavailable',
 })
@@ -206,6 +206,11 @@ class WorkStore:
         self.path.chmod(0o600)
 
     def _ensure_profile_available(self):
+        # Imported here, not at module scope: tui_gateway.server imports this module while
+        # tests sandbox hermes_constants in sys.modules, and a module-scope import of a
+        # symbol those sandboxes do not provide fails the whole import chain.
+        from hermes_constants import assert_named_profile_home_live
+
         try:
             assert_named_profile_home_live(self.path.parent)
             if not self.path.parent.is_dir():
@@ -272,6 +277,10 @@ class WorkStore:
                     handoff_reconciliation_required=(status == 'status_unavailable' and not link),
                     completion_evidence=completion_evidence,
                     publication_status='not_authorized',
+                    # This is a server-owned policy result, not producer text or
+                    # client-side ordering. The decision card must highlight
+                    # exactly one option from its bounded three-action contract.
+                    recommended_action=DEFAULT_RECOMMENDED_ACTION,
                     attention_key=f"{self.clock().astimezone(self.timezone).date()}:{row['revision']}:{row['attention_generation']}",
                     approval=json.loads(row['approval']) if row['approval'] else None)
 
@@ -363,7 +372,9 @@ class WorkStore:
 
     def comment(self, card_id, body, idempotency_key, *, human_identity=None):
         card_id = text(card_id, 'id', 100)
-        actor = 'human' if human_identity else 'agent'
+        if not human_identity:
+            raise WorkError('authenticated dashboard owner login required', 4403)
+        actor = 'human'
         request = {'id': card_id, 'text': text(body, 'text'), 'actor': actor}
         with self._tx() as db:
             replay = self._replay(db, 'comment', idempotency_key, request)

@@ -11,7 +11,7 @@ const identity = { profile: 'atlas', backend_namespace: 'desktop-db', root_id: '
 
 const project = {
   id: 'project-1', name: 'Project one', kind: 'desktop_project', archived: false,
-  profile: 'atlas', backend_namespace: 'desktop-db', session_count: 1, last_active: 1
+  profile: 'atlas', backend_namespace: 'desktop-db', session_count: 1, session_ids: ['session-1'], last_active: 1
 }
 
 function page<T extends Record<string, unknown>>(extra: T) {
@@ -41,6 +41,20 @@ describe('Companion directory response validation', () => {
     expect(() => validateCompanionSessionHistory(raw, 'atlas', 'session-1', 'forged')).toThrow(/Malformed/)
   })
 
+  it('retains safe persisted tool and internal event classifications', () => {
+    const raw = page({
+      identity,
+      coverage: 'complete',
+      items: [
+        { kind: 'internal_event', event: 'tool_result', label: 'Tool completed: terminal', collapsed: true, row_id: 1, timestamp: 1 },
+        { kind: 'internal_event', event: 'compaction_summary', label: 'Earlier context summary', collapsed: true, row_id: 2, timestamp: 2 },
+        { kind: 'internal_event', event: 'internal_notification', label: 'Internal notification', collapsed: true, row_id: 3, timestamp: 3 }
+      ]
+    })
+
+    expect(validateCompanionSessionHistory(raw, 'atlas', 'session-1', 'desktop-db').entries.map(({ kind }) => kind)).toEqual(['tool', 'compression', 'internal'])
+  })
+
   it('validates project list and detail pagination shapes directly', () => {
     const list = page({
       profile: 'atlas', backend_namespace: 'desktop-db', coverage: { named_projects: 'complete', membership: 'complete' }, items: [project]
@@ -52,8 +66,9 @@ describe('Companion directory response validation', () => {
       membership: { items: [{ id: 'session-1', title: 'Saved', source: 'desktop', started_at: 1, last_active: 2, message_count: 3 }], has_more: false, next_cursor: null, coverage: 'complete' }
     })
 
-    expect(validateCompanionProjectList(list, 'atlas').projects[0].id).toBe('project-1')
+    expect(validateCompanionProjectList(list, 'atlas').projects[0]).toMatchObject({ id: 'project-1', session_ids: ['session-1'] })
     expect(validateCompanionProjectDetail(detail, 'atlas', 'project-1')).toMatchObject({ membership_has_more: false, sessions: [{ id: 'session-1' }] })
+    expect(() => validateCompanionProjectList({ ...list, items: [{ ...project, session_ids: ['session-1', 'session-1'] }] }, 'atlas')).toThrow(/Malformed/)
     expect(() => validateCompanionProjectList({ ...list, items: [{ ...project, backend_namespace: 'forged' }] }, 'atlas')).toThrow(/Malformed/)
     expect(() => validateCompanionProjectDetail({ ...detail, item: { ...project, backend_namespace: 'forged' } }, 'atlas', 'project-1')).toThrow(/Malformed/)
     expect(() => validateCompanionProjectDetail({ ...detail, membership: { ...detail.membership, has_more: true, next_cursor: null } }, 'atlas', 'project-1')).toThrow(/Malformed/)

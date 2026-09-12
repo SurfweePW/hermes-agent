@@ -1,8 +1,11 @@
-import { type KeyboardEvent, useMemo, useState } from 'react'
+import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { CompanionOriginalRoute } from '../../gateway/original-route'
-import type { CompanionProject, CompanionSession } from '../../gateway/types'
+import type { CompanionProject, CompanionSession, CompanionSessionTarget } from '../../gateway/types'
+import { MessageComposer } from '../conversation/message-composer'
 import { MessageContent } from '../conversation/message-content'
+import { StatusRow } from '../conversation/status-row'
+import { transcriptSessionKey, useTranscriptScroll } from '../conversation/transcript-scroll'
 
 import type { DirectorySnapshot, DirectoryStatus } from './directory-store'
 import { EntityWork, TopicDetailView, TopicsDirectory } from './topics-directory'
@@ -27,11 +30,191 @@ const selected = (params: URLSearchParams, key: string) => new Set(params.getAll
 const statusLabel = (status: DirectoryStatus) => status === 'unsupported' ? 'Backend update required' : status[0].toUpperCase() + status.slice(1)
 const domSlug = (value: string) => value.toLocaleLowerCase().normalize('NFKD').replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'item'
 const tabId = (prefix: string, kind: 'tab' | 'panel', value: string) => `${domSlug(prefix)}-${kind}-${domSlug(value)}`
+const chatProfileStorageKey = 'hermes.companion.chats.profile'
+const chatKey = (source: string, profile: string, id: string) => JSON.stringify([source, profile, id])
+const profileLabel = (profile: string) => profile ? profile[0].toLocaleUpperCase() + profile.slice(1) : 'Agent'
 
 const enumParam = <T extends string>(params: URLSearchParams, key: string, allowed: readonly T[], fallback: T): T => {
   const value = params.get(key)
 
   return value && allowed.includes(value as T) ? value as T : fallback
+}
+
+interface ChatsDirectoryProps extends DirectoryProps {
+  onOpenSession(item: CompanionSession): void
+  onSubmitSession?(item: CompanionSession, text: string): Promise<void>
+  draft?: string
+  onDraftChange?(draft: string): void
+  onActivateSessionDraft?(target: CompanionSessionTarget): void
+}
+
+function safeStoredChatProfile(): string | null {
+  try { return window.localStorage.getItem(chatProfileStorageKey) } catch { return null }
+}
+
+function persistChatProfile(profile: string) {
+  try { window.localStorage.setItem(chatProfileStorageKey, profile) } catch { /* Presentation preference only. */ }
+}
+
+export function ChatsDirectory(props: ChatsDirectoryProps) {
+  const profiles = [...new Set(props.snapshot.coverage.map((item) => item.profile))].sort()
+  const requestedProfile = props.params.get('agent') ?? safeStoredChatProfile()
+  const profile = requestedProfile && profiles.includes(requestedProfile) ? requestedProfile : 'all'
+  const mode = enumParam(props.params, 'chatView', ['projects', 'recent'] as const, 'projects')
+  const query = props.params.get('chatQ') ?? ''
+  const legacySession = props.params.get('section') === 'sessions'
+  const focusedId = props.params.get('chat') ?? (legacySession ? props.params.get('focus') : null)
+  const focusedProfile = props.params.get('chatProfile') ?? (legacySession ? props.params.get('focusProfile') : null)
+  const focusedSource = props.params.get('chatSource') ?? (legacySession ? props.params.get('focusSource') : null)
+  const focusedSessionKey = focusedId && focusedProfile && focusedSource ? chatKey(focusedSource, focusedProfile, focusedId) : null
+  const [expanded, setExpanded] = useState<Set<string>>(() => {
+    try {
+      const value = JSON.parse(props.params.get('chatExpanded') ?? '[]') as unknown
+
+      return new Set(Array.isArray(value) && value.every((item) => typeof item === 'string') ? value : [])
+    } catch { return new Set() }
+  })
+  const draft = props.draft ?? ''
+  const [submittingSessions, setSubmittingSessions] = useState<Set<string>>(() => new Set())
+  const [submitErrors, setSubmitErrors] = useState<Map<string, string>>(() => new Map())
+  const rootRef = useRef<HTMLElement>(null)
+  const listScroll = useRef(Number(props.params.get('chatScroll')) || 0)
+  const submitting = focusedSessionKey ? submittingSessions.has(focusedSessionKey) : false
+  const submitError = focusedSessionKey ? submitErrors.get(focusedSessionKey) ?? null : null
+
+  const setParams = (change: Record<string, string | null>) => {
+    const next = new URLSearchParams(props.params)
+
+    for (const [key, value] of Object.entries(change)) { if (value === null) { next.delete(key) } else { next.set(key, value) } }
+    props.onNavigate(next)
+  }
+
+  useEffect(() => {
+    if (focusedId) {return}
+    const top = Number(props.params.get('chatScroll')) || 0
+    requestAnimationFrame(() => {
+      const main = rootRef.current?.closest('main')
+
+      if (main) {main.scrollTop = top} else {window.scrollTo({ top })}
+    })
+  }, [focusedId])
+
+  useEffect(() => {
+    if (!focusedId || !focusedProfile || !focusedSource) {return}
+    const item = props.snapshot.selectedSession?.id === focusedId
+      && props.snapshot.selectedSession.profile === focusedProfile
+      && props.snapshot.selectedSession.source === focusedSource
+      ? props.snapshot.selectedSession
+      : props.snapshot.sessions.find((candidate) => candidate.id === focusedId && candidate.profile === focusedProfile && candidate.source === focusedSource)
+
+    if (item) {props.onActivateSessionDraft?.({ backend_namespace: item.source, profile: item.profile, stored_session_id: item.id })}
+  }, [focusedId, focusedProfile, focusedSource, props.onActivateSessionDraft, props.snapshot.selectedSession, props.snapshot.sessions])
+
+  const matchingSessions = useMemo(() => props.snapshot.sessions
+    .filter((item) => profile === 'all' || item.profile === profile)
+    .filter((item) => item.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
+      || item.project?.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase()))
+    .sort((left, right) => (right.last_active ?? '').localeCompare(left.last_active ?? '') || left.title.localeCompare(right.title)), [profile, props.snapshot.sessions, query])
+
+  const matchingProjects = useMemo(() => props.snapshot.projects
+    .filter((item) => profile === 'all' || item.profile === profile)
+    .filter((item) => item.title.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())
+      || matchingSessions.some((session) => session.project?.id === item.id && session.profile === item.profile && session.source === item.source))
+    .sort((left, right) => (right.last_active ?? '').localeCompare(left.last_active ?? '') || left.title.localeCompare(right.title)), [matchingSessions, profile, props.snapshot.projects, query])
+
+  const openSession = (item: CompanionSession) => {
+    listScroll.current = rootRef.current?.closest('main')?.scrollTop ?? window.scrollY
+    props.onOpenSession(item)
+  }
+
+  const goBack = () => {
+    props.onBack()
+    setParams({ chat: null, chatProfile: null, chatSource: null })
+    requestAnimationFrame(() => {
+      const main = rootRef.current?.closest('main')
+
+      if (main) { main.scrollTop = listScroll.current } else { window.scrollTo({ top: listScroll.current }) }
+    })
+  }
+
+  const submitSession = (item: CompanionSession) => {
+    if (!props.onSubmitSession) {return}
+    const submissionKey = chatKey(item.source, item.profile, item.id)
+
+    if (submittingSessions.has(submissionKey)) {return}
+    setSubmitErrors((current) => {
+      const next = new Map(current)
+      next.delete(submissionKey)
+      return next
+    })
+    setSubmittingSessions((current) => new Set(current).add(submissionKey))
+    void props.onSubmitSession(item, draft)
+      .catch(() => setSubmitErrors((current) => new Map(current).set(submissionKey, 'Nie udało się wysłać wiadomości. Treść pozostała w polu — spróbuj ponownie.')))
+      .finally(() => setSubmittingSessions((current) => {
+        const next = new Set(current)
+        next.delete(submissionKey)
+        return next
+      }))
+  }
+
+  if (focusedId && focusedProfile && focusedSource) {
+    const selectedSession = props.snapshot.selectedSession
+    const selectedMatches = selectedSession?.id === focusedId && selectedSession.profile === focusedProfile && selectedSession.source === focusedSource
+    const item = selectedMatches ? selectedSession : props.snapshot.sessions.find((session) => session.id === focusedId && session.profile === focusedProfile && session.source === focusedSource)
+
+    const project = item?.project === null ? 'Bez projektu' : item?.project?.title ?? 'Projekt nieznany'
+
+    return <section aria-labelledby="saved-conversation-title" className="chats-screen chats-screen--conversation" ref={rootRef}>
+      <header className="chat-history-head"><button aria-label="Wróć do rozmów" className="conversation-back" onClick={goBack} type="button">←</button><div><h2 id="saved-conversation-title">{item?.title || 'Zapisywana rozmowa'}</h2><p className="kicker">{profileLabel(focusedProfile)} · {project}</p></div></header>
+      <div className="chat-history-body">
+        {props.snapshot.history ? <><DetailCoverage coverage={props.snapshot.history.coverage} label="Zakres historii" /><History onLoadOlder={props.onLoadOlderHistory} snapshot={props.snapshot} /></> : <Unavailable copy={props.snapshot.detailMessage ?? 'Pobieramy istniejącą historię z autorytatywnego źródła.'} title={props.snapshot.detailStatus === 'error' ? 'Nie udało się wczytać historii' : 'Ładowanie historii…'} />}
+      </div>
+      <MessageComposer disabled={!props.onSubmitSession} draft={draft} hint="Enter dodaje nową linię · Ctrl/Cmd+Enter wysyła" id="chat-session-draft" label={`Wiadomość do ${profileLabel(focusedProfile)}`} onDraftChange={(value) => props.onDraftChange?.(value)} onSubmit={() => {if (item) {submitSession(item)}}} placeholder={`Wiadomość do ${profileLabel(focusedProfile)}…`} sendLabel="Wyślij wiadomość" submitting={submitting} />
+      {submitError && <p className="chat-composer-status" role="alert">{submitError}</p>}
+      {!props.onSubmitSession && <p className="chat-composer-status" role="status">Historia jest aktywna do odczytu. Wysyłanie do tej zapisanej sesji zostanie podłączone przez istniejący gateway.</p>}
+    </section>
+  }
+
+  const sessionStates = props.snapshot.coverage.map((item) => item.sessionStatus)
+  const loading = sessionStates.length === 0 || sessionStates.some((item) => item === 'loading')
+  const failed = sessionStates.some((item) => item === 'error' || item === 'offline' || item === 'unsupported')
+  const complete = props.snapshot.coverage.length > 0 && props.snapshot.coverage.every((item) => item.sessionStatus === 'ready' && item.sessionComplete && !item.sessionsHasMore
+    && (mode === 'recent' || item.projectStatus === 'ready' && item.projectComplete && !item.projectsHasMore))
+  const emptyTitle = loading ? 'Ładowanie rozmów…' : failed || !complete ? 'Niepełne dane rozmów' : query ? 'Brak pasujących rozmów' : 'Brak rozmów'
+  const emptyCopy = loading ? 'Czekamy na autoryzowane źródła.' : failed || !complete ? 'Co najmniej jedno źródło nie potwierdziło pełnej listy.' : query ? 'Zmień nazwę lub zakres agenta.' : 'Autoryzowane źródła zwróciły kompletną pustą listę.'
+  const unassigned = matchingSessions.filter((item) => item.project === null)
+  const unknownMembership = matchingSessions.filter((item) => item.project === undefined)
+  const unmatched = matchingSessions.filter((item) => item.project && !matchingProjects.some((project) => project.id === item.project?.id && project.profile === item.profile && project.source === item.source))
+  const pagedProfiles = props.snapshot.coverage.filter((item) => item.sessionsHasMore && (profile === 'all' || item.profile === profile))
+  const pagedProjectProfiles = props.snapshot.coverage.filter((item) => item.projectsHasMore && (profile === 'all' || item.profile === profile))
+
+  return <section aria-labelledby="chats-title" className="chats-screen" ref={rootRef}>
+    <div className="directory-heading"><div><p className="kicker">Istniejące zapisane sesje</p><h2 id="chats-title">Rozmowy</h2><p className="screen-lede">Otwórz historię bez tworzenia nowej sesji i bez wznawiania jej przy samym wejściu.</p></div><button className="button" onClick={props.onRefresh} type="button">Odśwież</button></div>
+    <div className="chat-controls"><label>Agent<select aria-label="Agent" onChange={(event) => { const value = event.target.value; persistChatProfile(value); setParams({ agent: value === 'all' ? null : value }) }} value={profile}><option value="all">Wszystkie</option>{profiles.map((item) => <option key={item} value={item}>{profileLabel(item)}</option>)}</select></label><label className="chat-search">Szukaj rozmów<input aria-label="Szukaj rozmów" onChange={(event) => setParams({ chatQ: event.target.value || null })} placeholder="Nazwa rozmowy lub projektu" type="search" value={query} /></label></div>
+    <TabList className="chat-view-tabs" idPrefix="chat-view" label="Widok rozmów" onSelect={(value) => setParams({ chatView: value === 'projekty' ? 'projects' : 'recent' })} selected={mode === 'projects' ? 'projekty' : 'ostatnie'} tabs={['projekty', 'ostatnie']} />
+    {mode === 'recent' ? (matchingSessions.length ? <div className="chat-session-list">{matchingSessions.map((item) => <ChatSessionRow allProfiles={profile === 'all'} item={item} key={chatKey(item.source, item.profile, item.id)} onOpen={() => openSession(item)} />)}</div> : <Unavailable copy={emptyCopy} title={emptyTitle} />) : <div className="chat-project-list">
+      {matchingProjects.map((project) => {
+        const key = chatKey(project.source, project.profile, project.id)
+        const projectSessions = matchingSessions.filter((item) => item.project?.id === project.id && item.profile === project.profile && item.source === project.source)
+        const isExpanded = expanded.has(key)
+
+        return <section className="chat-project" key={key}><button aria-expanded={isExpanded} className="chat-project__toggle" onClick={() => setExpanded((current) => { const next = new Set(current); if (next.has(key)) { next.delete(key) } else { next.add(key) }; setParams({ chatExpanded: next.size ? JSON.stringify([...next]) : null }); return next })} type="button"><span><strong>{project.title}</strong><small>{profile === 'all' ? `${project.profile} · ` : ''}{projectSessions.length} rozmów{project.archived ? ' · Archiwum' : ''}</small></span><b aria-hidden="true">{isExpanded ? '−' : '+'}</b></button>{isExpanded && (projectSessions.length ? <div className="chat-session-list">{projectSessions.map((item) => <ChatSessionRow allProfiles={profile === 'all'} item={item} key={chatKey(item.source, item.profile, item.id)} onOpen={() => openSession(item)} />)}</div> : <p className="chat-project__empty">Brak rozmów</p>)}</section>
+      })}
+      {unassigned.length > 0 && <section className="chat-project chat-project--ungrouped"><h3>Bez projektu</h3><div className="chat-session-list">{unassigned.map((item) => <ChatSessionRow allProfiles={profile === 'all'} item={item} key={chatKey(item.source, item.profile, item.id)} onOpen={() => openSession(item)} />)}</div></section>}
+      {unknownMembership.length > 0 && <section className="chat-project chat-project--ungrouped"><h3>Przypisanie projektu nieznane</h3><div className="chat-session-list">{unknownMembership.map((item) => <ChatSessionRow allProfiles={profile === 'all'} item={item} key={chatKey(item.source, item.profile, item.id)} onOpen={() => openSession(item)} />)}</div></section>}
+      {unmatched.length > 0 && <section className="chat-project chat-project--ungrouped"><h3>Projekt poza bieżącą listą</h3><div className="chat-session-list">{unmatched.map((item) => <ChatSessionRow allProfiles={profile === 'all'} item={item} key={chatKey(item.source, item.profile, item.id)} onOpen={() => openSession(item)} />)}</div></section>}
+      {!matchingProjects.length && !unassigned.length && !unknownMembership.length && !unmatched.length && <Unavailable copy={emptyCopy} title={emptyTitle} />}
+    </div>}
+    <div className="load-older">{pagedProfiles.map((item) => <button className="button" key={item.profile} onClick={() => props.onLoadOlder('sessions', item.profile)} type="button">Wczytaj starsze od {profileLabel(item.profile)}</button>)}</div>
+    {mode === 'projects' && <div className="load-older">{pagedProjectProfiles.map((item) => <button className="button" key={item.profile} onClick={() => props.onLoadOlder('projects', item.profile)} type="button">Wczytaj więcej projektów od {profileLabel(item.profile)}</button>)}</div>}
+    {!complete && !loading && matchingSessions.length > 0 && <p className="coverage-warning" role="status">Lista może być niepełna. Wyświetlamy wyłącznie rekordy potwierdzone przez dostępne źródła.</p>}
+  </section>
+}
+
+function ChatSessionRow({ item, allProfiles, onOpen }: { item: CompanionSession; allProfiles: boolean; onOpen(): void }) {
+  const preview = item.message_count === null ? 'Podgląd wiadomości niedostępny' : item.message_count === 0 ? 'Pusta zapisana rozmowa' : `${item.message_count} wiadomości · ${item.origin ?? 'źródło niezgłoszone'}`
+
+  return <button className="chat-session-row" onClick={onOpen} type="button"><span><strong>{item.title || 'Rozmowa bez nazwy'}</strong><small>{preview}</small></span><span><small>{item.status ?? 'Status nieznany'}{allProfiles ? ` · ${item.profile}` : ''}</small><time dateTime={item.last_active ?? undefined}>{displayDate(item.last_active)}</time></span><b aria-hidden="true">→</b></button>
 }
 
 export function WorkDirectory(props: DirectoryProps) {
@@ -299,9 +482,27 @@ function TabList({ tabs, selected, onSelect, idPrefix, className, label }: { tab
 
 function DetailCoverage({ coverage, label }: { coverage: { complete: boolean; freshness: string | null; message: string | null }; label: string }) {return <div className="coverage-panel" role="status"><strong>{label}: {coverage.complete ? 'Complete' : 'Incomplete'}</strong><span>{coverage.freshness ? `Fresh ${displayDate(coverage.freshness)}` : 'Freshness unknown'}</span><span>{coverage.message ?? 'No source warnings reported.'}</span></div>}
 
-function History({ snapshot, onLoadOlder }: { snapshot: DirectorySnapshot; onLoadOlder(): void }) {if (!snapshot.history) {return <DetailLoading snapshot={snapshot} />};
+function History({ snapshot, onLoadOlder }: { snapshot: DirectorySnapshot; onLoadOlder(): void }) {
+  const history = snapshot.history
+  const itemIds = useMemo(() => history?.entries.map((entry) => entry.id) ?? [], [history?.entries])
+  const contentVersion = useMemo(() => history?.entries.map((entry) => `${entry.id}:${entry.kind}:${entry.role ?? ''}:${entry.label ?? ''}:${entry.content}`).join('\u0000') ?? '', [history?.entries])
+  const identity = history ? transcriptSessionKey(history.source, history.profile, history.session_id) : 'history-unavailable'
+  const transcriptScroll = useTranscriptScroll(identity, itemIds, contentVersion)
 
- return <><div className="history-flow">{snapshot.history.entries.map((entry) => entry.kind === 'internal' ? <details className="internal-event" key={entry.id}><summary>{entry.label ?? 'Internal event'}{entry.occurred_at ? ` · ${displayDate(entry.occurred_at)}` : ''}</summary>{entry.content && <p>{entry.content}</p>}</details> : entry.kind === 'compression' ? <aside aria-label="Compression summary" className="compression-summary" key={entry.id}><strong>Compression summary</strong><span>Generated context carried forward from earlier history</span><MessageContent role="system" text={entry.content} /></aside> : <article className={`history-message history-message--${entry.role ?? 'system'}`} key={entry.id}><small>{entry.role === 'user' ? 'You' : entry.role === 'assistant' ? 'Assistant' : 'System'}</small><MessageContent role={entry.role ?? 'system'} text={entry.content} /></article>)}</div>{snapshot.history.has_more && <button className="button" onClick={onLoadOlder} type="button">Load older history</button>}</>}
+  if (!history) {return <DetailLoading snapshot={snapshot} />}
+
+  return <div className="history-shell">
+    <div className="history-transcript" onScroll={transcriptScroll.onScroll} ref={transcriptScroll.viewportRef}>
+      {history.has_more && <button className="button history-load-older" onClick={onLoadOlder} type="button">Load older history</button>}
+      <div className="history-flow">{history.entries.map((entry) => <div data-transcript-id={entry.id} key={entry.id}>{entry.kind !== 'message'
+        ? <StatusRow kind={entry.kind} label={entry.label} payload={entry.content} state={entry.kind === 'tool' ? 'Recorded' : null} />
+        : <article className={`history-message history-message--${entry.role ?? 'system'}`}><small>{entry.role === 'user' ? 'You' : entry.role === 'assistant' ? 'Assistant' : 'System'}</small><MessageContent role={entry.role ?? 'system'} text={entry.content} /></article>}
+      </div>)}</div>
+      <div aria-hidden="true" ref={transcriptScroll.endRef} />
+    </div>
+    {transcriptScroll.showJumpToLatest && <button className="jump-to-latest jump-to-latest--history" onClick={transcriptScroll.jumpToLatest} type="button">↓ New messages</button>}
+  </div>
+}
 
 function Refs({ items, empty }: { items: readonly { id: string; title: string; status?: string }[]; empty: string }) {return items.length ? <ul className="reference-list">{items.map((item) => <li key={item.id}><strong>{item.title}</strong>{item.status && <span>{item.status}</span>}</li>)}</ul> : <Unavailable copy="The configured source reported no verified links." title={empty} />}
 

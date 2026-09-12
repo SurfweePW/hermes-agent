@@ -179,7 +179,8 @@ _LONG_HANDLERS = frozenset({
     "bot_relay.deliver", "bot_relay.reply", "image.generate", "projects.discover_repos",
     "companion.projects.list", "companion.projects.get", "companion.library.list",
     "companion.library.get", "companion.library.preview", "companion.library.download",
-    "companion.sessions.list", "companion.sessions.history",
+    "companion.sessions.list", "companion.sessions.history", "companion.sessions.create",
+    "companion.sessions.reconcile",
     "projects.record_repos", "projects.for_cwd", "projects.tree", "projects.project_sessions",
     "setup.runtime_check", "setup.status", "voice.toggle", "voice.record", "voice.tts", "wake.start",
     "wake.status", "session.active_list", "session.branch", "session.compress", "session.list",
@@ -1047,7 +1048,10 @@ def _start_agent_build(sid: str, session: dict) -> None:
                 from tui_gateway.entry import ensure_mcp_discovery_started
                 ensure_mcp_discovery_started()
             except Exception:
-                logger.warning("MCP discovery startup failed", exc_info=True)
+                if current.get(_CREATION_AUTHORITY_KEY) is not None:
+                    logger.warning("MCP discovery startup failed during durable creation")
+                else:
+                    logger.warning("MCP discovery startup failed", exc_info=True)
             try:
                 agent = _make_agent(sid, key, **_deferred_build_agent_kwargs(current, session_db))
             finally:
@@ -1058,8 +1062,12 @@ def _start_agent_build(sid: str, session: dict) -> None:
             notify_registered = _wire_session_agent(sid, key, agent)
             _announce_built_agent(sid, key, current, agent)
         except Exception as e:
-            current["agent_error"] = str(e)
-            _emit("error", sid, {"message": f"agent init failed: {e}"})
+            if current.get(_CREATION_AUTHORITY_KEY) is not None:
+                current["agent_error"] = "Durable creation failed."
+                _emit("error", sid, {"message": "Durable creation failed."})
+            else:
+                current["agent_error"] = str(e)
+                _emit("error", sid, {"message": f"agent init failed: {e}"})
         finally:
             _finish_agent_build(
                 sid, key, current, notify_registered=notify_registered, scopes=scopes, session_db=session_db)
@@ -1075,6 +1083,8 @@ def _sess_nowait(params, rid):
     sid = params.get("session_id") or ""
     s = _sessions.get(sid)
     if s:
+        if not _provisional_creation_access_allowed(s):
+            return (None, _err(rid, 4090, "session creation is still pending"))
         return (s, None)
     # Stale runtime id (reaped/evicted/TTL): the client should session.resume the STORED id. Logged so
     # "message vanished" reads as "arrived and was rejected".
@@ -3234,8 +3244,10 @@ from . import (  # noqa: E402
     methods_browser_control as _methods_browser_control, methods_bot_relay as _methods_bot_relay,
     methods_complete as _methods_complete, methods_config as _methods_config,
     methods_config_set as _methods_config_set, methods_images as _methods_images,
-    methods_profiles as _methods_profiles, methods_prompt as _methods_prompt, methods_session as _methods_session,
-    methods_tools as _methods_tools, prompt_turn as _prompt_turn, billing_view as _billing_view,
+    methods_profiles as _methods_profiles, methods_prompt as _methods_prompt,
+    methods_session_create as _methods_session_create, methods_session_resume as _methods_session_resume,
+    methods_session as _methods_session, methods_tools as _methods_tools,
+    prompt_turn as _prompt_turn, billing_view as _billing_view,
     methods_projects as _methods_projects, methods_session_foreign as _methods_session_foreign,
     methods_session_control as _methods_session_control, methods_work as _methods_work,
     methods_companion_library as _methods_companion_library,
@@ -3249,7 +3261,8 @@ for _m in (
     _session_compression, _change_watcher, _tool_progress, _session_notifications,
     _prompt_attachments, _session_history, _agent_callbacks, _session_auto_continue,
     _methods_complete_helpers, _methods_slash, _methods_voice, _methods_browser,
-    _methods_browser_control, _methods_session, _methods_prompt, _methods_config,
+    _methods_browser_control, _methods_session_create, _methods_session_resume, _methods_session,
+    _methods_prompt, _methods_config,
     _methods_config_set, _methods_complete, _methods_tools, _methods_profiles, _methods_images,
     _methods_bot_relay, _prompt_turn, _billing_view, _methods_projects, _methods_session_foreign,
     _methods_session_control, _methods_work,

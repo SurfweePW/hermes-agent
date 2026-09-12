@@ -268,6 +268,75 @@ class SessionSessionsMixin:
         conn.execute(_INHERIT_PARENT_META_SQL, (session_id,))
         conn.execute(_INHERIT_PARENT_ROUTING_SQL, (session_id,))
 
+    def _insert_session_row_tx(
+        self, conn, session_id: str, source: str, model: str = None,
+        model_config: Dict[str, Any] = None, system_prompt: str = None,
+        user_id: str = None, session_key: Optional[str] = None, chat_id: str = None,
+        chat_type: str = None, thread_id: str = None, parent_session_id: str = None,
+        cwd: str = None, profile_name: Optional[str] = None, git_repo_root: str = None,
+        origin_json: str = None, display_name: str = None, *, started_at: float = None,
+    ) -> None:
+        """Insert/upsert one normalized row using the caller's transaction.
+
+        This primitive deliberately does not begin, commit, or retry a transaction.  It is
+        shared by the ordinary one-row wrapper and operations which must publish a session
+        row together with other state in one SQLite commit.
+        """
+        if not (profile_name or "").strip():
+            profile_name = self._own_profile_name()
+        system_prompt_hash = self._store_system_prompt(conn, system_prompt)
+        conn.execute(
+            """INSERT INTO sessions (
+               id, source, user_id, session_key, chat_id, chat_type, thread_id,
+               model, model_config, system_prompt, system_prompt_hash,
+               parent_session_id, cwd, profile_name, git_repo_root,
+               origin_json, display_name, started_at
+            )
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                   model = COALESCE(sessions.model, excluded.model),
+                   model_config = CASE
+                       WHEN excluded.model_config IS NOT NULL
+                            AND json_type(
+                                sessions.model_config, '$._reset_from'
+                            ) IS NOT NULL
+                            AND json_remove(
+                                sessions.model_config, '$._reset_from'
+                            ) = '{}'
+                       THEN json_set(
+                           excluded.model_config,
+                           '$._reset_from',
+                           json_extract(
+                               sessions.model_config, '$._reset_from'
+                           )
+                       )
+                       ELSE COALESCE(
+                           sessions.model_config, excluded.model_config
+                       )
+                   END,
+                   system_prompt_hash = COALESCE(
+                       sessions.system_prompt_hash,
+                       excluded.system_prompt_hash
+                   ),
+                   system_prompt = CASE
+                       WHEN sessions.system_prompt_hash IS NULL
+                            AND excluded.system_prompt_hash IS NOT NULL
+                       THEN NULL
+                       ELSE sessions.system_prompt
+                   END,
+""" + _UPSERT_KEEP_EXISTING_SQL,
+            (
+                session_id, source, user_id, session_key, chat_id, chat_type, thread_id, model,
+                json.dumps(model_config) if model_config else None, system_prompt_hash,
+                parent_session_id, cwd, profile_name, git_repo_root, origin_json, display_name,
+                time.time() if started_at is None else started_at,
+            ),
+        )
+        if system_prompt_hash is not None:
+            self._delete_unreferenced_system_prompts(conn)
+        if parent_session_id:
+            self._inherit_parent_session_metadata(conn, session_id)
+
     def _insert_session_row(
         self, session_id: str, source: str, model: str = None, model_config: Dict[str, Any] = None,
         system_prompt: str = None, user_id: str = None, session_key: Optional[str] = None,
@@ -301,61 +370,16 @@ class SessionSessionsMixin:
         sidebar even though its transcript is intact (#99222). Stores outside the profile tree (explicit
         ``db_path`` in tests, ad-hoc copies) derive nothing and keep NULL — never guess.
         """
-        if not (profile_name or "").strip():
-            profile_name = self._own_profile_name()
+        started_at = time.time()
         def _do(conn):
-            system_prompt_hash = self._store_system_prompt(conn, system_prompt)
-            conn.execute(
-                """INSERT INTO sessions (
-                   id, source, user_id, session_key, chat_id, chat_type, thread_id,
-                   model, model_config, system_prompt, system_prompt_hash,
-                   parent_session_id, cwd, profile_name, git_repo_root,
-                   origin_json, display_name, started_at
-                )
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?)
-                   ON CONFLICT(id) DO UPDATE SET
-                       model = COALESCE(sessions.model, excluded.model),
-                       model_config = CASE
-                           WHEN excluded.model_config IS NOT NULL
-                                AND json_type(
-                                    sessions.model_config, '$._reset_from'
-                                ) IS NOT NULL
-                                AND json_remove(
-                                    sessions.model_config, '$._reset_from'
-                                ) = '{}'
-                           THEN json_set(
-                               excluded.model_config,
-                               '$._reset_from',
-                               json_extract(
-                                   sessions.model_config, '$._reset_from'
-                               )
-                           )
-                           ELSE COALESCE(
-                               sessions.model_config, excluded.model_config
-                           )
-                       END,
-                       system_prompt_hash = COALESCE(
-                           sessions.system_prompt_hash,
-                           excluded.system_prompt_hash
-                       ),
-                       system_prompt = CASE
-                           WHEN sessions.system_prompt_hash IS NULL
-                                AND excluded.system_prompt_hash IS NOT NULL
-                           THEN NULL
-                           ELSE sessions.system_prompt
-                       END,
-""" + _UPSERT_KEEP_EXISTING_SQL,
-                (
-                    session_id, source, user_id, session_key, chat_id, chat_type, thread_id, model,
-                    json.dumps(model_config) if model_config else None, system_prompt_hash,
-                    parent_session_id, cwd, profile_name, git_repo_root, origin_json, display_name,
-                    time.time(),
-                ),
+            self._insert_session_row_tx(
+                conn, session_id, source, model=model, model_config=model_config,
+                system_prompt=system_prompt, user_id=user_id, session_key=session_key,
+                chat_id=chat_id, chat_type=chat_type, thread_id=thread_id,
+                parent_session_id=parent_session_id, cwd=cwd, profile_name=profile_name,
+                git_repo_root=git_repo_root, origin_json=origin_json,
+                display_name=display_name, started_at=started_at,
             )
-            if system_prompt_hash is not None:
-                self._delete_unreferenced_system_prompts(conn)
-            if parent_session_id:
-                self._inherit_parent_session_metadata(conn, session_id)
         # Transcript-critical: a failed row creation aborts the turn.
         self._execute_write(_do, patience_s=self._TRANSCRIPT_WRITE_PATIENCE_S)
 

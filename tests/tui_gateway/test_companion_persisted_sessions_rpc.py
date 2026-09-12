@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 import base64
+from concurrent.futures import ThreadPoolExecutor
+import contextlib
 import json
 import sqlite3
+import threading
 
 import pytest
 
 from hermes_cli.dashboard_auth.ws_tickets import OwnerAuthorizationLease
 from hermes_state import SessionDB
 from tui_gateway import companion_sessions, server
+from tui_gateway.companion_turns import admit_turn, current_bound_turn, mark_running
 from tui_gateway.transport import Transport, bind_transport, reset_transport
 
 
@@ -46,6 +50,14 @@ def _owner_transport(monkeypatch):
 
 def _call(method: str, **params):
     return server._methods[method]("companion-test", params)
+
+
+def _admit_bound_submit(db: SessionDB, runtime_id: str) -> None:
+    """Model the durable side effect performed by the real prompt.submit."""
+    claim = current_bound_turn()
+    assert claim is not None
+    admit_turn(db, claim, runtime_id=runtime_id)
+    mark_running(db, claim, runtime_id=runtime_id)
 
 
 def _unsigned_cursor(value: dict) -> str:
@@ -111,6 +123,7 @@ def _session(
 def test_companion_persisted_session_capability_and_methods_are_registered():
     assert "companion.sessions.list" in server._methods
     assert "companion.sessions.history" in server._methods
+    assert "companion.sessions.continue" in server._methods
     assert "companion.capabilities" in server._methods
 
     result = _call("companion.capabilities")["result"]
@@ -118,7 +131,933 @@ def test_companion_persisted_session_capability_and_methods_are_registered():
     assert set(result["methods"]) >= {
         "companion.sessions.list",
         "companion.sessions.history",
+        "companion.sessions.continue",
     }
+
+
+def test_registered_continue_is_exact_idempotent_and_busy_safe(db, monkeypatch):
+    _session(db, "stored-exact")
+    db._conn.execute("UPDATE sessions SET cwd = ? WHERE id = ?", ("/persisted/exact-cwd", "stored-exact"))
+    db._conn.commit()
+    calls = []
+    runtime_id = "runtime/exact:01"
+    monkeypatch.setitem(server._sessions, runtime_id, {"running": False})
+
+    def resume(rid, params):
+        calls.append(("resume", rid, dict(params)))
+        return server._ok(rid, {"session_id": runtime_id, "session_key": "stored-exact", "resumed": "stored-exact", "messages": []})
+
+    def submit(rid, params):
+        calls.append(("submit", rid, dict(params)))
+        _admit_bound_submit(db, runtime_id)
+        server._sessions[runtime_id]["running"] = True
+        return server._ok(rid, {"status": "streaming"})
+
+    monkeypatch.setitem(server._methods, "session.resume", resume)
+    monkeypatch.setitem(server._methods, "prompt.submit", submit)
+    params = {"backend_namespace": "companion-test-backend", "profile": "atlas", "stored_session_id": "stored-exact", "text": "Continue exactly", "client_request_id": "request-1"}
+
+    first = _call("companion.sessions.continue", **params)["result"]
+    replay = _call("companion.sessions.continue", **params)["result"]
+    assert first["status"] == "streaming"
+    assert replay["status"] == "uncertain"
+    assert replay["operation_state"] == "running"
+    assert replay["reconciled"] is True
+    assert "session_id" not in replay
+    assert first["cwd"] == "/persisted/exact-cwd"
+    assert first["session_id"] == runtime_id
+    assert first["messages"] == []
+    assert [kind for kind, _rid, _params in calls] == ["resume", "submit"]
+
+    reconciled = _call(
+        "companion.sessions.reconcile",
+        backend_namespace=params["backend_namespace"],
+        profile=params["profile"],
+        stored_session_id=params["stored_session_id"],
+        client_request_id=params["client_request_id"],
+    )["result"]
+    assert reconciled.pop("identity") == {
+        "profile": "atlas",
+        "backend_namespace": "companion-test-backend",
+        "original_id": "stored-exact",
+        "root_id": "stored-exact",
+        "resolved_tip_id": "stored-exact",
+    }
+    assert reconciled == {
+        "status": "reconciled",
+        "operation_status": "running",
+        "reconciled": True,
+        "runtime_session_id": runtime_id,
+        "backend_namespace": "companion-test-backend",
+        "profile": "atlas",
+        "stored_session_id": "stored-exact",
+    }
+
+    conflict = _call("companion.sessions.continue", **{**params, "text": "Changed text"})
+    assert conflict["error"]["code"] == 4090
+    busy = _call("companion.sessions.continue", **{**params, "client_request_id": "request-2"})
+    assert busy["error"]["code"] == 4091
+    assert [kind for kind, _rid, _params in calls].count("submit") == 1
+
+
+def test_success_shaped_submit_without_admission_stays_uncertain(db, monkeypatch):
+    _session(db, "stored-inert-submit")
+    runtime_id = "runtime-inert-submit"
+    monkeypatch.setitem(server._sessions, runtime_id, {"running": False})
+    monkeypatch.setitem(
+        server._methods,
+        "session.resume",
+        lambda rid, params: server._ok(
+            rid,
+            {
+                "session_id": runtime_id,
+                "session_key": params["session_id"],
+                "resumed": params["session_id"],
+                "messages": [],
+            },
+        ),
+    )
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda rid, _params: server._ok(rid, {"status": "streaming"}),
+    )
+
+    result = _call(
+        "companion.sessions.continue",
+        backend_namespace="companion-test-backend",
+        profile="atlas",
+        stored_session_id="stored-inert-submit",
+        text="Do not infer admission from this response",
+        client_request_id="inert-submit-request",
+    )["result"]
+    records = db._conn.execute(
+        "SELECT value FROM state_meta WHERE key LIKE 'continuity_turn_v3:%'"
+    ).fetchall()
+
+    assert result["status"] == "uncertain"
+    assert result["operation_state"] == "claimed"
+    assert "session_id" not in result
+    assert server._sessions[runtime_id]["running"] is False
+    assert [json.loads(row["value"])["state"] for row in records] == ["claimed"]
+
+
+def test_accepted_continue_replay_remaps_runtime_after_process_restart(db, monkeypatch):
+    _session(db, "stored-restart")
+    calls = []
+    runtime_ids = iter(("runtime-before-restart", "runtime-after-restart"))
+
+    def resume(rid, params):
+        runtime_id = next(runtime_ids)
+        calls.append(("resume", runtime_id))
+        monkeypatch.setitem(server._sessions, runtime_id, {"running": False})
+        return server._ok(
+            rid,
+            {
+                "session_id": runtime_id,
+                "session_key": params["session_id"],
+                "resumed": params["session_id"],
+                "messages": [],
+            },
+        )
+
+    def submit(rid, params):
+        calls.append(("submit", params["session_id"]))
+        _admit_bound_submit(db, params["session_id"])
+        server._sessions[params["session_id"]]["running"] = True
+        return server._ok(rid, {"status": "streaming"})
+
+    monkeypatch.setitem(server._methods, "session.resume", resume)
+    monkeypatch.setitem(server._methods, "prompt.submit", submit)
+    params = {
+        "backend_namespace": "companion-test-backend",
+        "profile": "atlas",
+        "stored_session_id": "stored-restart",
+        "text": "Submit only before restart",
+        "client_request_id": "restart-replay-request",
+    }
+
+    first = _call("companion.sessions.continue", **params)["result"]
+    server._sessions.pop(first["session_id"])
+    replay = _call("companion.sessions.continue", **params)["result"]
+    assert replay["operation_state"] == "running"
+    assert "session_id" not in replay
+    assert replay["reconciled"] is True
+    assert calls == [
+        ("resume", "runtime-before-restart"),
+        ("submit", "runtime-before-restart"),
+    ]
+
+
+def test_concurrent_continue_requests_for_one_target_submit_once(db, monkeypatch):
+    _session(db, "stored-concurrent")
+    runtime_id = "runtime-concurrent"
+    monkeypatch.setitem(server._sessions, runtime_id, {"running": False})
+    submit_started = threading.Event()
+    release_submit = threading.Event()
+    second_started = threading.Event()
+    calls = []
+
+    def resume(rid, params):
+        calls.append(("resume", rid))
+        return server._ok(
+            rid,
+            {
+                "session_id": runtime_id,
+                "session_key": params["session_id"],
+                "resumed": params["session_id"],
+                "messages": [],
+            },
+        )
+
+    def submit(rid, params):
+        calls.append(("submit", rid))
+        submit_started.set()
+        assert release_submit.wait(timeout=2)
+        _admit_bound_submit(db, params["session_id"])
+        server._sessions[params["session_id"]]["running"] = True
+        return server._ok(rid, {"status": "streaming"})
+
+    def concurrent_call(params):
+        try:
+            return {
+                "result": companion_sessions.continue_session(
+                    server,
+                    params,
+                    owner_authorization=OwnerAuthorizationLease(
+                        "basic:owner", float("inf")
+                    ),
+                )
+            }
+        except companion_sessions.CompanionSessionsError as exc:
+            return {"error": {"code": exc.code, "message": str(exc)}}
+
+    def second_call(params):
+        second_started.set()
+        return concurrent_call(params)
+
+    monkeypatch.setitem(server._methods, "session.resume", resume)
+    monkeypatch.setitem(server._methods, "prompt.submit", submit)
+    base = {
+        "backend_namespace": "companion-test-backend",
+        "profile": "atlas",
+        "stored_session_id": "stored-concurrent",
+        "text": "Only one turn",
+    }
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(
+            concurrent_call,
+            {**base, "client_request_id": "concurrent-request-1"},
+        )
+        assert submit_started.wait(timeout=2)
+        second_future = pool.submit(
+            second_call,
+            {**base, "client_request_id": "concurrent-request-2"},
+        )
+        assert second_started.wait(timeout=2)
+        release_submit.set()
+        first = first_future.result(timeout=2)
+        second = second_future.result(timeout=2)
+
+    assert first["result"]["status"] == "streaming"
+    assert second["error"]["code"] == 4091
+    assert [kind for kind, _rid in calls].count("submit") == 1
+
+
+def test_same_request_replay_during_index_claim_gap_stays_pending_with_identity(db, monkeypatch):
+    from tui_gateway import companion_turns
+
+    _session(db, "stored-index-gap")
+    runtime_id = "runtime-index-gap"
+    monkeypatch.setitem(server._sessions, runtime_id, {"running": False})
+    index_written = threading.Event()
+    release_claim = threading.Event()
+    original_claim = companion_turns.claim_turn
+    calls = []
+
+    def delayed_claim(*args, **kwargs):
+        index_written.set()
+        assert release_claim.wait(timeout=2)
+        return original_claim(*args, **kwargs)
+
+    def resume(rid, params):
+        calls.append("resume")
+        return server._ok(rid, {
+            "session_id": runtime_id,
+            "session_key": params["session_id"],
+            "resumed": params["session_id"],
+            "messages": [],
+        })
+
+    def submit(rid, params):
+        calls.append("submit")
+        _admit_bound_submit(db, params["session_id"])
+        server._sessions[params["session_id"]]["running"] = True
+        return server._ok(rid, {"status": "streaming"})
+
+    monkeypatch.setattr(companion_turns, "claim_turn", delayed_claim)
+    monkeypatch.setitem(server._methods, "session.resume", resume)
+    monkeypatch.setitem(server._methods, "prompt.submit", submit)
+    params = {
+        "backend_namespace": "companion-test-backend",
+        "profile": "atlas",
+        "stored_session_id": "stored-index-gap",
+        "text": "Exactly once across the index gap",
+        "client_request_id": "index-gap-request",
+    }
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first_future = pool.submit(
+            companion_sessions.continue_session,
+            server,
+            params,
+            owner_authorization=OwnerAuthorizationLease("basic:owner", float("inf")),
+        )
+        assert index_written.wait(timeout=2)
+        replay = companion_sessions.continue_session(
+            server,
+            params,
+            owner_authorization=OwnerAuthorizationLease("basic:owner", float("inf")),
+        )
+        assert replay["status"] == "uncertain"
+        assert replay["operation_state"] == "indexed"
+        assert replay["identity"] == {
+            "profile": "atlas",
+            "backend_namespace": "companion-test-backend",
+            "original_id": "stored-index-gap",
+            "root_id": "stored-index-gap",
+            "resolved_tip_id": "stored-index-gap",
+        }
+        assert calls == []
+        release_claim.set()
+        first = first_future.result(timeout=2)
+
+    assert first["status"] == "streaming"
+    assert calls == ["resume", "submit"]
+
+
+def test_continue_request_id_reuse_conflicts_across_stored_targets(db, monkeypatch):
+    changed_target = "stored-other"
+    _session(db, "stored-exact")
+    _session(db, changed_target)
+    calls = []
+    runtime_id = "runtime-target"
+    monkeypatch.setitem(server._sessions, runtime_id, {"running": False})
+
+    def resume(rid, params):
+        calls.append(("resume", dict(params)))
+        return server._ok(
+            rid,
+            {
+                "session_id": runtime_id,
+                "session_key": params["session_id"],
+                "resumed": params["session_id"],
+                "messages": [],
+            },
+        )
+
+    def submit(rid, params):
+        calls.append(("submit", dict(params)))
+        _admit_bound_submit(db, params["session_id"])
+        return server._ok(rid, {"status": "streaming"})
+
+    monkeypatch.setitem(server._methods, "session.resume", resume)
+    monkeypatch.setitem(server._methods, "prompt.submit", submit)
+    params = {
+        "backend_namespace": "companion-test-backend",
+        "profile": "atlas",
+        "stored_session_id": "stored-exact",
+        "text": "Same text",
+        "client_request_id": "globally-unique-request",
+    }
+
+    assert _call("companion.sessions.continue", **params)["result"]["status"] == "streaming"
+    conflict = _call(
+        "companion.sessions.continue",
+        **{**params, "stored_session_id": changed_target},
+    )
+    assert conflict["error"]["code"] == 4090
+    assert [kind for kind, _params in calls] == ["resume", "submit"]
+
+
+def test_continue_request_id_is_global_across_authorized_profile_dbs(
+    db, tmp_path, monkeypatch
+):
+    coder_db = SessionDB(tmp_path / "coder" / "state.db")
+    _session(db, "atlas-session")
+    _session(coder_db, "coder-session")
+    calls = []
+    opened_profiles = []
+
+    @contextlib.contextmanager
+    def source(_server, profile, **_kwargs):
+        opened_profiles.append(profile)
+        yield {"atlas": db, "coder": coder_db}[profile]
+
+    monkeypatch.setattr(companion_sessions, "_source", source)
+    monkeypatch.setattr(
+        companion_sessions,
+        "_owner_authorized_profiles",
+        lambda _server: frozenset({"atlas", "coder"}),
+    )
+    monkeypatch.setitem(server._sessions, "runtime-atlas", {"running": False})
+    monkeypatch.setitem(server._sessions, "runtime-coder", {"running": False})
+
+    def resume(rid, params):
+        calls.append(("resume", params["profile"]))
+        return server._ok(
+            rid,
+            {
+                "session_id": f"runtime-{params['profile']}",
+                "session_key": params["session_id"],
+                "resumed": params["session_id"],
+                "messages": [],
+            },
+        )
+
+    def submit(rid, params):
+        calls.append(("submit", params["session_id"]))
+        _admit_bound_submit(db, params["session_id"])
+        return server._ok(rid, {"status": "streaming"})
+
+    monkeypatch.setitem(server._methods, "session.resume", resume)
+    monkeypatch.setitem(server._methods, "prompt.submit", submit)
+    request_id = "cross-profile-request"
+    atlas_params = {
+        "backend_namespace": "companion-test-backend",
+        "profile": "atlas",
+        "stored_session_id": "atlas-session",
+        "text": "Submit exactly once",
+        "client_request_id": request_id,
+    }
+    try:
+        first = _call("companion.sessions.continue", **atlas_params)["result"]
+        replay = _call("companion.sessions.continue", **atlas_params)["result"]
+        conflict = _call(
+            "companion.sessions.continue",
+            **{
+                **atlas_params,
+                "profile": "coder",
+                "stored_session_id": "coder-session",
+            },
+        )
+        canonical_receipts = db._conn.execute(
+            "SELECT COUNT(*) FROM state_meta WHERE key LIKE 'companion_continuity_v3:%'"
+        ).fetchone()[0]
+        with coder_db._read_ctx() as conn:
+            target_receipts = conn.execute(
+                "SELECT COUNT(*) FROM state_meta WHERE key LIKE 'companion_continuity_v3:%'",
+            ).fetchone()[0]
+    finally:
+        coder_db.close()
+
+    assert replay["operation_state"] == "running"
+    assert replay["status"] == "uncertain"
+    assert "session_id" not in replay
+    assert replay["reconciled"] is True
+    assert conflict["error"]["code"] == 4090
+    assert calls == [("resume", "atlas"), ("submit", "runtime-atlas")]
+    assert opened_profiles == ["atlas", "atlas", "atlas"]
+    assert (canonical_receipts, target_receipts) == (1, 0)
+    assert coder_db.db_path != db.db_path
+
+
+def test_continue_payload_digest_rejects_backend_change_after_restart(db, monkeypatch):
+    _session(db, "stored-backend")
+    calls = []
+    runtime_id = "runtime-backend"
+    monkeypatch.setitem(server._sessions, runtime_id, {"running": False})
+
+    def resume(rid, params):
+        calls.append("resume")
+        return server._ok(
+            rid,
+            {
+                "session_id": runtime_id,
+                "session_key": params["session_id"],
+                "resumed": params["session_id"],
+                "messages": [],
+            },
+        )
+
+    def submit(rid, submit_params):
+        calls.append("submit")
+        _admit_bound_submit(db, submit_params["session_id"])
+        return server._ok(rid, {"status": "streaming"})
+
+    monkeypatch.setitem(server._methods, "session.resume", resume)
+    monkeypatch.setitem(server._methods, "prompt.submit", submit)
+    params = {
+        "backend_namespace": "companion-test-backend",
+        "profile": "atlas",
+        "stored_session_id": "stored-backend",
+        "text": "Same text",
+        "client_request_id": "backend-bound-request",
+    }
+    assert _call("companion.sessions.continue", **params)["result"]["status"] == "streaming"
+
+    monkeypatch.setenv("GATEWAY_RELAY_ID", "replacement-backend")
+    conflict = _call(
+        "companion.sessions.continue",
+        **{**params, "backend_namespace": "replacement-backend"},
+    )
+    assert conflict["error"]["code"] == 4090
+    assert calls == ["resume", "submit"]
+
+
+def test_continue_request_id_reuse_conflicts_before_backend_rejection(db, monkeypatch):
+    _session(db, "stored-backend-intent")
+    runtime_id = "runtime-backend-intent"
+    calls = []
+    monkeypatch.setitem(server._sessions, runtime_id, {"running": False})
+    monkeypatch.setitem(
+        server._methods,
+        "session.resume",
+        lambda rid, params: server._ok(
+            rid,
+            {
+                "session_id": runtime_id,
+                "session_key": params["session_id"],
+                "resumed": params["session_id"],
+                "messages": [],
+            },
+        ),
+    )
+
+    def submit(rid, submit_params):
+        calls.append(rid)
+        _admit_bound_submit(db, submit_params["session_id"])
+        return server._ok(rid, {"status": "streaming"})
+
+    monkeypatch.setitem(server._methods, "prompt.submit", submit)
+    params = {
+        "backend_namespace": "companion-test-backend",
+        "profile": "atlas",
+        "stored_session_id": "stored-backend-intent",
+        "text": "Bind this request",
+        "client_request_id": "backend-intent-request",
+    }
+
+    assert _call("companion.sessions.continue", **params)["result"]["status"] == "streaming"
+    conflict = _call(
+        "companion.sessions.continue",
+        **{**params, "backend_namespace": "wrong-backend"},
+    )
+
+    assert conflict["error"]["code"] == 4404
+    assert len(calls) == 1
+
+
+def test_new_wrong_backend_releases_claim_for_corrected_request(db, monkeypatch):
+    _session(db, "stored-corrected-backend")
+    runtime_id = "runtime-corrected-backend"
+    monkeypatch.setitem(server._sessions, runtime_id, {"running": False})
+    monkeypatch.setitem(
+        server._methods,
+        "session.resume",
+        lambda rid, params: server._ok(
+            rid,
+            {
+                "session_id": runtime_id,
+                "session_key": params["session_id"],
+                "resumed": params["session_id"],
+                "messages": [],
+            },
+        ),
+    )
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda rid, submit_params: (
+            _admit_bound_submit(db, submit_params["session_id"])
+            or server._ok(rid, {"status": "streaming"})
+        ),
+    )
+    params = {
+        "backend_namespace": "wrong-backend",
+        "profile": "atlas",
+        "stored_session_id": "stored-corrected-backend",
+        "text": "Correct the route",
+        "client_request_id": "corrected-backend-request",
+    }
+
+    assert _call("companion.sessions.continue", **params)["error"]["code"] == 4404
+    corrected = _call(
+        "companion.sessions.continue",
+        **{**params, "backend_namespace": "companion-test-backend"},
+    )
+    assert corrected["result"]["status"] == "streaming"
+
+
+@pytest.mark.parametrize(
+    ("session_key", "resumed_id"),
+    [
+        (None, "stored-mapping"),
+        ("stored-mapping", None),
+        ("different-lineage", "stored-mapping"),
+        ("stored-mapping", "different-lineage"),
+    ],
+)
+def test_continue_fails_closed_on_missing_or_mismatched_resume_identity(
+    db, monkeypatch, session_key, resumed_id
+):
+    _session(db, "stored-mapping")
+    runtime_id = "runtime-mapping"
+    submits = []
+    monkeypatch.setitem(server._sessions, runtime_id, {"running": False})
+
+    def resume(rid, _params):
+        result = {"session_id": runtime_id, "messages": []}
+        if session_key is not None:
+            result["session_key"] = session_key
+        if resumed_id is not None:
+            result["resumed"] = resumed_id
+        return server._ok(rid, result)
+
+    monkeypatch.setitem(server._methods, "session.resume", resume)
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda *_args: submits.append(True) or pytest.fail("must not submit"),
+    )
+    response = _call(
+        "companion.sessions.continue",
+        backend_namespace="companion-test-backend",
+        profile="atlas",
+        stored_session_id="stored-mapping",
+        text="Do not misroute",
+        client_request_id=f"mapping-{session_key}-{resumed_id}",
+    )
+    assert response["error"]["code"] == 5000
+    assert submits == []
+
+
+def test_continue_accepts_db_proven_lineage_root_to_canonical_compression_tip(
+    db, monkeypatch
+):
+    _session(db, "lineage-root", started_at=1, end_reason="compression")
+    _session(db, "compression-tip", started_at=2, parent="lineage-root")
+    db.append_message("compression-tip", "assistant", "compressed context")
+    runtime_id = "runtime-compression-tip"
+    calls = []
+    monkeypatch.setitem(server._sessions, runtime_id, {"running": False})
+
+    def resume(rid, params):
+        calls.append(("resume", dict(params)))
+        return server._ok(
+            rid,
+            {
+                "session_id": runtime_id,
+                "session_key": "compression-tip",
+                "resumed": "compression-tip",
+                "messages": [],
+            },
+        )
+
+    def submit(rid, params):
+        calls.append(("submit", dict(params)))
+        _admit_bound_submit(db, params["session_id"])
+        return server._ok(rid, {"status": "streaming"})
+
+    monkeypatch.setitem(server._methods, "session.resume", resume)
+    monkeypatch.setitem(server._methods, "prompt.submit", submit)
+    result = _call(
+        "companion.sessions.continue",
+        backend_namespace="companion-test-backend",
+        profile="atlas",
+        stored_session_id="lineage-root",
+        text="Continue after compression",
+        client_request_id="compression-lineage-request",
+    )["result"]
+
+    assert result["stored_session_id"] == "lineage-root"
+    assert result["session_id"] == runtime_id
+    assert calls == [
+        ("resume", {"session_id": "compression-tip", "profile": "atlas"}),
+        ("submit", {"session_id": runtime_id, "text": "Continue after compression"}),
+    ]
+
+
+def test_continue_validates_actual_resume_shape_for_compacted_lineage(db, monkeypatch):
+    _session(db, "actual-lineage-root", started_at=1, end_reason="compression")
+    _session(db, "actual-compression-tip", started_at=2, parent="actual-lineage-root")
+    db.append_message("actual-compression-tip", "assistant", "compacted continuation")
+    db._conn.execute(
+        "UPDATE sessions SET cwd = ? WHERE id IN (?, ?)",
+        ("/persisted/compacted", "actual-lineage-root", "actual-compression-tip"),
+    )
+    db._conn.commit()
+    actual_resume = server._methods["session.resume"]
+    observed = []
+    monkeypatch.setattr(server, "_profile_session_db", lambda _home: (db, False))
+    monkeypatch.setattr(server, "_enable_gateway_prompts", lambda: None)
+    monkeypatch.setattr(server, "_schedule_agent_build", lambda _sid: None)
+    monkeypatch.setattr(server, "_schedule_session_cap_enforcement", lambda: None)
+
+    def resume(rid, params):
+        response = actual_resume(rid, params)
+        observed.append(response)
+        return response
+
+    monkeypatch.setitem(server._methods, "session.resume", resume)
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda rid, submit_params: (
+            _admit_bound_submit(db, submit_params["session_id"])
+            or server._ok(rid, {"status": "streaming"})
+        ),
+    )
+
+    runtime_id = None
+    try:
+        result = _call(
+            "companion.sessions.continue",
+            backend_namespace="companion-test-backend",
+            profile="atlas",
+            stored_session_id="actual-lineage-root",
+            text="Continue through the actual resume RPC",
+            client_request_id="actual-compacted-resume-request",
+        )["result"]
+        runtime_id = result["session_id"]
+
+        assert observed[0]["result"]["session_key"] == "actual-compression-tip"
+        assert observed[0]["result"]["resumed"] == "actual-compression-tip"
+        assert result["stored_session_id"] == "actual-lineage-root"
+        assert result["cwd"] == "/persisted/compacted"
+    finally:
+        if runtime_id is not None:
+            server._sessions.pop(runtime_id, None)
+
+
+def test_continue_receipt_survives_store_reopen_and_hashes_sensitive_scope(db, monkeypatch):
+    _session(db, "durable-secret-session")
+    db._conn.execute(
+        "UPDATE sessions SET cwd = ? WHERE id = ?",
+        ("/sensitive/initial-cwd", "durable-secret-session"),
+    )
+    db._conn.commit()
+    calls = []
+    runtime_id = "runtime-durable"
+    monkeypatch.setitem(server._sessions, runtime_id, {"running": False})
+    monkeypatch.setitem(
+        server._methods,
+        "session.resume",
+        lambda rid, params: calls.append("resume") or server._ok(
+            rid,
+            {"session_id": runtime_id, "session_key": params["session_id"],
+                "resumed": params["session_id"], "messages": []},
+        ),
+    )
+
+    def submit(rid, params):
+        calls.append("submit")
+        _admit_bound_submit(db, params["session_id"])
+        return server._ok(rid, {"status": "streaming"})
+
+    monkeypatch.setitem(server._methods, "prompt.submit", submit)
+    params = {
+        "backend_namespace": "companion-test-backend",
+        "profile": "atlas",
+        "stored_session_id": "durable-secret-session",
+        "text": "Sensitive continuation body",
+        "client_request_id": "durable-secret-request",
+    }
+
+    first = _call("companion.sessions.continue", **params)["result"]
+    assert first["cwd"] == "/sensitive/initial-cwd"
+    rows = db._conn.execute(
+        "SELECT key, value FROM state_meta WHERE key LIKE 'continuity_turn_v3:%'",
+    ).fetchall()
+    assert len(rows) == 1
+    assert "durable-secret-session" not in rows[0]["key"]
+    assert "durable-secret-request" not in rows[0]["key"]
+    receipt = json.loads(rows[0]["value"])
+    assert receipt["v"] == 3
+    assert receipt["state"] == "running"
+    assert receipt["payload_sha256"] == companion_sessions._continuity_payload_digest(
+        params["backend_namespace"], params["profile"], params["stored_session_id"], params["text"]
+    )
+    for forbidden in (
+        params["text"], "/sensitive/initial-cwd", "messages", "cwd",
+    ):
+        assert forbidden not in rows[0]["value"]
+
+    db._conn.execute(
+        "UPDATE sessions SET cwd = ? WHERE id = ?",
+        ("/authoritative/replay-cwd", params["stored_session_id"]),
+    )
+    db._conn.commit()
+
+    reopened = SessionDB(db.db_path)
+    monkeypatch.setattr(server, "_get_db", lambda: reopened)
+    try:
+        replay = _call("companion.sessions.continue", **params)["result"]
+    finally:
+        reopened.close()
+    assert replay["operation_state"] == "running"
+    assert replay["reconciled"] is True
+    assert calls == ["resume", "submit"]
+
+
+def test_legacy_expanded_accepted_receipt_fails_closed_without_resubmit(db, monkeypatch):
+    _session(db, "legacy-expanded")
+    params = {
+        "backend_namespace": "companion-test-backend",
+        "profile": "atlas",
+        "stored_session_id": "legacy-expanded",
+        "text": "Must not replay legacy payload",
+        "client_request_id": "legacy-expanded-request",
+    }
+    key = companion_sessions._continuity_receipt_key(
+        "basic:owner", params["client_request_id"]
+    )
+    digest = companion_sessions._continuity_payload_digest(
+        params["backend_namespace"],
+        params["profile"],
+        params["stored_session_id"],
+        params["text"],
+    )
+    db._conn.execute(
+        "INSERT INTO state_meta (key, value) VALUES (?, ?)",
+        (
+            key,
+            json.dumps(
+                {
+                    "v": companion_sessions._CONTINUITY_RECEIPT_VERSION,
+                    "state": "accepted",
+                    "payload_sha256": digest,
+                    "result": {
+                        "session_id": "legacy-runtime",
+                        "stored_session_id": params["stored_session_id"],
+                        "messages": [{"role": "user", "content": params["text"]}],
+                        "status": "streaming",
+                        "backend_namespace": params["backend_namespace"],
+                        "profile": params["profile"],
+                        "cwd": "/legacy/cwd",
+                        "reconciled": False,
+                    },
+                }
+            ),
+        ),
+    )
+    db._conn.commit()
+    monkeypatch.setitem(
+        server._methods,
+        "session.resume",
+        lambda *_args: pytest.fail("invalid legacy receipt must not resume"),
+    )
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda *_args: pytest.fail("invalid legacy receipt must not submit"),
+    )
+
+    response = _call("companion.sessions.continue", **params)
+
+    assert response["error"]["code"] == 4092
+
+
+def test_unconfirmed_durable_claim_returns_uncertain_without_resubmit(db, monkeypatch):
+    _session(db, "crash-window")
+    params = {
+        "backend_namespace": "companion-test-backend",
+        "profile": "atlas",
+        "stored_session_id": "crash-window",
+        "text": "Possibly accepted",
+        "client_request_id": "crashed-request",
+    }
+    key = companion_sessions._continuity_receipt_key("basic:owner", "crashed-request")
+    digest = companion_sessions._continuity_payload_digest(
+        params["backend_namespace"],
+        params["profile"],
+        params["stored_session_id"],
+        params["text"],
+    )
+    db._conn.execute(
+        "INSERT INTO state_meta (key, value) VALUES (?, ?)",
+        (
+            key,
+            json.dumps(
+                {
+                    "v": companion_sessions._CONTINUITY_RECEIPT_VERSION,
+                    "state": "claimed",
+                    "payload_sha256": digest,
+                }
+            ),
+        ),
+    )
+    db._conn.commit()
+    monkeypatch.setitem(
+        server._methods,
+        "session.resume",
+        lambda *_args, **_kwargs: pytest.fail("must not resume an uncertain claim"),
+    )
+    monkeypatch.setitem(
+        server._methods,
+        "prompt.submit",
+        lambda *_args, **_kwargs: pytest.fail("must not resubmit an uncertain claim"),
+    )
+
+    result = _call("companion.sessions.continue", **params)
+    assert result["error"]["code"] == 4092
+
+
+def test_definitive_submit_failure_releases_claim_for_safe_retry(db, monkeypatch):
+    _session(db, "retry-after-failure")
+    runtime_id = "runtime-retry"
+    monkeypatch.setitem(server._sessions, runtime_id, {"running": False})
+    monkeypatch.setitem(
+        server._methods,
+        "session.resume",
+        lambda rid, params: server._ok(
+            rid,
+            {
+                "session_id": runtime_id,
+                "session_key": params["session_id"],
+                "resumed": params["session_id"],
+                "messages": [],
+            },
+        ),
+    )
+    attempts = []
+
+    def submit(rid, _params):
+        attempts.append(rid)
+        if len(attempts) == 1:
+            return server._err(rid, 4500, "definitive rejection")
+        return server._ok(rid, {"status": "streaming"})
+
+    monkeypatch.setitem(server._methods, "prompt.submit", submit)
+    params = {
+        "backend_namespace": "companion-test-backend",
+        "profile": "atlas",
+        "stored_session_id": "retry-after-failure",
+        "text": "Retry only after rejection",
+        "client_request_id": "released-request",
+    }
+
+    assert _call("companion.sessions.continue", **params)["error"]["code"] == 4500
+    replay = _call("companion.sessions.continue", **params)["result"]
+    assert replay["status"] == "uncertain"
+    assert replay["operation_state"] == "not_admitted"
+    assert len(attempts) == 1
+
+
+@pytest.mark.parametrize(
+    ("change", "code"),
+    [
+        ({"backend_namespace": "wrong-backend"}, 4404),
+        ({"profile": "coder"}, 4403),
+        ({"stored_session_id": "missing"}, 4404),
+        ({"text": "x" * (companion_sessions._MAX_CONTINUATION_TEXT_LENGTH + 1)}, -32602),
+    ],
+)
+def test_registered_continue_denies_mismatched_or_unbounded_targets(db, change, code):
+    _session(db, "stored-exact")
+    params = {"backend_namespace": "companion-test-backend", "profile": "atlas", "stored_session_id": "stored-exact", "text": "Continue", "client_request_id": "request-denied"}
+    response = _call("companion.sessions.continue", **{**params, **change})
+    assert response["error"]["code"] == code
 
 
 def test_companion_capabilities_revalidates_owner_lease_and_sanitizes_denial():
@@ -458,17 +1397,16 @@ def test_history_reads_persisted_lineage_only_and_returns_safe_projection(db, mo
     assert "PRIVATE SYSTEM INSTRUCTIONS" not in serialized_cursor_snapshot
     assert "SECRET CHAIN OF THOUGHT" not in serialized_cursor_snapshot
     assert "RAW TOOL PAYLOAD" not in serialized_cursor_snapshot
-    assert [item["row_id"] for item in first["items"]] == [user_id, assistant_id, tool_call_id]
-    assert first["items"][0]["kind"] == "message"
-    assert first["items"][0]["role"] == "user"
-    assert "abcdefghijklmnopqrstuvwxyz" not in first["items"][0]["text"]
-    assert set(first["items"][0]) == {"kind", "role", "text", "row_id", "segment_id", "timestamp"}
+    assert [item["row_id"] for item in first["items"]] == [tool_result_id, timeline_id, system_id]
+    assert first["items"][0]["kind"] == "internal_event"
+    assert first["items"][0]["label"] == "Tool completed: terminal"
+    assert first["items"][1]["event"] == "model_switch"
     assert first["items"][2] == {
         "kind": "internal_event",
-        "event": "tool_call",
-        "label": "Assistant used one or more tools",
+        "event": "system_message",
+        "label": "System message",
         "collapsed": True,
-        "row_id": tool_call_id,
+        "row_id": system_id,
         "segment_id": "tip",
         "timestamp": first["items"][2]["timestamp"],
     }
@@ -483,18 +1421,18 @@ def test_history_reads_persisted_lineage_only_and_returns_safe_projection(db, mo
         cursor=first["next_cursor"],
     )["result"]
     assert [item["row_id"] for item in second["items"]] == [
-        tool_result_id,
-        timeline_id,
-        system_id,
+        user_id,
+        assistant_id,
+        tool_call_id,
     ]
-    assert second["items"][0]["kind"] == "internal_event"
-    assert second["items"][0]["label"] == "Tool completed: terminal"
-    assert "RAW TOOL PAYLOAD" not in json.dumps(second)
-    assert second["items"][1]["event"] == "model_switch"
-    assert "opaque internal marker" not in json.dumps(second)
-    assert second["items"][2]["event"] == "system_message"
-    assert second["items"][2]["collapsed"] is True
-    assert "text" not in second["items"][2]
+    assert second["items"][0]["kind"] == "message"
+    assert second["items"][0]["role"] == "user"
+    assert "abcdefghijklmnopqrstuvwxyz" not in second["items"][0]["text"]
+    assert set(second["items"][0]) == {"kind", "role", "text", "row_id", "segment_id", "timestamp"}
+    assert second["items"][2]["event"] == "tool_call"
+    assert second["items"][2]["label"] == "Assistant used one or more tools"
+    assert "RAW TOOL PAYLOAD" not in json.dumps(first)
+    assert "opaque internal marker" not in json.dumps(first)
     assert "PRIVATE SYSTEM INSTRUCTIONS" not in json.dumps(second)
     assert second["has_more"] is False
     assert second["as_of"] == first["as_of"]
@@ -597,7 +1535,8 @@ def test_history_cursor_preserves_deleted_snapshot_rows(db):
         cursor=first["next_cursor"],
     )["result"]
 
-    assert [item["row_id"] for item in second["items"]] == ids[1:]
+    assert [item["row_id"] for item in first["items"]] == [ids[3]]
+    assert [item["row_id"] for item in second["items"]] == ids[:3]
     assert second["total"] == 4
     assert second["coverage"] == "complete"
     assert second["has_more"] is False
@@ -664,7 +1603,7 @@ def test_history_cursor_keeps_original_lineage_snapshot_when_tip_advances(db):
         session_id="root",
         limit=2,
     )["result"]
-    assert [item["row_id"] for item in first["items"]] == [first_id, second_id]
+    assert [item["row_id"] for item in first["items"]] == [third_id, fourth_id]
 
     db._conn.execute("UPDATE sessions SET end_reason = 'compression' WHERE id = 'tip'")
     db._conn.commit()
@@ -679,7 +1618,7 @@ def test_history_cursor_keeps_original_lineage_snapshot_when_tip_advances(db):
         cursor=first["next_cursor"],
     )["result"]
 
-    assert [item["row_id"] for item in second["items"]] == [third_id, fourth_id]
+    assert [item["row_id"] for item in second["items"]] == [first_id, second_id]
     assert later_id not in {item["row_id"] for item in second["items"]}
     assert second["identity"]["root_id"] == "root"
     assert second["identity"]["resolved_tip_id"] == "tip"
@@ -720,6 +1659,25 @@ def test_session_rpcs_reject_agent_shared_and_revoked_authority(db):
         (
             "companion.sessions.history",
             {"profile": "atlas", "session_id": "private"},
+        ),
+        (
+            "companion.sessions.continue",
+            {
+                "backend_namespace": "companion-test-backend",
+                "profile": "atlas",
+                "stored_session_id": "private",
+                "text": "Denied",
+                "client_request_id": "denied-request",
+            },
+        ),
+        (
+            "companion.sessions.reconcile",
+            {
+                "backend_namespace": "companion-test-backend",
+                "profile": "atlas",
+                "stored_session_id": "private",
+                "client_request_id": "denied-request",
+            },
         ),
     )
     for transport in cases:

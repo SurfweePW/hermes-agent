@@ -13,7 +13,8 @@ import {
   validateLibraryChunk,
   validateLibraryDetail,
   validateLibraryList,
-  validateLibraryProfiles
+  validateLibraryProfiles,
+  validateLibraryResolve
 } from '../features/library/library-types'
 
 import {
@@ -43,6 +44,8 @@ import type {
   CompanionSessionHistoryResult,
   CompanionSessionListOptions,
   CompanionSessionListResult,
+  ContinueCompanionSessionOptions,
+  ContinueCompanionSessionResult,
   CreateSessionOptions,
   GatewayAttentionItem,
   GatewaySessionSummary,
@@ -50,13 +53,15 @@ import type {
   PendingApprovalsResult,
   ProfilesListResult,
   PromptSubmitResult,
+  ReconcileCompanionSessionOptions,
+  ReconcileCompanionSessionResult,
   SessionInterruptResult,
   SessionListOptions,
   SessionListResult,
   SessionResult,
   SetPinnedResult
 } from './types'
-import { validateWorkCapability, validateWorkDetail, validateWorkList, type WorkCommentParams, type WorkDecisionParams } from './work-types'
+import { validateWorkCapability, validateWorkCommentResult, validateWorkDecisionResult, validateWorkDetail, validateWorkList, type WorkCommentParams, type WorkDecisionParams } from './work-types'
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
@@ -207,6 +212,13 @@ const projectFromRaw = (value: unknown, method: string, freshness: string, expec
 
   if (expectedSource !== undefined && source !== expectedSource) {return directoryError(method)}
   const sessionCount = value.session_count === null || value.session_count === undefined ? null : nonNegativeInteger(value.session_count, method)
+  const sessionIds = value.session_ids === null || value.session_ids === undefined
+    ? null
+    : Array.isArray(value.session_ids)
+      && value.session_ids.every((item): item is string => typeof item === 'string' && item.length > 0)
+      && new Set(value.session_ids).size === value.session_ids.length
+      ? [...value.session_ids]
+      : directoryError(method)
 
   return {
     id: requiredString(value, 'id', `Malformed ${method} response.`),
@@ -217,6 +229,7 @@ const projectFromRaw = (value: unknown, method: string, freshness: string, expec
     archived: value.archived,
     last_active: timestamp(value.last_active, method),
     session_count: sessionCount,
+    session_ids: sessionIds,
     linked_work_count: null,
     freshness
   }
@@ -327,7 +340,12 @@ export function validateCompanionSessionHistory(value: unknown, profile: string,
 
     if (entry.kind !== 'internal_event' || typeof entry.label !== 'string' || entry.collapsed !== true) {return directoryError(method)}
 
-    return { id: String(entry.row_id), kind: 'internal', role: null, content: '', label: entry.label, occurred_at: timestamp(entry.timestamp, method) }
+    const eventKind = typeof entry.event === 'string' ? entry.event : ''
+    const kind = eventKind === 'compaction_summary'
+      ? 'compression'
+      : /(?:^|_)(?:tool|shell)(?:_|$)/.test(eventKind) ? 'tool' : 'internal'
+
+    return { id: String(entry.row_id), kind, role: null, content: '', label: entry.label, occurred_at: timestamp(entry.timestamp, method) }
   })
 
   const warningList = warnings(value.warnings, method)
@@ -412,6 +430,14 @@ function validatedAttention(value: unknown): AttentionListResult {
         : (() => {throw new Error(error)})()
     }
 
+    if (candidate.work_ref !== undefined) {
+      if (!isRecord(candidate.work_ref) || Object.keys(candidate.work_ref).length !== 2
+        || typeof candidate.work_ref.profile !== 'string' || !candidate.work_ref.profile || candidate.work_ref.profile !== candidate.work_ref.profile.trim()
+        || candidate.work_ref.profile.length > 64 || /[\\/]/.test(candidate.work_ref.profile) || candidate.work_ref.profile.includes('://')
+        || typeof candidate.work_ref.id !== 'string' || !candidate.work_ref.id.trim() || candidate.work_ref.id.length > 100) {throw new Error(error)}
+      item.work_ref = { profile: candidate.work_ref.profile, id: candidate.work_ref.id }
+    }
+
     if (typeof candidate.request_id === 'string') {item.request_id = candidate.request_id}
 
     if (candidate.request !== undefined) {
@@ -449,7 +475,7 @@ function toCompanionEvent(event: GatewayEvent): CompanionEvent | null {
       const completePayload: MessageCompleteEvent['payload'] = {}
 
       if (typeof payload.text === 'string') {
-        completePayload.text = payload.text
+        completePayload.text = payload.text.slice(0, COMPANION_TERMINAL_TEXT_MAX_LENGTH)
       }
 
       if (typeof payload.interrupted === 'boolean') {
@@ -513,12 +539,15 @@ function toCompanionEvent(event: GatewayEvent): CompanionEvent | null {
     }
 
     case 'error':
-      return { type: 'error', session_id, payload }
+      return { type: 'error', session_id, payload: { message: COMPANION_TERMINAL_ERROR_MESSAGE } }
 
     default:
       return null
   }
 }
+
+export const COMPANION_TERMINAL_ERROR_MESSAGE = 'Hermes reported an error while running this turn.'
+export const COMPANION_TERMINAL_TEXT_MAX_LENGTH = 65_536
 
 /** Typed Companion domain facade over the shared JSON-RPC WebSocket transport. */
 export class CompanionClient {
@@ -630,6 +659,14 @@ export class CompanionClient {
     return this.gateway.request<unknown>('companion.sessions.history', { profile, session_id: id, ...(cursor ? { cursor } : {}) }).then((value) => validateCompanionSessionHistory(value, profile, id, expectedSource))
   }
 
+  continueCompanionSession(options: ContinueCompanionSessionOptions): Promise<ContinueCompanionSessionResult> {
+    return this.gateway.request('companion.sessions.continue', { ...options })
+  }
+
+  reconcileCompanionSession(options: ReconcileCompanionSessionOptions): Promise<ReconcileCompanionSessionResult> {
+    return this.gateway.request('companion.sessions.reconcile', { ...options })
+  }
+
   listCompanionProjects(options: CompanionProjectListOptions): Promise<CompanionProjectListResult> {
     const params: Record<string, unknown> = { profile: options.profile }
 
@@ -662,6 +699,10 @@ export class CompanionClient {
 
   libraryProfiles() {
     return this.gateway.request<unknown>('companion.library.profiles', {}).then(validateLibraryProfiles)
+  }
+
+  resolveLibraryReference(reference: string, profile?: string) {
+    return this.gateway.request<unknown>('companion.library.resolve', { reference, ...(profile ? { profile } : {}) }).then((value) => validateLibraryResolve(value, profile))
   }
 
   listLibrary(options: LibraryListOptions = {}) {
@@ -716,12 +757,12 @@ export class CompanionClient {
     return this.gateway.request<unknown>('work.get', { profile, id }).then((value) => validateWorkDetail(value, profile, id))
   }
 
-  decideWork(params: WorkDecisionParams): Promise<unknown> {
-    return this.gateway.request('work.decide', { ...params })
+  decideWork(params: WorkDecisionParams) {
+    return this.gateway.request<unknown>('work.decide', { ...params }).then((value) => validateWorkDecisionResult(value, params.id, params.idempotency_key))
   }
 
-  commentWork(params: WorkCommentParams): Promise<unknown> {
-    return this.gateway.request('work.comment', { ...params })
+  commentWork(params: WorkCommentParams) {
+    return this.gateway.request<unknown>('work.comment', { ...params }).then((value) => validateWorkCommentResult(value, params.id, params.idempotency_key))
   }
 
   listAttention(): Promise<AttentionListResult> {

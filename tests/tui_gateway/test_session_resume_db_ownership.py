@@ -383,6 +383,7 @@ def test_resume_eager_never_transfers_shared_launch_db(profile_dbs, monkeypatch)
     monkeypatch.setattr(server, "_get_db", lambda: shared)
 
     def _fake_make_agent(sid, key, session_db=None, **_kwargs):
+        assert server._eager_resume_build_active(None, "s1") is True
         agent = types.SimpleNamespace(model="test")
         agent._session_db = session_db  # the agent IS holding the shared handle
         agent._owns_session_db = False

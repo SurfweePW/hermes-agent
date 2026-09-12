@@ -1,22 +1,51 @@
 import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 
-import { safeWorkUrl, type WorkCardView, WorkInbox, type WorkInboxProps } from './work-inbox'
+import { safeLibraryReference, safeWorkUrl, type WorkCardView, WorkInbox, type WorkInboxProps } from './work-inbox'
 
 export const card: WorkCardView = {
   id: 'work-1', profile: 'CMO Exact', title: 'Prepare campaign', brief: 'A focused business brief', revision: 2,
   status: 'needs_me', bucket: 'needs_me', evidence: [{ label: 'Research', url: 'https://example.org/report' }],
   permitted: ['Draft copy'], excluded: ['Publish'], nextAction: 'Review preparation', owner: 'Pawel',
-  decision: 'Awaiting review', previews: [{ label: 'Unsafe preview', url: 'javascript:alert(1)' }],
-  discussion: [{ id: 'c1', author: 'CMO', body: 'Which audience?' }], actionable: true
+  decision: 'Awaiting review', recommendedAction: 'approve_preparation', previews: [{ label: 'Unsafe preview', url: 'javascript:alert(1)' }],
+  discussion: [{ id: 'c1', author: 'CMO', body: 'Which audience?' }], actionable: true, canDecide: true
 }
 
 function props(overrides: Partial<WorkInboxProps> = {}): WorkInboxProps {
   return { items: [card], selected: card, status: 'verified', pending: false, message: null, groupBy: 'topic', priorityWritable: false, sources: [],
-    onOpen: vi.fn(), onOpenArtifact: vi.fn(), onClose: vi.fn(), onRefresh: vi.fn(), onGroupBy: vi.fn(), onDecision: vi.fn(async () => true), onComment: vi.fn(async () => true), onPriority: vi.fn(async () => true), onRestorePriority: vi.fn(async () => true), ...overrides }
+    onOpen: vi.fn(), onOpenArtifact: vi.fn(), onOpenSourceSession: vi.fn(), onClose: vi.fn(), onRefresh: vi.fn(), onGroupBy: vi.fn(), onDecision: vi.fn(async () => true), onComment: vi.fn(async () => true), onPriority: vi.fn(async () => true), onRestorePriority: vi.fn(async () => true), ...overrides }
 }
 
 describe('durable work inbox', () => {
+  it('answers the decision questions and links evidence, discussion and the source session', () => {
+    const onOpenSourceSession = vi.fn()
+    const priority = { profile: 'CMO Exact', work_id: 'work-1', candidate_id: 'candidate-1', eligibility: 'assessed' as const, why_here: 'The launch is blocked on this review.', next_step: 'Approve the bounded draft.', trade_off: 'Defers visual polish.', assessed_at: null, evidence: ['Assessment A'], assessment: null, override: null, topicName: 'Launch', group: { kind: 'topic' as const, id: 'topic-1', profile: 'CMO Exact', backend_namespace: 'organization-db' }, groupOrder: 0, itemOrder: 0 }
+    const sourceSession = { backend: 'mac-mini', profile: 'CMO Exact', id: 'session-42' }
+    render(<WorkInbox {...props({ onOpenSourceSession, selected: { ...card, priority, sourceSession } })} />)
+
+    for (const name of ['Czego potrzebujemy od Ciebie', 'Dlaczego teraz', 'Rekomendacja', 'Co zmieni kliknięcie']) {expect(screen.getByRole('heading', { name })).toBeTruthy()}
+    expect(screen.getByText(priority.why_here)).toBeTruthy()
+    expect(screen.getByText((_text, element) => element?.tagName === 'P' && element.textContent?.includes(priority.next_step) === true)).toBeTruthy()
+    expect(screen.getByText('Which audience?')).toBeTruthy()
+    expect(screen.getByRole('link', { name: /Research/ })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Otwórz sesję źródłową' }))
+    expect(onOpenSourceSession).toHaveBeenCalledWith(sourceSession)
+  })
+
+  it('defaults to a vertical Do decyzji list and filters the same records from view options', () => {
+    const p = props({ selected: null, items: [card, { ...card, id: 'progress', bucket: 'in_progress', status: 'in_progress', title: 'Preparing now' }] })
+    render(<WorkInbox {...p} />)
+
+    expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
+    expect(screen.getByText(card.title)).toBeTruthy()
+    expect(screen.queryByText('Preparing now')).toBeNull()
+    const options = screen.getByText('Opcje widoku').closest('details') as HTMLDetailsElement
+    expect(options.open).toBe(false)
+    fireEvent.click(screen.getByText('Opcje widoku'))
+    fireEvent.click(screen.getByRole('button', { name: 'W toku' }))
+    expect(screen.getByText('Preparing now')).toBeTruthy()
+    expect(screen.queryByText(card.title)).toBeNull()
+  })
   it('shows dispatch and revision-scoped decision history without claiming execution', () => {
     render(<WorkInbox {...props({ selected: { ...card, status: 'in_progress', actionable: false,
       preparationStatus: 'Preparation approved — awaiting execution tracker task link',
@@ -25,15 +54,15 @@ describe('durable work inbox', () => {
     expect(screen.getByText('Preparation approved — awaiting execution tracker task link')).toBeTruthy()
     expect(screen.getByText('request changes · Revision 1')).toBeTruthy()
     expect(screen.getByText('Narrow earlier scope')).toBeTruthy()
-    expect(screen.getByText(/shared-token connections comment as an agent/)).toBeTruthy()
+    expect(screen.getByText(/shared-token and agent connections remain read-only/)).toBeTruthy()
     expect(screen.getByRole('group', { name: 'Decision for revision 2' }).hasAttribute('disabled')).toBe(true)
   })
   it('switching filters leaves detail and never retargets a pending decision', () => {
     const p = props(); const { rerender } = render(<WorkInbox {...p} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Ideas' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Pomysły' }))
     expect(p.onClose).toHaveBeenCalledTimes(1)
     rerender(<WorkInbox {...p} pending />)
-    fireEvent.click(screen.getByRole('button', { name: 'In Progress' }))
+    fireEvent.click(screen.getByRole('button', { name: 'W toku' }))
     expect(p.onClose).toHaveBeenCalledTimes(1)
   })
 
@@ -74,19 +103,42 @@ describe('durable work inbox', () => {
     expect(screen.getByRole('button', { name: /Two creative cells are ready for a controlled draft/ })).toBeTruthy()
     expect(document.body.textContent).not.toContain('"evidence_summary"')
   })
-  it('opens repository evidence through the authenticated Library route', () => {
+  it('does not render or activate unprefixed filesystem-shaped evidence', () => {
+    const unsafe = ['data/cmo/audits/paid-growth/report.md', 'summary.pdf', './relative/report.pdf', '/tmp/report.pdf', 'file:///tmp/report.pdf', 'C:\\Users\\atlas\\report.pdf', '\\\\server\\share\\report.pdf']
     const onOpenArtifact = vi.fn()
-    const reference = 'data/cmo/audits/paid-growth/report.md'
-    const rootReference = 'summary.pdf'
 
-    render(<WorkInbox {...props({ onOpenArtifact, selected: { ...card, evidence: [{ label: reference, url: reference }, { label: rootReference, url: rootReference }] } })} />)
+    render(<WorkInbox {...props({ onOpenArtifact, selected: { ...card, evidence: unsafe.map((reference) => ({ label: reference, url: reference })) } })} />)
+
+    expect(screen.queryByRole('button', { name: /in Library/ })).toBeNull()
+    expect(onOpenArtifact).not.toHaveBeenCalled()
+    for (const reference of unsafe) {expect(document.body.textContent).not.toContain(reference)}
+  })
+  it('opens a safe library reference with its full explicit identity', () => {
+    const onOpenArtifact = vi.fn()
+    const reference = 'library:campaigns/autumn/brief-v1.pdf'
+
+    render(<WorkInbox {...props({ onOpenArtifact, selected: { ...card, evidence: [{ label: reference, url: reference }] } })} />)
     fireEvent.click(screen.getByRole('button', { name: `Open ${reference} in Library` }))
-    fireEvent.click(screen.getByRole('button', { name: `Open ${rootReference} in Library` }))
 
-    expect(onOpenArtifact).toHaveBeenCalledWith(card.profile, reference)
-    expect(onOpenArtifact).toHaveBeenCalledWith(card.profile, rootReference)
-    expect(screen.getByText('Markdown report')).toBeTruthy()
-    expect(screen.getByText('PDF report')).toBeTruthy()
+    expect(onOpenArtifact).toHaveBeenCalledWith('CMO Exact', reference)
+    expect(document.body.textContent).not.toContain('/Users/')
+  })
+  it('preserves a Library reference embedded in a structured brief', () => {
+    const onOpenArtifact = vi.fn()
+    const structured = { ...card, brief: JSON.stringify({ artifacts: [{ path: 'library:campaigns/autumn/brief-v1.pdf' }] }) }
+
+    render(<WorkInbox {...props({ onOpenArtifact, selected: structured })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Open library:campaigns/autumn/brief-v1.pdf in Library' }))
+
+    expect(onOpenArtifact).toHaveBeenCalledWith('CMO Exact', 'library:campaigns/autumn/brief-v1.pdf')
+  })
+
+  it.each([
+    'javascript:alert(1)', 'file:///etc/passwd', 'library:/etc/passwd', 'library:../secret.pdf',
+    'library:campaigns/../../secret.pdf', 'library:campaigns\\secret.pdf', 'library:campaigns/%2e%2e/secret.pdf',
+    'library:campaigns/brief.pdf?token=secret', 'library:campaigns/brief.pdf\u0000'
+  ])('rejects unsafe Library reference %s', (reference) => {
+    expect(safeLibraryReference(reference)).toBeUndefined()
   })
   it('renders tracker blocker, result, completion evidence and observed history', () => {
     render(<WorkInbox {...props({ selected: { ...card,
@@ -125,6 +177,25 @@ describe('durable work inbox', () => {
     expect(screen.getByText(/does not support the durable work inbox/)).toBeTruthy()
     expect(screen.queryByText(/No work in this view/)).toBeNull()
   })
+  it('exposes exactly three bounded actions and marks the authoritative recommendation', () => {
+    render(<WorkInbox {...props()} />)
+    const group = screen.getByRole('group', { name: 'Decision for revision 2' })
+    const actions = Array.from(group.querySelectorAll('button'))
+
+    expect(actions.map((button) => button.textContent?.replace(' · Recommended', ''))).toEqual(['Approve', 'Request changes', 'Remind in 2 hours'])
+    expect(actions.filter((button) => button.textContent?.includes('Recommended'))).toHaveLength(1)
+    expect(actions[0]?.textContent).toBe('Approve · Recommended')
+    expect(screen.queryByRole('button', { name: 'Decline' })).toBeNull()
+    expect(screen.queryByLabelText(/snooze until/i)).toBeNull()
+    const explanation = screen.getByRole('heading', { name: 'Co zmieni kliknięcie' }).parentElement!
+    expect(screen.getAllByRole('heading', { name: 'Co zmieni kliknięcie' })).toHaveLength(1)
+    expect(explanation.querySelectorAll('li')).toHaveLength(3)
+    expect(explanation.textContent).toContain('Approve')
+    expect(explanation.textContent).toContain('Request changes')
+    expect(explanation.textContent).toContain('Remind in 2 hours')
+    expect(explanation.textContent).toContain('nie publikuje')
+    expect(explanation.textContent).toContain('wraca ona do decyzji')
+  })
   it('requires a changes comment and sends preparation-only decisions', async () => {
     const p = props(); render(<WorkInbox {...p} />)
     fireEvent.click(screen.getByRole('button', { name: 'Request changes' }))
@@ -132,21 +203,18 @@ describe('durable work inbox', () => {
     fireEvent.change(screen.getByLabelText('Discussion / requested changes'), { target: { value: 'Narrow audience' } })
     fireEvent.click(screen.getByRole('button', { name: 'Request changes' }))
     await waitFor(() => expect(p.onDecision).toHaveBeenCalledWith({ action: 'request_changes', comment: 'Narrow audience' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Approve preparation' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
     await waitFor(() => expect(p.onDecision).toHaveBeenCalledWith({ action: 'approve_preparation' }))
   })
-  it('submits snooze date and decline distinctly, never permission choices', async () => {
+  it('submits the fixed reminder semantic without arbitrary dates or decline', async () => {
     const p = props(); render(<WorkInbox {...p} />)
-    fireEvent.change(screen.getByLabelText('Snooze until'), { target: { value: '2099-12-01T12:00' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Snooze' }))
-    await waitFor(() => expect(p.onDecision).toHaveBeenCalledWith({ action: 'snooze', snoozedUntil: new Date('2099-12-01T12:00').toISOString() }))
-    fireEvent.click(screen.getByRole('button', { name: 'Decline' }))
-    await waitFor(() => expect(p.onDecision).toHaveBeenCalledWith({ action: 'decline' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Remind in 2 hours' }))
+    await waitFor(() => expect(p.onDecision).toHaveBeenCalledWith({ action: 'remind_in_2_hours' }))
   })
   it('keeps historical work recoverable and opens exact profile/id without chat', () => {
     const p = props({ selected: null, items: [{ ...card, bucket: 'history', status: 'declined' }] }); render(<WorkInbox {...p} />)
     expect(screen.queryByText(card.title)).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'History & snoozed' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Historia i odłożone' }))
     fireEvent.click(screen.getByRole('button', { name: /Prepare campaign/ }))
     expect(p.onOpen).toHaveBeenCalledWith('CMO Exact', 'work-1')
   })
@@ -154,8 +222,13 @@ describe('durable work inbox', () => {
     render(<WorkInbox {...props({ pending: true })} />)
     expect(screen.getByRole('group', { name: 'Decision for revision 2' }).hasAttribute('disabled')).toBe(true)
   })
+  it('keeps comments read-only without current can_decide authority', () => {
+    render(<WorkInbox {...props({ selected: { ...card, actionable: false, canDecide: false, readOnlyReason: 'Owner sign-in required' } })} />)
+    expect(screen.getByLabelText('Discussion / requested changes').hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('button', { name: 'Add comment' }).hasAttribute('disabled')).toBe(true)
+  })
   it('sets and restores an owner priority without collecting an actor', async () => {
-    const priority = { profile: 'CMO Exact', work_id: 'work-1', candidate_id: 'candidate-1', eligibility: 'assessed' as const, why_here: 'Deadline', next_step: 'Review', trade_off: 'Defers polish', assessed_at: null, evidence: [], assessment: null, override: { id: 'override-1', version: 2, mode: 'set_priority' as const, label: 'Now', actor: 'owner:server', reason: 'Launch', expires_at: null, review_id: null, review_at: null, active: true }, topicName: 'Launch', groupOrder: 0, itemOrder: 0 }
+    const priority = { profile: 'CMO Exact', work_id: 'work-1', candidate_id: 'candidate-1', eligibility: 'assessed' as const, why_here: 'Deadline', next_step: 'Review', trade_off: 'Defers polish', assessed_at: null, evidence: [], assessment: null, override: { id: 'override-1', version: 2, mode: 'set_priority' as const, label: 'Now', actor: 'owner:server', reason: 'Launch', expires_at: null, review_id: null, review_at: null, active: true }, topicName: 'Launch', group: { kind: 'topic' as const, id: 'topic-1', profile: 'CMO Exact', backend_namespace: 'organization-db' }, groupOrder: 0, itemOrder: 0 }
     const p = props({ priorityWritable: true, selected: { ...card, priority } }); render(<WorkInbox {...p} />)
     fireEvent.change(screen.getByLabelText('Priority label'), { target: { value: 'Do first' } })
     fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'Material deadline' } })
@@ -170,5 +243,15 @@ describe('durable work inbox', () => {
   })
   it('rejects executable, local and credential-bearing links', () => {
     for (const url of ['file:///etc/passwd', 'data:text/html,x', 'javascript:alert(1)', 'https://u:p@example.org', '/relative']) {expect(safeWorkUrl(url)).toBeUndefined()}
+  })
+  it('hands an authoritative project group to the project navigator', () => {
+    const onOpenProject = vi.fn()
+    const group = { kind: 'project' as const, id: 'canonical-project-42', source_id: 'desktop-project-7', profile: 'project-owner', backend_namespace: 'desktop:exact' }
+    const priority = { profile: 'CMO Exact', work_id: 'work-1', candidate_id: 'candidate-1', eligibility: 'assessed' as const, why_here: 'Deadline', next_step: 'Review', trade_off: 'Defers polish', assessed_at: null, evidence: [], assessment: null, override: null, topicName: 'Autumn', group, groupOrder: 0, itemOrder: 0 }
+
+    render(<WorkInbox {...props({ onOpenProject, selected: { ...card, priority } })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Otwórz projekt' }))
+
+    expect(onOpenProject).toHaveBeenCalledWith({ source_id: 'desktop-project-7', profile: 'project-owner', backend_namespace: 'desktop:exact' })
   })
 })

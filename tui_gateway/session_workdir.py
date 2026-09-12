@@ -79,11 +79,22 @@ _LAUNCH_CWD_NOT_A_WORKSPACE = {"desktop"}
 
 def _context_cwd_is_launch_artifact(session: dict | None) -> bool:
     """Whether the session cwd came from app launch rather than user intent."""
-    return bool(session and not session.get("explicit_cwd") and _session_source(session) in _LAUNCH_CWD_NOT_A_WORKSPACE)
+    return bool(
+        session
+        and (
+            session.get("workspace_none") is True
+            or (
+                not session.get("explicit_cwd")
+                and _session_source(session) in _LAUNCH_CWD_NOT_A_WORKSPACE
+            )
+        )
+    )
 
 
 def _persisted_session_cwd(session: dict) -> str | None:
     """The cwd to stamp on the session's DB row, or None to leave it unset (launch-dir rule: ``_ensure_session_db_row``)."""
+    if session.get("workspace_none") is True:
+        return None
     if session.get("explicit_cwd"):
         return _session_cwd(session)
     if _session_source(session) in _LAUNCH_CWD_NOT_A_WORKSPACE:
@@ -235,6 +246,8 @@ def _workdir_row_model_config(session: dict) -> tuple[str, dict]:
     for flag in ("room_plumbing", "follow_profile_config"):
         if session.get(flag):
             model_config[flag] = True
+    if session.get("workspace_none") is True:
+        model_config["_companion_workspace_none"] = True
     return row_model, model_config
 
 

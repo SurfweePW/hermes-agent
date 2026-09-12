@@ -95,7 +95,8 @@ export interface CompanionSession {
   status: string | null
   /** Authoritative persisted conversation kind when the source reports it. */
   type?: string | null
-  project: CompanionProjectRef | null
+  /** Positive membership, verified absence (`null`), or unknown while project coverage is incomplete (`undefined`). */
+  project?: CompanionProjectRef | null
   /** Authoritative organization topic references when the source reports them. */
   topics?: CompanionEntityRef[]
   linked_work_count: number | null
@@ -111,6 +112,8 @@ export interface CompanionProject {
   archived: boolean
   last_active: string | null
   session_count: number | null
+  /** Persisted lineage-root IDs from the authoritative Desktop project tree. */
+  session_ids?: string[] | null
   linked_work_count: number | null
   freshness: string | null
 }
@@ -149,7 +152,7 @@ export interface CompanionProjectListResult {
 
 export interface CompanionHistoryEntry {
   id: string
-  kind: 'message' | 'internal' | 'compression'
+  kind: 'message' | 'internal' | 'compression' | 'tool'
   role: 'user' | 'assistant' | 'system' | null
   content: string
   label: string | null
@@ -186,6 +189,7 @@ export interface CompanionProjectDetail {
 
 export type AttentionKind = 'approval' | 'question' | 'blocker' | 'completion' | 'error'
 export type AttentionResolution = 'approval' | 'open_session' | 'unsupported_here'
+export interface CanonicalWorkReference { profile: string; id: string }
 export interface GatewayAttentionItem {
   id: string
   kind: AttentionKind
@@ -197,6 +201,8 @@ export interface GatewayAttentionItem {
   occurred_at: number
   actionable: boolean
   resolution: AttentionResolution
+  /** Present only when the server proves one durable Work binding for this runtime session. */
+  work_ref?: CanonicalWorkReference
   request_id?: string
   request?: Pick<ApprovalRequestPayload, 'request_id' | 'allow_session' | 'allow_permanent' | 'choices'>
 }
@@ -208,7 +214,55 @@ export interface AttentionListResult {
 export interface SetPinnedResult { pinned: boolean; session_id: string; changed: boolean }
 
 export interface PromptSubmitResult {
-  status: 'streaming'
+  status: 'streaming' | 'queued'
+  reconciled?: boolean
+}
+
+export interface CompanionSessionTarget {
+  /** Exact gateway/backend namespace returned by the read projection. */
+  backend_namespace: string
+  profile: string
+  stored_session_id: string
+}
+
+export interface ContinueCompanionSessionOptions extends CompanionSessionTarget {
+  text: string
+  client_request_id: string
+}
+
+export interface AcceptedCompanionSessionResult extends SessionResult, PromptSubmitResult {
+  backend_namespace: string
+  profile: string
+  cwd: string
+}
+
+export interface UncertainCompanionSessionResult extends CompanionSessionTarget {
+  status: 'uncertain'
+  reconciled: true
+}
+
+export type ContinueCompanionSessionResult = AcceptedCompanionSessionResult | UncertainCompanionSessionResult
+
+export type CompanionContinuationOperationStatus =
+  | 'claimed'
+  | 'admitted'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'not_admitted'
+  | 'interrupted_outcome_unknown'
+  | 'legacy_unknown'
+
+export interface ReconcileCompanionSessionOptions extends CompanionSessionTarget {
+  client_request_id: string
+}
+
+export interface ReconcileCompanionSessionResult extends CompanionSessionTarget {
+  status: 'reconciled'
+  reconciled: true
+  operation_status: CompanionContinuationOperationStatus
+  runtime_session_id?: string
 }
 
 export interface SessionInterruptResult {

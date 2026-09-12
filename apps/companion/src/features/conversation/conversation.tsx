@@ -1,11 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { useMemo } from 'react'
 
 import type { ApprovalChoice } from '../../gateway/types'
 import type { CompanionMessage, PendingApproval, TurnStatus } from '../../state/companion-store'
 import { ApprovalCard } from '../attention/approval-card'
 import type { Teammate } from '../roster/roster'
 
+import { MessageComposer } from './message-composer'
 import { isContextCompactionMessage, MessageContent } from './message-content'
+import { StatusRow } from './status-row'
+import { useTranscriptScroll } from './transcript-scroll'
 
 interface ConversationProps {
   teammate: Teammate
@@ -20,7 +23,9 @@ interface ConversationProps {
   onInterrupt: () => void
   onApproval: (decision: ApprovalChoice) => void
   sessionTitle?: string
+  projectLabel?: string
   onBackToSessions?: () => void
+  sessionKey?: string
 }
 
 export function Conversation({
@@ -35,47 +40,31 @@ export function Conversation({
   onSubmit,
   onInterrupt,
   onApproval,
-  sessionTitle = 'Main conversation',
-  onBackToSessions
+  sessionTitle = 'Conversation title unavailable',
+  projectLabel = 'Projekt nieznany',
+  onBackToSessions,
+  sessionKey = teammate.id
 }: ConversationProps) {
-  const textareaRef = useRef<HTMLTextAreaElement>(null)
-  const messageListRef = useRef<HTMLDivElement>(null)
-  const transcriptEndRef = useRef<HTMLDivElement>(null)
-  const followingLatestRef = useRef(true)
-  const [showJumpToLatest, setShowJumpToLatest] = useState(false)
-  const working = turnStatus === 'submitting' || turnStatus === 'streaming'
-  const canSubmit = connected && Boolean(draft.trim()) && !working
-
-  useEffect(() => {
-    const textarea = textareaRef.current
-
-    if (!textarea) { return }
-    textarea.style.height = 'auto'
-    textarea.style.height = `${Math.min(textarea.scrollHeight, 176)}px`
-  }, [draft])
-
-  useEffect(() => {
-    if (followingLatestRef.current) { transcriptEndRef.current?.scrollIntoView?.({ block: 'end' }) }
-  }, [approval, messages.length, streamingText])
-
-  const submit = () => {
-    if (canSubmit) { onSubmit() }
-  }
+  const sending = turnStatus === 'sending' || turnStatus === 'submitting'
+  const working = sending || turnStatus === 'streaming' || turnStatus === 'stopping'
+  const stopping = turnStatus === 'stopping'
+  const contentVersion = useMemo(() => [
+    ...messages.map((message) => `${message.id}:${message.kind ?? 'message'}:${message.toolStatus ?? ''}:${message.label ?? ''}:${message.text}`),
+    `stream:${streamingText}`,
+    `approval:${approval?.requestId ?? ''}`
+  ].join('\u0000'), [approval?.requestId, messages, streamingText])
+  const itemIds = useMemo(() => messages.map((message) => message.id), [messages])
+  const transcriptScroll = useTranscriptScroll(sessionKey, itemIds, contentVersion)
 
   return (
     <section aria-labelledby="conversation-title" className="conversation-screen">
       <header className="conversation-head">
         {onBackToSessions && <button aria-label={`Back to ${teammate.name} sessions`} className="conversation-back" onClick={onBackToSessions} type="button">←</button>}
         <div aria-hidden="true" className={`avatar avatar--${teammate.id}`}>{teammate.initials}</div>
-        <div className="conversation-head__title"><p className="kicker">{sessionTitle}</p><h2 id="conversation-title">{teammate.name}</h2></div>
+        <div className="conversation-head__title"><h2 id="conversation-title">{sessionTitle}</h2><p className="kicker">{teammate.name} · {projectLabel}</p></div>
         <span className="presence"><span aria-hidden="true">●</span> {connected ? 'Online' : 'Offline'}</span>
       </header>
-      <div className="message-list" onScroll={(event) => {
-        const element = event.currentTarget
-        const nearBottom = element.scrollHeight - element.scrollTop - element.clientHeight < 96
-        followingLatestRef.current = nearBottom
-        setShowJumpToLatest(!nearBottom)
-      }} ref={messageListRef}>
+      <div className="message-list" onScroll={transcriptScroll.onScroll} ref={transcriptScroll.viewportRef}>
         <div className="transcript">
           {messages.length === 0 && <p className="screen-lede conversation-empty">Start a conversation with {teammate.name}.</p>}
           {messages.map((message) => {
@@ -84,50 +73,27 @@ export function Conversation({
               : message.role === 'user' ? 'mine' : 'theirs'
 
             return (
-              <article className={`message message--${presentationRole}`} key={message.id}>
+              <article className={`message message--${presentationRole}`} data-transcript-id={message.id} key={message.id}>
                 {message.role === 'assistant' && <span className="message__author">{teammate.name}</span>}
-                <MessageContent role={message.role} text={message.text} />
+                {message.kind && message.kind !== 'message' ? <StatusRow kind={message.kind} label={message.label} payload={message.text} state={message.kind === 'tool' ? message.toolStatus === 'complete' ? 'Complete' : message.toolStatus === 'progress' ? 'In progress' : 'Running' : null} /> : <MessageContent role={message.role} text={message.text} />}
               </article>
             )
           })}
           {(working || streamingText) && (
             <div aria-atomic="true" aria-live="polite" className="streaming-card" role="status">
               <span aria-hidden="true" className="streaming-mark"><i /><i /><i /></span>
-              <span><strong>{teammate.name} is working</strong>{streamingText ? <div className="streaming-text"><MessageContent role="assistant" text={streamingText} /></div> : <small>Starting the turn…</small>}</span>
-              <button className="text-button" onClick={onInterrupt} type="button">Stop</button>
+              <span><strong>{stopping ? `Stopping ${teammate.name}…` : sending ? 'Sending your message…' : `${teammate.name} is working`}</strong>{streamingText ? <div className="streaming-text"><MessageContent role="assistant" text={streamingText} /></div> : <small>{stopping ? 'Waiting for the current turn to stop…' : sending ? 'Waiting for Hermes to accept it…' : 'The turn is running…'}</small>}</span>
+              {working && <button className="text-button" disabled={!connected || stopping} onClick={onInterrupt} type="button">{stopping ? 'Stopping…' : 'Stop'}</button>}
             </div>
           )}
           {turnStatus === 'uncertain' && <div className="decision-toast decision-toast--conversation" role="status">Connection closed after the turn was accepted. Its server-side outcome is not yet known.</div>}
+          {turnStatus === 'interrupted' && <div className="decision-toast decision-toast--conversation" role="status">Turn interrupted. You can send a new message when ready.</div>}
           {approval && <ApprovalCard approval={approval} onDecision={onApproval} />}
-          <div aria-hidden="true" ref={transcriptEndRef} />
+          <div aria-hidden="true" ref={transcriptScroll.endRef} />
         </div>
       </div>
-      {showJumpToLatest && <button className="jump-to-latest" onClick={() => {
-        followingLatestRef.current = true
-        setShowJumpToLatest(false)
-        transcriptEndRef.current?.scrollIntoView?.({ behavior: 'smooth', block: 'end' })
-      }} type="button">↓ Latest</button>}
-      <div className="composer-dock">
-        <form className="composer" onSubmit={(event) => { event.preventDefault(); submit() }}>
-          <label className="sr-only" htmlFor="message-draft">Message {teammate.name}</label>
-          <textarea
-            id="message-draft"
-            onChange={(event) => onDraftChange(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter' && !event.shiftKey && !event.nativeEvent.isComposing) {
-                event.preventDefault()
-                submit()
-              }
-            }}
-            placeholder={`Message ${teammate.name}…`}
-            ref={textareaRef}
-            rows={1}
-            value={draft}
-          />
-          <button aria-label="Send message" disabled={!canSubmit} type="submit">↑</button>
-        </form>
-        <p className="composer-hint">Enter to send · Shift+Enter for a new line</p>
-      </div>
+      {transcriptScroll.showJumpToLatest && <button className="jump-to-latest" onClick={transcriptScroll.jumpToLatest} type="button">↓ New messages</button>}
+      <MessageComposer disabled={!connected || working} draft={draft} hint="Enter adds a new line · Ctrl/Cmd+Enter sends" id="message-draft" label={`Message ${teammate.name}`} onDraftChange={onDraftChange} onSubmit={onSubmit} placeholder={`Message ${teammate.name}…`} sendLabel="Send message" />
     </section>
   )
 }

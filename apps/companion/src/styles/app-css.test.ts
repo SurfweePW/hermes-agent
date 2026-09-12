@@ -60,6 +60,14 @@ describe('Signal House CSS contract', () => {
     expect(appCss).toMatch(/\.main-content--conversation\s*\{[^}]*height:\s*calc\(100dvh\s*-\s*146px\s*-\s*env\(safe-area-inset-top\)\s*-\s*env\(safe-area-inset-bottom\)\)[^}]*overflow:\s*hidden/i)
   })
 
+  it('keeps 390px and 412px conversation layouts fluid without viewport-width children', () => {
+    expect(appCss).toMatch(/@media\s*\(max-width:\s*780px\)[\s\S]*?\.chats-screen[^}]*width:\s*100%[^}]*padding:\s*28px\s+17px\s+36px/i)
+    expect(appCss).toMatch(/\.chat-history-head\s*>\s*div\s*\{[^}]*min-width:\s*0/i)
+    expect(appCss).toMatch(/@media\s*\(max-width:\s*780px\)[\s\S]*?\.chat-controls\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/i)
+    expect(appCss).toMatch(/@media\s*\(max-width:\s*780px\)[\s\S]*?\.chat-session-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+14px/i)
+    expect(appCss).not.toMatch(/(?:width|min-width):\s*(?:390|412)px/i)
+  })
+
   it('uses an accessible small-text alias while preserving the approved muted token', () => {
     expect(tokensCss).toMatch(/--muted-text\s*:\s*#62665e/i)
     expect(appCss).toMatch(/\.kicker,\s*\.label\s*\{[^}]*color:\s*var\(--muted-text\)/i)

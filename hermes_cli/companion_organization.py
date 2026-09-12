@@ -19,11 +19,13 @@ import sqlite3
 import stat
 from typing import Any, Callable, Iterable, Iterator, Mapping, Sequence, TypeVar
 
+from hermes_cli.profiles import validate_profile_name
 from hermes_constants import get_hermes_home
 
 POLICY_VERSION = "policy-v1"
 CANONICAL_ID_VERSION = "v1"
 SCHEMA_VERSION = 2
+SNAPSHOT_FORMAT = "hermes-organization-v1"
 
 
 class OrganizationError(ValueError):
@@ -56,6 +58,16 @@ def _optional_text(
     if value is None:
         return None
     return _text(value, name, maximum, exact=exact)
+
+
+def _canonical_profile(value: Any, name: str = "profile") -> str:
+    """Return an exact canonical profile id; never normalize identity input."""
+    profile = _text(value, name, 64, exact=True)
+    try:
+        validate_profile_name(profile)
+    except ValueError:
+        raise OrganizationError(f"{name} must be a canonical profile id") from None
+    return profile
 
 
 def _timestamp(value: Any, name: str) -> str:
@@ -204,7 +216,7 @@ class SourceNamespace:
 
     def __post_init__(self):
         object.__setattr__(self, "backend_id", _text(self.backend_id, "backend_id", 500, exact=True))
-        object.__setattr__(self, "profile", _text(self.profile, "profile", 100, exact=True))
+        object.__setattr__(self, "profile", _canonical_profile(self.profile))
 
     @property
     def canonical_id(self) -> str:
@@ -978,12 +990,12 @@ class OrganizationStore:
     ):
         if path is not None and profile_home is not None:
             raise OrganizationError("pass path or profile_home, not both")
+        if profile is None and (path is not None or profile_home is not None):
+            raise OrganizationError("profile is required for an explicit organization store")
         home = Path(profile_home) if profile_home is not None else get_hermes_home()
         self.path = Path(path) if path is not None else home / "organization.db"
         inferred = home.name if home.parent.name == "profiles" else "default"
-        self.profile = _text(
-            profile if profile is not None else inferred, "profile", 100, exact=True
-        )
+        self.profile = _canonical_profile(profile if profile is not None else inferred)
         self.clock = clock or (lambda: datetime.now(timezone.utc))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._initialize()
@@ -1035,7 +1047,7 @@ class OrganizationStore:
         revalidated for the whole read, so a caller cannot be redirected to a
         different profile store by a symlink or replacement race.
         """
-        profile = _text(profile, "profile", 100, exact=True)
+        profile = _canonical_profile(profile)
         absolute = Path(os.path.abspath(os.fspath(path)))
         requested = None if record_types is None else tuple(record_types)
         if requested is not None:
@@ -1717,7 +1729,7 @@ class OrganizationStore:
                 for row in db.execute("SELECT * FROM organization_audit ORDER BY sequence")
             ]
         return canonical_json({
-            "format": "hermes-organization-v1", "owner_profile": self.profile,
+            "format": SNAPSHOT_FORMAT, "owner_profile": self.profile,
             "schema_version": SCHEMA_VERSION, "records": records, "audit": audit,
         })
 
@@ -1732,12 +1744,13 @@ class OrganizationStore:
         }:
             raise OrganizationError("invalid organization snapshot shape")
         if (
-            data["format"] != "hermes-organization-v1"
+            data["format"] != SNAPSHOT_FORMAT
             or type(data["schema_version"]) is not int
             or data["schema_version"] != SCHEMA_VERSION
         ):
             raise OrganizationError("unsupported organization snapshot version")
-        if data["owner_profile"] != self.profile:
+        owner_profile = _canonical_profile(data["owner_profile"], "snapshot owner_profile")
+        if owner_profile != self.profile:
             raise OrganizationError("snapshot belongs to a different profile")
         if not isinstance(data["records"], list) or not isinstance(data["audit"], list):
             raise OrganizationError("invalid organization snapshot collections")

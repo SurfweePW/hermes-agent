@@ -442,8 +442,13 @@ def _truncate_history_for_submit(rid, sid, session, params, requested_rebind_ids
 def _persist_session_row_for_submit(rid, session):
     """Lazily persist the DB row now that the user sent a message (a branch becomes real
     here); the error reply is the only user-visible signal (desktop maps it to a toast)."""
+    durable_raw = session.get("_durable_turn_claim")
+    creation = _is_durable_creation_claim(durable_raw)
     try:
         if _ensure_session_db_row(session) is False:
+            if creation:
+                _log_durable_creation_failure(durable_raw)
+                return _err(rid, 5006, _DURABLE_CREATION_FAILURE_MESSAGE)
             return _err(
                 rid, 5072,
                 "session storage unavailable: "
@@ -456,6 +461,9 @@ def _persist_session_row_for_submit(rid, session):
             session["running"] = False
             session["last_active"] = time.time()
             _clear_inflight_turn(session)
+        if creation:
+            _log_durable_creation_failure(durable_raw)
+            return _err(rid, 5006, _DURABLE_CREATION_FAILURE_MESSAGE)
         if is_disk_full_error(exc):
             return _err(
                 rid, 5070,
@@ -463,6 +471,261 @@ def _persist_session_row_for_submit(rid, session):
         logger.warning("prompt.submit: session persist failed: %s", exc, exc_info=True)
         return _err(rid, 5071, f"session storage could not be written: {exc}")
     return None
+
+
+def _prepare_durable_turn_claim(sid: str, session: dict):
+    """Adopt a server-preclaimed operation; ordinary submits have no durable claim."""
+    from tui_gateway.companion_turns import current_bound_turn
+
+    claim = current_bound_turn()
+    if claim is None:
+        return None
+    if claim.admitted_tip_id != str(session.get("session_key") or ""):
+        raise RuntimeError("persisted continuation resumed a different lineage tip")
+    session["_durable_turn_claim"] = claim.to_wire()
+    return claim
+
+
+_DURABLE_CREATION_FAILURE_MESSAGE = "Durable creation failed."
+_CREATION_COORDINATION_UNKNOWN_MESSAGE = "Creation outcome unknown; reconcile this request."
+_CREATION_LEASE_KEY = "_creation_active_session_lease"
+
+
+def _track_transferred_creation_lease(session: dict, lease) -> None:
+    """Mark the exact trusted creation reservation attached before prompt.submit."""
+    if lease is None or session.get("active_session_lease") is not lease:
+        raise RuntimeError("creation reservation transfer is invalid")
+    session[_CREATION_LEASE_KEY] = lease
+
+
+def _is_durable_creation_claim(claim) -> bool:
+    """Identify creation claims without parsing or exposing their private fields."""
+    if isinstance(claim, dict):
+        return claim.get("operation_kind") == "create"
+    return getattr(claim, "operation_kind", None) == "create"
+
+
+def _public_durable_turn_error(exc: Exception, claim, *, legacy_prefix: str = "") -> str:
+    """Use a fixed public error for creation; preserve continuation compatibility."""
+    if _is_durable_creation_claim(claim):
+        return _DURABLE_CREATION_FAILURE_MESSAGE
+    try:
+        from agent.redact import redact_sensitive_text
+
+        detail = redact_sensitive_text(
+            str(exc), force=True, redact_url_credentials=True
+        )
+        return legacy_prefix + detail
+    except Exception:
+        return legacy_prefix + "[REDACTED - redaction failed]"
+
+
+def _log_durable_creation_failure(claim) -> None:
+    if _is_durable_creation_claim(claim):
+        logger.warning(_DURABLE_CREATION_FAILURE_MESSAGE)
+
+
+def _clear_matching_durable_turn_claim(session: dict, claim) -> None:
+    raw = session.get("_durable_turn_claim")
+    if (
+        isinstance(raw, dict)
+        and raw.get("operation_id") == claim.operation_id
+        and raw.get("generation") == claim.generation
+    ):
+        session.pop("_durable_turn_claim", None)
+
+
+def _retain_durable_turn_claim(session: dict, claim) -> bool:
+    """Install the exact trusted claim as a retry handle without replacing another turn."""
+    wire = claim.to_wire() if callable(getattr(claim, "to_wire", None)) else claim
+    if not isinstance(wire, dict):
+        return False
+    existing = session.get("_durable_turn_claim")
+    if existing is None:
+        session["_durable_turn_claim"] = dict(wire)
+        return True
+    return (
+        isinstance(existing, dict)
+        and existing.get("operation_id") == wire.get("operation_id")
+        and existing.get("generation") == wire.get("generation")
+    )
+
+
+def _settle_unstarted_durable_turn(
+    session: dict, claim, outcome: str = "not_admitted", *, retain_claim: bool = False
+) -> None:
+    from tui_gateway.companion_turns import settle_turn
+
+    if claim is None:
+        return
+    with _session_db(session) as db:
+        if db is None:
+            raise RuntimeError("session database is unavailable")
+        settle_turn(
+            db,
+            claim,
+            outcome=outcome,
+            final_tip_id=str(session.get("session_key") or claim.admitted_tip_id),
+        )
+    if not retain_claim:
+        _clear_matching_durable_turn_claim(session, claim)
+
+
+def _settle_session_durable_turn(session: dict, outcome: str, claim=None) -> None:
+    from tui_gateway.companion_turns import TurnClaim, settle_turn
+
+    raw = session.get("_durable_turn_claim")
+    if claim is None:
+        if raw is None:
+            return
+        claim = TurnClaim.from_wire(raw)
+    with _session_db(session) as db:
+        if db is None:
+            raise RuntimeError("session database is unavailable")
+        settle_turn(
+            db,
+            claim,
+            outcome=outcome,
+            final_tip_id=str(session.get("session_key") or claim.admitted_tip_id),
+        )
+    if _is_durable_creation_claim(claim) and not _retire_creation_lease_marker(session):
+        raise RuntimeError(_CREATION_COORDINATION_UNKNOWN_MESSAGE)
+    _clear_matching_durable_turn_claim(session, claim)
+
+
+def _retire_creation_lease_marker(session: dict) -> bool:
+    """Retire creation provenance while preserving the live session's active lease."""
+    lease = session.get(_CREATION_LEASE_KEY)
+    if lease is None:
+        return True
+    if session.get("active_session_lease") is not lease:
+        return False
+    session.pop(_CREATION_LEASE_KEY, None)
+    session.pop(_CREATION_AUTHORITY_KEY, None)
+    return True
+
+
+def _release_creation_slot(session: dict) -> bool:
+    """Release only the trusted transferred reservation; retain it on uncertainty."""
+    lease = session.get(_CREATION_LEASE_KEY)
+    if lease is None:
+        return True
+    if session.get("active_session_lease") is not lease:
+        return False
+    attempts = 3 if getattr(lease, "track_liveness", False) else 1
+    if _lease_retry(attempts, lambda: lease.release()) is not None:
+        logger.warning(_CREATION_COORDINATION_UNKNOWN_MESSAGE)
+        return False
+    if not (getattr(lease, "released", True) or not getattr(lease, "enabled", True)):
+        return False
+    if session.get("active_session_lease") is lease:
+        session.pop("active_session_lease", None)
+    if session.get(_CREATION_LEASE_KEY) is lease:
+        session.pop(_CREATION_LEASE_KEY, None)
+    session.pop(_CREATION_AUTHORITY_KEY, None)
+    return True
+
+
+def _creation_unknown_error(rid) -> dict:
+    return _err(rid, 5066, _CREATION_COORDINATION_UNKNOWN_MESSAGE)
+
+
+def _settle_creation_for_refusal(session: dict, claim, outcome: str) -> bool:
+    if not _retain_durable_turn_claim(session, claim):
+        logger.warning(_CREATION_COORDINATION_UNKNOWN_MESSAGE)
+        return False
+    try:
+        # Retain the private retry handle until durable settlement and exact
+        # transferred-reservation release have both succeeded.
+        _settle_unstarted_durable_turn(
+            session, claim, outcome=outcome, retain_claim=True
+        )
+    except Exception:
+        logger.warning(_CREATION_COORDINATION_UNKNOWN_MESSAGE)
+        return False
+    if not _release_creation_slot(session):
+        return False
+    _clear_matching_durable_turn_claim(session, claim)
+    return True
+
+
+def _refuse_unstarted_durable_creation(
+    rid, session: dict, claim, *, acquired_lease=None, clear_started_state: bool = False
+) -> dict | None:
+    """Settle one claimed creation and return its fixed synchronous refusal."""
+    del acquired_lease  # Compatibility only; ownership comes from the trusted transfer marker.
+    if not _is_durable_creation_claim(claim):
+        return None
+    _log_durable_creation_failure(claim)
+    if clear_started_state:
+        with session["history_lock"]:
+            session["running"] = False
+            session["last_active"] = time.time()
+            _clear_inflight_turn(session)
+    if not _settle_creation_for_refusal(session, claim, "not_admitted"):
+        return _creation_unknown_error(rid)
+    return _err(rid, 5006, _DURABLE_CREATION_FAILURE_MESSAGE)
+
+
+def _refuse_admitted_durable_creation(
+    rid, session: dict, claim, *, acquired_lease=None
+) -> dict | None:
+    """Fail one admitted creation that cannot reach its asynchronous worker."""
+    del acquired_lease
+    if not _is_durable_creation_claim(claim):
+        return None
+    _log_durable_creation_failure(claim)
+    with session["history_lock"]:
+        session["running"] = False
+        session["last_active"] = time.time()
+        _clear_inflight_turn(session)
+    if not _settle_creation_for_refusal(session, claim, "failed"):
+        return _creation_unknown_error(rid)
+    return _err(rid, 5006, _DURABLE_CREATION_FAILURE_MESSAGE)
+
+
+def _emit_unstarted_durable_creation_failure(
+    sid: str, session: dict, claim, terminal_callback=None, *, outcome: str = "failed"
+) -> bool:
+    """Finish an already-streaming creation exactly once with a fixed safe surface."""
+    if not _is_durable_creation_claim(claim):
+        return False
+    settlement_claim = claim
+    if isinstance(claim, dict):
+        try:
+            from tui_gateway.companion_turns import TurnClaim
+
+            settlement_claim = TurnClaim.from_wire(claim)
+        except Exception:
+            settlement_claim = claim
+    _log_durable_creation_failure(claim)
+    settled = _settle_creation_for_refusal(session, settlement_claim, outcome)
+    unknown = not settled
+    message = (
+        _CREATION_COORDINATION_UNKNOWN_MESSAGE
+        if unknown
+        else ("Turn cancelled." if outcome == "cancelled" else _DURABLE_CREATION_FAILURE_MESSAGE)
+    )
+    terminal_status = "cancelled" if outcome == "cancelled" and not unknown else "failed"
+    event_status = "interrupted" if terminal_status == "cancelled" else "error"
+    with session["history_lock"]:
+        session["running"] = False
+        session["last_active"] = time.time()
+        session["inflight_turn"] = None
+        _fail_inflight_turn(session, message)
+    _emit("message.complete", sid, {
+        "text": "",
+        "usage": {},
+        "status": event_status,
+        "error": message,
+        "recoverable": True,
+    })
+    if terminal_callback is not None:
+        try:
+            terminal_callback({"status": terminal_status, "text": "", "error": message})
+        except Exception:
+            logger.warning("hosted room terminal receipt commit failed")
+    return True
 
 
 def _run_after_agent_ready(rid, sid, session, text, display_kind, hosted_terminal_callback):
@@ -475,24 +738,70 @@ def _run_after_agent_ready(rid, sid, session, text, display_kind, hosted_termina
     if err:
         # Terminal frame + retained snapshot (not a bare "error" event): the snapshot is
         # the only way resume shows this to a disconnected client.
-        _emit_terminal_turn_error(
-            sid, session, (err.get("error") or {}).get("message", "agent initialization failed"),
-            error_surface={"layer": "runtime", "code": "agent_init_failed", "retryable": True})
+        creation = _is_durable_creation_claim(session.get("_durable_turn_claim"))
+        if creation:
+            logger.warning(_DURABLE_CREATION_FAILURE_MESSAGE)
+            with session["history_lock"]:
+                session["inflight_turn"] = None
+                _fail_inflight_turn(session, _DURABLE_CREATION_FAILURE_MESSAGE)
+            _emit("message.complete", sid, {
+                "text": "",
+                "usage": {},
+                "status": "error",
+                "error": _DURABLE_CREATION_FAILURE_MESSAGE,
+                "recoverable": True,
+            })
+            if hosted_terminal_callback is not None:
+                try:
+                    hosted_terminal_callback({
+                        "status": "failed",
+                        "text": "",
+                        "error": _DURABLE_CREATION_FAILURE_MESSAGE,
+                    })
+                except Exception:
+                    logger.warning("hosted room terminal receipt commit failed")
+        else:
+            _emit_terminal_turn_error(
+                sid, session,
+                (err.get("error") or {}).get("message", "agent initialization failed"),
+                error_surface={
+                    "layer": "runtime", "code": "agent_init_failed", "retryable": True
+                })
         with session["history_lock"]:
             session["running"] = False
             session["last_active"] = time.time()
-        _emit("session.info", sid, _session_info(session.get("agent"), session))
+        with contextlib.suppress(Exception):
+            _settle_session_durable_turn(session, "failed")
+        if not creation:
+            _emit("session.info", sid, _session_info(session.get("agent"), session))
         return
+    creation_liveness = None
+    cancelled = False
     with session["history_lock"]:
         if session.get("_turn_cancel_requested") or not session.get("running"):
-            session["running"] = False
-            _clear_inflight_turn(session)
-            # Without this emit the turn vanishes silently after {"status": "streaming"}.
-            _emit("error", sid, {"message": (
-                "Turn cancelled before the agent was ready"
-                if session.get("_turn_cancel_requested")
-                else "Session no longer running before the agent was ready")})
-            return
+            cancelled = bool(session.get("_turn_cancel_requested"))
+            creation_liveness = session.get("_durable_turn_claim")
+            if not _is_durable_creation_claim(creation_liveness):
+                session["running"] = False
+                _clear_inflight_turn(session)
+    if creation_liveness is not None and _is_durable_creation_claim(creation_liveness):
+        _emit_unstarted_durable_creation_failure(
+            sid,
+            session,
+            creation_liveness,
+            hosted_terminal_callback,
+            outcome="cancelled" if cancelled else "failed",
+        )
+        return
+    if cancelled or not session.get("running"):
+        # Without this emit the turn vanishes silently after {"status": "streaming"}.
+        _emit("error", sid, {"message": (
+            "Turn cancelled before the agent was ready"
+            if cancelled
+            else "Session no longer running before the agent was ready")})
+        with contextlib.suppress(Exception):
+            _settle_session_durable_turn(session, "cancelled" if cancelled else "failed")
+        return
     _run_prompt_submit(
         rid, sid, session, text, display_kind=display_kind,
         terminal_callback=hosted_terminal_callback)
@@ -550,6 +859,9 @@ def _(rid, params: dict) -> dict:
     session, err = _sess_nowait(params, rid)
     if err:
         return err
+    from tui_gateway.companion_turns import current_bound_turn
+    bound_claim = current_bound_turn()
+    acquired_creation_lease = None
     hosted_task = params.get("_hosted_task")
     hosted_terminal_callback = params.get("_hosted_terminal_callback")
     internal_hosted_submit = hosted_task is not None or hosted_terminal_callback is not None
@@ -557,12 +869,23 @@ def _(rid, params: dict) -> dict:
         _hosted_submit_error(rid, session, hosted_task, hosted_terminal_callback)
         if internal_hosted_submit else _legacy_group_fence_error(rid, session, params))
     if err is not None:
+        if (creation_refusal := _refuse_unstarted_durable_creation(
+            rid, session, bound_claim, acquired_lease=acquired_creation_lease
+        )) is not None:
+            return creation_refusal
         return err
+    prior_active_session_lease = session.get("active_session_lease")
     if (limit_message := _ensure_active_session_slot(sid, session)) is not None:
         # Refused HERE — before the busy queue, db row and agent build — so a refusal
         # leaves the session untouched.  The reason travels as machine-readable data.
+        if (creation_refusal := _refuse_unstarted_durable_creation(
+            rid, session, bound_claim, acquired_lease=acquired_creation_lease
+        )) is not None:
+            return creation_refusal
         reason = getattr(limit_message, "reason", None)
         return _err(rid, 4090, str(limit_message), {"reason": reason} if reason else None)
+    if _is_durable_creation_claim(bound_claim) and prior_active_session_lease is None:
+        acquired_creation_lease = session.get("active_session_lease")
     # Rewritten every submit: a session alternates app window / HUD; stale "hud" misinforms.
     session["client_surface"] = "hud" if params.get("surface") == "hud" else ""
     has_truncation = any(params.get(k) is not None for k in _TRUNCATION_PARAMS)
@@ -571,12 +894,24 @@ def _(rid, params: dict) -> dict:
         # `/work fix it` sends nine literal chars.
         text = _expand_skill_invocation_for_replay(text, str(session.get("session_key") or ""))
     turn_isolation = _session_uses_compute_host(session, _load_dashboard_process_isolation_config())
-    if internal_hosted_submit and turn_isolation:
-        return _err(rid, 4121, "hosted room turns do not support isolated compute workers yet")
+    if turn_isolation and (internal_hosted_submit or bound_claim is not None):
+        if (creation_refusal := _refuse_unstarted_durable_creation(
+            rid, session, bound_claim, acquired_lease=acquired_creation_lease
+        )) is not None:
+            return creation_refusal
+        return _err(rid, 4121, (
+            "hosted room turns do not support isolated compute workers yet"
+            if internal_hosted_submit
+            else "persisted continuation is unavailable while compute-host turn isolation is enabled"
+        ))
     # Re-bind to the current transport: streaming must stay on the active websocket even
     # if a disconnect/fallback moved the session to stdio.
     with _session_resume_lock:
         if (refusal := _reattach_refusal(rid, sid, session)) is not None:
+            if (creation_refusal := _refuse_unstarted_durable_creation(
+                rid, session, bound_claim, acquired_lease=acquired_creation_lease
+            )) is not None:
+                return creation_refusal
             return refusal
         if (t := current_transport()) is not None:
             session["transport"] = t
@@ -590,8 +925,15 @@ def _(rid, params: dict) -> dict:
         with session["history_lock"]:
             if not session.get("running"):
                 break
-            if internal_hosted_submit:
-                return _err(rid, 4091, "hosted room member session is busy")
+            if internal_hosted_submit or bound_claim is not None:
+                if (creation_refusal := _refuse_unstarted_durable_creation(
+                    rid, session, bound_claim, acquired_lease=acquired_creation_lease
+                )) is not None:
+                    return creation_refusal
+                return _err(
+                    rid, 4091,
+                    "hosted room member session is busy"
+                    if internal_hosted_submit else "persisted continuation session is busy")
             busy_transport = t or session.get("transport")
         busy_response = _handle_busy_submit(
             rid, sid, session, text, busy_transport, queued=bool(params.get("queued")))
@@ -604,37 +946,101 @@ def _(rid, params: dict) -> dict:
     err, survivor_fields = _lock_in_submit_turn(
         rid, sid, session, text, params, has_truncation, requested_rebind_ids, hosted_task)
     if err is not None:
+        if (creation_refusal := _refuse_unstarted_durable_creation(
+            rid, session, bound_claim, acquired_lease=acquired_creation_lease
+        )) is not None:
+            return creation_refusal
+        with contextlib.suppress(Exception):
+            _settle_unstarted_durable_turn(session, bound_claim)
         return err
+    try:
+        durable_claim = _prepare_durable_turn_claim(sid, session)
+    except Exception as exc:
+        if (creation_refusal := _refuse_unstarted_durable_creation(
+            rid, session, bound_claim, acquired_lease=acquired_creation_lease,
+            clear_started_state=True,
+        )) is not None:
+            return creation_refusal
+        with session["history_lock"]:
+            session["running"] = False
+            _clear_inflight_turn(session)
+        with contextlib.suppress(Exception):
+            _settle_unstarted_durable_turn(session, bound_claim)
+        _log_durable_creation_failure(bound_claim)
+        return _err(rid, 5006, _public_durable_turn_error(exc, bound_claim))
+    if durable_claim is not None:
+        from tui_gateway.companion_turns import admit_turn
+        try:
+            with _session_db(session) as db:
+                if db is None:
+                    raise RuntimeError("session database is unavailable")
+                admit_turn(db, durable_claim, runtime_id=sid)
+        except Exception as exc:
+            if (creation_refusal := _refuse_unstarted_durable_creation(
+                rid, session, durable_claim, acquired_lease=acquired_creation_lease,
+                clear_started_state=True,
+            )) is not None:
+                return creation_refusal
+            with session["history_lock"]:
+                session["running"] = False
+                _clear_inflight_turn(session)
+            with contextlib.suppress(Exception):
+                _settle_unstarted_durable_turn(session, durable_claim)
+            _log_durable_creation_failure(durable_claim)
+            return _err(
+                rid, 5006, _public_durable_turn_error(
+                    exc, durable_claim, legacy_prefix="durable turn admission failed: "
+                )
+            )
     if turn_isolation:
         isolated_response = _submit_prompt_to_compute_host(
             rid, sid, session, text, display_kind=display_kind)
         if not isolated_response.get("error"):
-            # The truncation already happened inline above (memory + DB).
             isolated_response["result"].update(survivor_fields)
             return isolated_response
-        # An ordinal/id alone is not consent. A client that carries a leftover ordinal into an ORDINARY
-        # submit sends a request that is indistinguishable, field by field, from a real rewind — same
-        # method, same shape, an in-range target — and the cut it asks for is a destructive
-        # replace_messages() the user never requested (#80763: 296 -> 52 messages, 244 durable rows gone).
-        # Only the client knows whether this submit is a rewind/edit/regenerate, so it has to say so; refuse
-        # the cut when it doesn't. Consent is checked BEFORE target resolution: an unconfirmed
-        # (leaked-state) request must refuse with 4029 without paying the durable transcript read or
-        # heal-stamping live history dicts that row-id resolution performs.
         logger.warning(
             "compute-host dispatch failed for session %s; falling back inline: %s", sid,
             isolated_response["error"].get("message", "unknown error"))
-    if (err := _persist_session_row_for_submit(rid, session)) is not None:
-        return err
-    # A completed FAILED build must not wedge the session: rebuild, don't replay it.
-    if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
-        _start_agent_build(sid, session)
-    run_thread = threading.Thread(
-        target=lambda: _run_after_agent_ready(
-            rid, sid, session, text, display_kind, hosted_terminal_callback),
-        daemon=True)
-    # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
-    session["_run_thread"] = run_thread
-    run_thread.start()
+    run_thread = None
+    try:
+        if (persist_err := _persist_session_row_for_submit(rid, session)) is not None:
+            if (creation_refusal := _refuse_admitted_durable_creation(
+                rid, session, durable_claim, acquired_lease=acquired_creation_lease
+            )) is not None:
+                return creation_refusal
+            return persist_err
+        # A completed FAILED build must not wedge the session: rebuild, don't replay it.
+        if not _restart_completed_failed_agent_build(sid, session, session.get("agent_ready")):
+            _start_agent_build(sid, session)
+        run_thread = threading.Thread(
+            target=lambda: _run_after_agent_ready(
+                rid, sid, session, text, display_kind, hosted_terminal_callback),
+            daemon=True)
+        # Handle lets session.interrupt tell a live turn from a stuck `running` flag.
+        with session["history_lock"]:
+            session["_run_thread"] = run_thread
+        run_thread.start()
+    except Exception as exc:
+        with session["history_lock"]:
+            if run_thread is not None and session.get("_run_thread") is run_thread:
+                session.pop("_run_thread", None)
+        if (creation_refusal := _refuse_admitted_durable_creation(
+            rid, session, durable_claim, acquired_lease=acquired_creation_lease
+        )) is not None:
+            return creation_refusal
+        with session["history_lock"]:
+            if run_thread is not None and session.get("_run_thread") is run_thread:
+                session.pop("_run_thread", None)
+            session["running"] = False
+            _clear_inflight_turn(session)
+        with contextlib.suppress(Exception):
+            _settle_unstarted_durable_turn(session, durable_claim, outcome="failed")
+        _log_durable_creation_failure(durable_claim)
+        return _err(
+            rid, 5006, _public_durable_turn_error(
+                exc, durable_claim, legacy_prefix="turn thread failed to start: "
+            )
+        )
     return _ok(rid, {"status": "streaming", **survivor_fields})
 
 

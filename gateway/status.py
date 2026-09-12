@@ -558,6 +558,140 @@ def _try_acquire_file_lock(handle) -> bool:
         return False
 
 
+def _psutil_pid_liveness(pid: int, psutil_module: Any) -> str:
+    """One psutil status read, classified without a second PID existence probe."""
+    try:
+        process_status = psutil_module.Process(pid).status()
+    except Exception as exc:
+        no_such = tuple(
+            error for error in (
+                getattr(psutil_module, "NoSuchProcess", None),
+                getattr(psutil_module, "ZombieProcess", None),
+            ) if isinstance(error, type)
+        )
+        access_denied = getattr(psutil_module, "AccessDenied", None)
+        if no_such and isinstance(exc, no_such):
+            return "dead"
+        if isinstance(access_denied, type) and isinstance(exc, access_denied):
+            return "alive"
+        return "unknown"
+    terminated_statuses = {
+        state for state in (
+            getattr(psutil_module, "STATUS_ZOMBIE", None),
+            getattr(psutil_module, "STATUS_DEAD", None),
+        ) if state is not None
+    }
+    return "dead" if process_status in terminated_statuses else "alive"
+
+
+def _win32_ctypes_pid_liveness(pid: int, ctypes_module: Any) -> str:
+    """Tri-state Windows probe. Never uses ``os.kill`` (which signals console groups)."""
+    try:
+        kernel32 = ctypes_module.windll.kernel32
+        kernel32.OpenProcess.restype = ctypes_module.c_void_p
+        kernel32.WaitForSingleObject.restype = ctypes_module.c_uint
+        kernel32.GetLastError.restype = ctypes_module.c_uint
+        process_query_limited_information, synchronize = 0x1000, 0x100000
+        wait_object_0, wait_timeout = 0x00000000, 0x00000102
+        error_access_denied, error_invalid_parameter = 5, 87
+        handle = kernel32.OpenProcess(
+            process_query_limited_information | synchronize, False, pid
+        )
+        if not handle:
+            error = kernel32.GetLastError()
+            if error == error_invalid_parameter:
+                return "dead"
+            if error == error_access_denied:
+                return "alive"
+            return "unknown"
+        try:
+            wait_result = kernel32.WaitForSingleObject(handle, 0)
+        except Exception:
+            wait_result = None
+        try:
+            closed = kernel32.CloseHandle(handle)
+        except Exception:
+            return "unknown"
+        if not closed:
+            return "unknown"
+        if wait_result == wait_timeout:
+            return "alive"
+        if wait_result == wait_object_0:
+            return "dead"
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
+def _posix_pid_liveness(pid: int) -> str:
+    """psutil-free POSIX probe using one status source, including zombie detection."""
+    proc_root = Path("/proc")
+    if proc_root.is_dir():
+        try:
+            fields = (proc_root / str(pid) / "stat").read_text(encoding="utf-8").split()
+        except FileNotFoundError:
+            return "dead"
+        except PermissionError:
+            return "alive"
+        except Exception:
+            return "unknown"
+        if len(fields) <= 2:
+            return "unknown"
+        return "dead" if fields[2] == "Z" else "alive"
+    try:
+        result = subprocess.run(
+            ["ps", "-o", "state=", "-p", str(pid)],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
+        )
+    except Exception:
+        return "unknown"
+    if result.returncode == 1:
+        return "dead"
+    if result.returncode != 0 or not result.stdout.strip():
+        return "unknown"
+    return "dead" if result.stdout.strip().startswith("Z") else "alive"
+
+
+def probe_pid_liveness(
+    pid: int,
+    *,
+    is_windows: Optional[bool] = None,
+    psutil_module: Any = _UNSET,
+    ctypes_module: Any = _UNSET,
+) -> str:
+    """Return ``alive``, ``dead``, or ``unknown`` from one canonical PID probe.
+
+    Only authoritative absence/termination/zombie results are dead. Access
+    denial proves existence; all unexpected probe failures remain unknown.
+    Platform and probe modules are injectable so classification is testable
+    without pretending the interpreter runs on another OS.
+    """
+    try:
+        canonical_pid = int(pid)
+    except (TypeError, ValueError, OverflowError):
+        return "unknown"
+    if canonical_pid <= 0:
+        return "unknown"
+    if psutil_module is _UNSET:
+        try:
+            import psutil as psutil_module  # type: ignore
+        except ImportError:
+            psutil_module = None
+        except Exception:
+            return "unknown"
+    if psutil_module is not None:
+        return _psutil_pid_liveness(canonical_pid, psutil_module)
+    windows = _IS_WINDOWS if is_windows is None else bool(is_windows)
+    if windows:
+        if ctypes_module is _UNSET:
+            try:
+                import ctypes as ctypes_module
+            except Exception:
+                return "unknown"
+        return _win32_ctypes_pid_liveness(canonical_pid, ctypes_module)
+    return _posix_pid_liveness(canonical_pid)
+
+
 def _pid_exists(pid: int) -> bool:
     """Cross-platform "is this PID alive" check that does NOT kill the target. CRITICAL on Windows:
     ``os.kill(pid, 0)`` sends ``CTRL_C_EVENT`` to the whole console group (bpo-14484), so prefer

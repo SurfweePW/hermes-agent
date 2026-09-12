@@ -1,5 +1,5 @@
 import type { OrganizationGateway } from '../../gateway/organization-types'
-import type { WorkCapability, WorkCard, WorkDetail, WorkGateway } from '../../gateway/work-types'
+import type { WorkCapability, WorkCard, WorkComment, WorkDecisionRecord, WorkDetail, WorkGateway } from '../../gateway/work-types'
 
 import type { WorkCardView, WorkDecisionInput, WorkInboxProps, WorkPriorityInput } from './work-inbox'
 
@@ -29,11 +29,88 @@ export interface WorkStore {
   setPriority(input: WorkPriorityInput): Promise<boolean>
   restoreRecommended(): Promise<boolean>
 }
+
+export function verifiedWorkProfiles(snapshot: Pick<WorkSnapshot, 'status' | 'sources'>): ReadonlySet<string> {
+  if (snapshot.status !== 'verified') {return new Set()}
+
+  return new Set(
+    snapshot.sources
+      .filter((source) => source.status === 'verified' && !source.incomplete)
+      .map((source) => source.profile)
+  )
+}
+
 const key = (profile: string, id: string) => JSON.stringify([profile, id])
+const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 type PriorityView = NonNullable<WorkCardView['priority']>
+
+interface CanonicalAttentionItem {
+  id: string
+  profile: string
+  actionable: boolean
+  kind: 'approval' | 'question' | 'blocker' | 'completion' | 'error'
+  work_ref?: { profile: string; id: string }
+}
+
+type CanonicalWorkItem = WorkCard | Pick<WorkCardView, 'id' | 'profile' | 'actionable' | 'bucket'> & {
+  attentionKey?: string
+  attentionDue?: boolean
+  snoozedUntil?: string
+}
+
+function isDueWorkDecision(item: CanonicalWorkItem): boolean {
+  return 'attention_due' in item
+    ? item.state === 'needs_me' && item.attention_due
+    : item.bucket === 'needs_me' && (item.attentionDue === true || !item.snoozedUntil)
+}
+
+/** Hide runtime entries only when the matching Work source is currently verified. */
+export function distinctRuntimeAttention<T extends CanonicalAttentionItem>(
+  work: readonly CanonicalWorkItem[],
+  attention: readonly T[],
+  verifiedProfiles: ReadonlySet<string>
+): T[] {
+  const workIdentities = new Set(
+    work.filter((item) => verifiedProfiles.has(item.profile)).map((item) => key(item.profile, item.id))
+  )
+
+  return attention.filter((item) => !item.work_ref || !workIdentities.has(key(item.work_ref.profile, item.work_ref.id)))
+}
+
+/** One count for business decisions plus visible runtime attention. */
+export function canonicalDecisionCount(
+  work: readonly CanonicalWorkItem[],
+  attention: readonly CanonicalAttentionItem[],
+  verifiedProfiles: ReadonlySet<string>
+): number {
+  const identities = new Set<string>()
+
+  for (const item of work) {
+    if (!isDueWorkDecision(item)) {continue}
+    identities.add(key(item.profile, item.id))
+  }
+
+  for (const item of distinctRuntimeAttention(work, attention, verifiedProfiles)) {
+    if (!item.actionable || item.kind === 'completion' || item.kind === 'error') {continue}
+    identities.add(item.work_ref ? key(item.work_ref.profile, item.work_ref.id) : key(item.profile, item.id))
+  }
+
+  return identities.size
+}
 
 function errorCode(error: unknown): number | undefined {
   return typeof error === 'object' && error !== null && 'code' in error ? Number(error.code) : undefined
+}
+
+function sameComment(left: WorkComment, right: WorkComment): boolean {
+  return left.id === right.id && left.card_id === right.card_id && left.revision === right.revision && left.actor === right.actor
+    && left.text === right.text && left.created_at === right.created_at
+}
+
+function sameDecision(left: WorkDecisionRecord, right: WorkDecisionRecord): boolean {
+  return left.id === right.id && left.card_id === right.card_id && left.revision === right.revision && left.action === right.action
+    && left.actor === right.actor && left.reason === right.reason && left.snoozed_until === right.snoozed_until
+    && left.created_at === right.created_at && left.scope === right.scope
 }
 
 function view(card: WorkCard, capability: WorkCapability | undefined, detail?: WorkDetail, priority?: WorkCardView['priority']): WorkCardView {
@@ -47,6 +124,7 @@ function view(card: WorkCard, capability: WorkCapability | undefined, detail?: W
     permitted: ['Prepare only the work described in this revision’s brief.'],
     excluded: ['Publishing, paid activation, live store changes, sending, spending and other external writes require separate authorization.'],
     nextAction: card.next_action, owner: card.owner,
+    recommendedAction: card.recommended_action,
     decision: decision ? `${decision.action}${decision.reason ? `: ${decision.reason}` : ''}` : card.approval ? `Preparation approved for revision ${card.approval.revision}` : '',
     ...(card.snoozed_until ? { snoozedUntil: card.snoozed_until } : {}),
     preparationStatus: {
@@ -63,10 +141,14 @@ function view(card: WorkCard, capability: WorkCapability | undefined, detail?: W
     ...(card.completion_evidence ? { completionEvidence: Array.isArray(card.completion_evidence) ? card.completion_evidence : [card.completion_evidence] } : {}),
     previews: card.execution_link ? [{ label: card.execution_link.execution_ref, url: card.execution_link.execution_ref }]
       : card.execution_ref ? [{ label: `Proposed tracker reference: ${card.execution_ref}`, url: card.execution_ref }] : [],
+    attentionKey: card.attention_key,
+    attentionDue: card.attention_due,
+    ...(priority?.source_session ? { sourceSession: { backend: priority.source_session.namespace.backend_id, profile: priority.source_session.namespace.profile, id: priority.source_session.persisted_session_id } } : {}),
     decisionHistory: detail?.decisions.map((entry) => ({ id: entry.id, action: entry.action, revision: entry.revision, actor: entry.actor, reason: entry.reason, createdAt: entry.created_at, scope: entry.scope, snoozedUntil: entry.snoozed_until })) ?? [],
     discussion: detail?.comments.map((comment) => ({ id: comment.id, author: `${comment.actor} · Revision ${comment.revision} · ${comment.created_at}`, body: comment.text })) ?? [],
     trackerStatusHistory: detail?.tracker_status_history ?? [],
     ...(!capability?.can_decide ? { readOnlyReason: capability?.reason || 'Human-authenticated dashboard login is required for business decisions.' } : {}),
+    canDecide: capability?.can_decide === true,
     ...(priority ? { priority } : {}),
     actionable: capability?.can_decide === true && card.state === 'needs_me' && card.attention_due && !snoozed
   }
@@ -156,7 +238,20 @@ export function createWorkStore(): WorkStore {
       const incoming = new Map<string, PriorityView>()
 
       for (const card of response.list.items) {cards.set(key(card.profile, card.id), card)}
-      response.recommended?.groups.forEach((group, groupOrder) => group.items.forEach((item, itemOrder) => incoming.set(key(item.profile, item.work_id), { ...item, topicName: group.group.name, ...(group.group.collection ? { topicCollection: group.group.collection } : {}), groupOrder, itemOrder })))
+      response.recommended?.groups.forEach((group, groupOrder) => group.items.forEach((item, itemOrder) => incoming.set(key(item.profile, item.work_id), {
+        ...item,
+        topicName: group.group.name,
+        ...(group.group.collection ? { topicCollection: group.group.collection } : {}),
+        group: {
+          kind: group.group.kind,
+          id: group.group.id,
+          ...(group.group.kind === 'project' && group.group.source_id && group.group.namespace
+            ? { source_id: group.group.source_id, profile: group.group.namespace.profile, backend_namespace: group.group.namespace.backend_id }
+            : { profile: response.recommended!.profile, backend_namespace: response.recommended!.backend_namespace })
+        },
+        groupOrder,
+        itemOrder
+      })))
 
       for (const [priorityKey, priority] of incoming) {latestPriorities.set(priorityKey, priority)}
 
@@ -288,7 +383,11 @@ export function createWorkStore(): WorkStore {
 
     if (!client || !current || snapshot.status !== 'verified' || snapshot.pending) {return false}
 
-    if ('action' in input && !view(current, capabilities.get(current.profile)).actionable) {return false}
+    const capability = capabilities.get(current.profile)
+
+    if (capability?.can_decide !== true) {return false}
+
+    if ('action' in input && !view(current, capability).actionable) {return false}
 
     if ('text' in input && !input.text.trim()) {return false}
 
@@ -298,20 +397,42 @@ export function createWorkStore(): WorkStore {
     publish({ pending: true, message: null })
 
     try {
-      if ('text' in input) {
-        await client.commentWork({ profile: current.profile, id: current.id, text: input.text.trim(), idempotency_key })
-      } else {
-        await client.decideWork({ profile: current.profile, id: current.id, expected_version: current.version, revision: current.revision, action: input.action, idempotency_key,
-          ...(input.comment ? { reason: input.comment } : {}), ...(input.snoozedUntil ? { snoozed_until: input.snoozedUntil } : {}) })
-      }
+      let confirmed: boolean
 
-      if (generation !== epoch || gateway !== client) {return false}
-      await refresh(true)
+      if ('text' in input) {
+        const submittedText = input.text.trim()
+        const { comment } = await client.commentWork({ profile: current.profile, id: current.id, text: submittedText, idempotency_key })
+
+        if (!uuid.test(comment.id) || comment.id === idempotency_key || comment.revision !== current.revision || comment.text !== submittedText) {confirmed = false} else {
+          if (generation !== epoch || gateway !== client) {return false}
+          await refresh(true)
+          confirmed = detail?.comments.some((entry) => sameComment(entry, comment)) === true
+        }
+      } else {
+        const action = input.action === 'remind_in_2_hours' ? 'snooze' : input.action
+        const reason = input.comment ?? ''
+        const snoozedUntil = input.action === 'remind_in_2_hours' ? new Date(Date.now() + 2 * 60 * 60 * 1_000).toISOString() : null
+        const { decision } = await client.decideWork({ profile: current.profile, id: current.id, expected_version: current.version, revision: current.revision, action, idempotency_key,
+          ...(input.comment ? { reason: input.comment } : {}), ...(snoozedUntil ? { snoozed_until: snoozedUntil } : {}) })
+
+        if (!uuid.test(decision.id) || decision.id === idempotency_key || decision.revision !== current.revision || decision.action !== action || decision.reason !== reason || decision.snoozed_until !== snoozedUntil) {confirmed = false} else {
+          if (generation !== epoch || gateway !== client) {return false}
+          await refresh(true)
+          confirmed = detail?.decisions.some((entry) => sameDecision(entry, decision)) === true
+        }
+      }
 
       if (gateway !== client) {return false}
       publish({ pending: false })
 
       if (snapshot.status !== 'verified') {return false}
+
+      if (!confirmed) {
+        publish({ message: 'The save returned, but its exact server record could not be confirmed. Nothing was automatically retried; refresh before deciding what to do next.' })
+
+        return false
+      }
+
       publish({ message: 'Saved and verified from the server.' })
 
       return true

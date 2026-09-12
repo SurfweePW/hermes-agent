@@ -13,6 +13,82 @@ from gateway import status
 
 
 class TestGatewayPidState:
+    @pytest.mark.parametrize(
+        ("last_error", "expected"),
+        [(87, "dead"), (5, "alive"), (1234, "unknown")],
+    )
+    def test_tri_state_windows_probe_classifies_only_authoritative_results(
+        self, monkeypatch, last_error, expected
+    ):
+        def native(result):
+            def call(*_args):
+                return result
+
+            return call
+
+        kernel32 = SimpleNamespace(
+            OpenProcess=native(0),
+            WaitForSingleObject=native(0),
+            GetLastError=native(last_error),
+            CloseHandle=native(1),
+        )
+        ctypes_module = SimpleNamespace(
+            windll=SimpleNamespace(kernel32=kernel32),
+            c_void_p=object(),
+            c_uint=object(),
+        )
+        monkeypatch.setattr(
+            status.os,
+            "kill",
+            lambda *_args: pytest.fail("the Windows probe must never signal a process"),
+        )
+
+        assert status.probe_pid_liveness(
+            123,
+            is_windows=True,
+            psutil_module=None,
+            ctypes_module=ctypes_module,
+        ) == expected
+
+    @pytest.mark.parametrize(
+        ("failure", "expected"),
+        [("missing", "dead"), ("denied", "alive"), ("unexpected", "unknown")],
+    )
+    def test_tri_state_psutil_probe_is_single_and_fail_closed(self, failure, expected):
+        class NoSuchProcess(Exception):
+            pass
+
+        class AccessDenied(Exception):
+            pass
+
+        calls = {"process": 0, "status": 0}
+
+        class Process:
+            def __init__(self, _pid):
+                calls["process"] += 1
+
+            def status(self):
+                calls["status"] += 1
+                error = {
+                    "missing": NoSuchProcess,
+                    "denied": AccessDenied,
+                    "unexpected": RuntimeError,
+                }[failure]
+                raise error("probe failure")
+
+        psutil_module = SimpleNamespace(
+            Process=Process,
+            NoSuchProcess=NoSuchProcess,
+            ZombieProcess=NoSuchProcess,
+            AccessDenied=AccessDenied,
+            STATUS_ZOMBIE="zombie",
+            STATUS_DEAD="dead",
+            pid_exists=lambda _pid: pytest.fail("must not duplicate the PID probe"),
+        )
+
+        assert status.probe_pid_liveness(123, psutil_module=psutil_module) == expected
+        assert calls == {"process": 1, "status": 1}
+
     def test_write_pid_file_records_gateway_metadata(self, tmp_path, monkeypatch):
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
 

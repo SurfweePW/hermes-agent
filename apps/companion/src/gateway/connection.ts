@@ -22,6 +22,18 @@ export interface BaseUrlStorage {
   setItem(key: string, value: string): void
 }
 
+export interface GatewayConnectionLifecycleOptions {
+  isConnected(): boolean
+  loadToken(): Promise<string | undefined>
+  connect(token: string): Promise<void>
+}
+
+export interface GatewayResourceRevocation {
+  trackStream(stream: { close(): void }): () => void
+  trackDownload(controller: AbortController): () => void
+  revoke(): Promise<void>
+}
+
 function invalidUrl(message = 'Enter a valid HTTP(S) gateway URL.'): Error {
   return new Error(message)
 }
@@ -186,5 +198,79 @@ export function redactGatewayUrl(value: string): string {
     return url.toString()
   } catch {
     return value.replace(/([?&](?:token|ticket)=)[^&#]*/gi, '$1[REDACTED]')
+  }
+}
+
+/** Reconnects without exposing any navigation or focus mutation callback. */
+export function installGatewayConnectionLifecycle({
+  isConnected,
+  loadToken,
+  connect
+}: GatewayConnectionLifecycleOptions): { destroy(): void; reconnect(): Promise<void>; whenIdle(): Promise<void> } {
+  let destroyed = false
+  let reconnectInFlight: Promise<void> | null = null
+
+  const reconnect = (): Promise<void> => {
+    if (destroyed || document.visibilityState === 'hidden' || isConnected()) { return Promise.resolve() }
+    if (reconnectInFlight) { return reconnectInFlight }
+
+    const operation = (async () => {
+      const token = await loadToken()
+
+      if (!destroyed && token && !isConnected()) { await connect(token) }
+    })()
+    const settled = operation.finally(() => {
+      if (reconnectInFlight === settled) { reconnectInFlight = null }
+    })
+    reconnectInFlight = settled
+
+    return settled
+  }
+
+  const onForeground = () => { void reconnect() }
+  document.addEventListener('visibilitychange', onForeground)
+  window.addEventListener('online', onForeground)
+
+  return {
+    reconnect,
+    whenIdle: () => reconnectInFlight ?? Promise.resolve(),
+    destroy() {
+      destroyed = true
+      document.removeEventListener('visibilitychange', onForeground)
+      window.removeEventListener('online', onForeground)
+    }
+  }
+}
+
+/** Closes every credential-bearing resource before deleting its durable token. */
+export function createGatewayResourceRevocation(resetStoredToken: () => void | Promise<void>): GatewayResourceRevocation {
+  const resources = new Set<() => void>()
+  let revocation: Promise<void> | null = null
+  const track = (close: () => void): (() => void) => {
+    if (revocation) {
+      close()
+
+      return () => undefined
+    }
+    resources.add(close)
+
+    return () => resources.delete(close)
+  }
+
+  return {
+    trackStream: (stream) => track(() => stream.close()),
+    trackDownload: (controller) => track(() => controller.abort()),
+    revoke() {
+      if (revocation) { return revocation }
+      revocation = (async () => {
+        for (const close of resources) {
+          try { close() } catch { /* Continue revoking the remaining resources. */ }
+        }
+        resources.clear()
+        await resetStoredToken()
+      })()
+
+      return revocation
+    }
   }
 }

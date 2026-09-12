@@ -258,6 +258,8 @@ def classify_preview(
             return {"kind": "text", "preview_available": True}
     if suffix in {".txt", ".log", ".text"} and mime in {"", "text/plain"} and text_bytes():
         return {"kind": "text", "preview_available": True}
+    if suffix == ".csv" and mime in {"", "text/csv", "application/csv", "application/octet-stream"} and text_bytes():
+        return {"kind": "text", "preview_available": True}
     image_signatures = {
         ".png": content.startswith(b"\x89PNG\r\n\x1a\n"),
         ".jpg": content.startswith(b"\xff\xd8\xff"),
@@ -1083,8 +1085,11 @@ class ArtifactLibrary:
 
     @staticmethod
     def _safe_filename(filename: str) -> str:
-        name = Path(filename).name
-        name = "".join("_" if ord(ch) < 32 else ch for ch in name).strip(". ")
+        name = re.split(r"[\\/]", filename)[-1]
+        name = "".join(
+            "_" if ord(ch) < 32 or ch in '<>:"/\\|?*' else ch
+            for ch in name
+        ).strip(". ")
         if not name:
             name = "artifact"
         if len(name.encode("utf-8")) > 180:
@@ -1311,7 +1316,10 @@ class ArtifactLibrary:
                 raw = handle.read(1024 * 1024 + 1)
             if len(raw) > 1024 * 1024:
                 return None
-            value = json.loads(raw)
+            try:
+                value = json.loads(raw)
+            except (json.JSONDecodeError, RecursionError):
+                return None
             if not isinstance(value, dict) or value.get("schema_version") != self.schema_version:
                 return None
             artifact_id, version_id = value.get("artifact_id"), value.get("version_id")
