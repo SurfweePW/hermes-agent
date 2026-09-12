@@ -1,5 +1,5 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { validateCompanionProjectList, validateCompanionSessionList } from '../../gateway/companion-client'
 import type { CompanionProject, CompanionProjectDetail, CompanionSession, CompanionSessionHistoryResult } from '../../gateway/types'
@@ -54,6 +54,22 @@ const props = (params: string, change: Partial<DirectorySnapshot> = {}) => ({
 })
 
 describe('WorkDirectory', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('exposes new-conversation entry only in the mobile Rozmowy layout', () => {
+    const teammates = [{ id: 'atlas', name: 'Atlas' }, { id: 'mentor', name: 'Mentor' }]
+    vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(390)
+
+    const { unmount } = render(<ChatsDirectory {...props('')} onCreateConversation={vi.fn(async () => undefined)} onOpenSession={vi.fn()} teammates={teammates} />)
+    expect(screen.getByRole('button', { name: 'Nowa rozmowa' })).toBeTruthy()
+    unmount()
+
+    vi.restoreAllMocks()
+    vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(1024)
+    render(<ChatsDirectory {...props('')} onCreateConversation={vi.fn(async () => undefined)} onOpenSession={vi.fn()} teammates={teammates} />)
+    expect(screen.queryByRole('button', { name: 'Nowa rozmowa' })).toBeNull()
+  })
+
   it('groups raw gateway sessions by authoritative project-tree membership and keeps unmatched sessions visible', async () => {
     const sessionPage = validateCompanionSessionList({
       profile: 'atlas', backend_namespace: 'desktop-db', coverage: 'complete', has_more: false, next_cursor: null,

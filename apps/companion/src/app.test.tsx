@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { App, libraryAssetParams } from './app'
 import { createFakeGateway, FakeCompanionGateway } from './fixtures/fake-gateway'
 import { createFakeWorkGateway, FakeWorkGateway } from './fixtures/fake-work-gateway'
+import type { CreateCompanionSessionRequest } from './gateway/types'
 import type { OwnerAuthBridge } from './security/owner-auth'
 import type { SessionSecretStore } from './security/secret-store'
 import { createCompanionStore } from './state/companion-store'
@@ -39,6 +40,9 @@ async function readyOwnerDirectoryStore(gateway = new FakeWorkGateway()) {
       getItem: (key) => values.get(key) ?? null,
       setItem: (key, value) => {values.set(key, value)},
       removeItem: (key) => {values.delete(key)}
+    },
+    creationLock: {
+      request: async (_name, _options, callback) => callback({ name: _name })
     }
   })
 
@@ -379,6 +383,45 @@ describe('App', () => {
     expect(screen.getByLabelText('Assign to').tagName).toBe('SELECT')
     expect(screen.getByLabelText('Task').tagName).toBe('TEXTAREA')
     expect(screen.getByRole('button', { name: 'Send task' })).toBeTruthy()
+  })
+
+  it('submits a mobile new conversation through durable companion creation', async () => {
+    vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(390)
+    const gateway = new FakeWorkGateway()
+    const listCompanionSessions = gateway.listCompanionSessions.bind(gateway)
+    const listCompanionProjects = gateway.listCompanionProjects.bind(gateway)
+
+    const createCompanionSession = vi.fn(async (request: CreateCompanionSessionRequest) => ({
+      ...request,
+      operation_kind: 'create' as const,
+      stored_session_id: 'stored-mobile-1',
+      row_state: 'present' as const,
+      operation_status: 'completed' as const,
+      runtime_session_id: null
+    }))
+
+    Object.assign(gateway, {
+      createCompanionSession,
+      listCompanionSessions: async (options: { profile: string; limit?: number; cursor?: string }) => ({ ...(await listCompanionSessions(options)), backend_namespace: 'fixture-mac-mini' }),
+      listCompanionProjects: async (options: { profile: string; limit?: number; cursor?: string }) => ({ ...(await listCompanionProjects(options)), backend_namespace: 'fixture-mac-mini' })
+    })
+    const { store } = await readyOwnerDirectoryStore(gateway)
+    await vi.waitFor(() => expect(store.directory.getSnapshot().coverage.find((item) => item.profile === 'atlas')?.backendNamespace).toBe('fixture-mac-mini'))
+    render(<App store={store} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Nowa rozmowa' }))
+    expect((screen.getByLabelText('Profil rozmowy') as HTMLSelectElement).value).toBe('atlas')
+    fireEvent.change(screen.getByLabelText('Pierwsza wiadomość'), { target: { value: 'Sprawdź mobilne wejście' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Rozpocznij rozmowę' }))
+
+    await waitFor(() => expect(createCompanionSession).toHaveBeenCalledOnce())
+    expect(createCompanionSession).toHaveBeenCalledWith(expect.objectContaining({
+      version: 1,
+      backend_namespace: 'fixture-mac-mini',
+      profile: 'atlas',
+      project_id: null,
+      text: 'Sprawdź mobilne wejście'
+    }))
   })
 
   it('marks active navigation and focuses the newly selected screen context', async () => {

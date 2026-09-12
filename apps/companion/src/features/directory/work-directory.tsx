@@ -1,4 +1,4 @@
-import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { type FormEvent, type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
 
 import type { CompanionOriginalRoute } from '../../gateway/original-route'
 import type { CompanionProject, CompanionSession, CompanionSessionTarget } from '../../gateway/types'
@@ -43,9 +43,70 @@ const enumParam = <T extends string>(params: URLSearchParams, key: string, allow
 interface ChatsDirectoryProps extends DirectoryProps {
   onOpenSession(item: CompanionSession): void
   onSubmitSession?(item: CompanionSession, text: string): Promise<void>
+  onCreateConversation?(teammateId: string, text: string): Promise<void>
+  teammates?: readonly { id: string; name: string }[]
   draft?: string
   onDraftChange?(draft: string): void
   onActivateSessionDraft?(target: CompanionSessionTarget): void
+}
+
+function useMobileLayout() {
+  const [mobile, setMobile] = useState(() => window.innerWidth <= 780)
+
+  useEffect(() => {
+    const update = () => setMobile(window.innerWidth <= 780)
+    window.addEventListener('resize', update)
+
+    return () => window.removeEventListener('resize', update)
+  }, [])
+
+  return mobile
+}
+
+function MobileConversationEntry({ teammates, onCreate }: { teammates: readonly { id: string; name: string }[]; onCreate(teammateId: string, text: string): Promise<void> }) {
+  const atlasId = teammates.find((teammate) => teammate.id === 'atlas')?.id ?? ''
+  const [open, setOpen] = useState(false)
+  const [target, setTarget] = useState(atlasId)
+  const [text, setText] = useState('')
+  const [submitting, setSubmitting] = useState(false)
+  const [failed, setFailed] = useState(false)
+  const messageRef = useRef<HTMLTextAreaElement>(null)
+
+  useEffect(() => {
+    if (open) {messageRef.current?.focus()}
+  }, [open])
+
+  const submit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault()
+
+    if (!target || !text.trim() || submitting) {return}
+    setSubmitting(true)
+    setFailed(false)
+
+    try {
+      await onCreate(target, text)
+      setText('')
+    } catch {
+      setFailed(true)
+    } finally {
+      setSubmitting(false)
+    }
+  }
+
+  return <div className="mobile-new-conversation">
+    <button aria-controls="mobile-new-conversation-form" aria-expanded={open} className="primary-button mobile-new-conversation__toggle" onClick={() => setOpen((value) => !value)} type="button">Nowa rozmowa</button>
+    {open && <form aria-label="Nowa rozmowa" className="mobile-new-conversation__form" id="mobile-new-conversation-form" onSubmit={(event) => void submit(event)}>
+      <label htmlFor="mobile-conversation-profile">Profil rozmowy</label>
+      <select id="mobile-conversation-profile" onChange={(event) => setTarget(event.target.value)} required value={target}>
+        {!atlasId && <option value="">Wybierz profil</option>}
+        {teammates.map((teammate) => <option key={teammate.id} value={teammate.id}>{teammate.name}</option>)}
+      </select>
+      <label htmlFor="mobile-conversation-message">Pierwsza wiadomość</label>
+      <textarea id="mobile-conversation-message" onChange={(event) => setText(event.target.value)} placeholder="Od czego zaczynamy?" ref={messageRef} rows={3} value={text} />
+      <button className="primary-button" disabled={!target || !text.trim() || submitting} type="submit">{submitting ? 'Tworzenie…' : 'Rozpocznij rozmowę'}</button>
+      {failed && <p role="alert">Nie udało się rozpocząć rozmowy. Wiadomość pozostała w polu — spróbuj ponownie.</p>}
+    </form>}
+  </div>
 }
 
 function safeStoredChatProfile(): string | null {
@@ -57,6 +118,7 @@ function persistChatProfile(profile: string) {
 }
 
 export function ChatsDirectory(props: ChatsDirectoryProps) {
+  const mobileLayout = useMobileLayout()
   const profiles = [...new Set(props.snapshot.coverage.map((item) => item.profile))].sort()
   const requestedProfile = props.params.get('agent') ?? safeStoredChatProfile()
   const profile = requestedProfile && profiles.includes(requestedProfile) ? requestedProfile : 'all'
@@ -190,6 +252,7 @@ export function ChatsDirectory(props: ChatsDirectoryProps) {
 
   return <section aria-labelledby="chats-title" className="chats-screen" ref={rootRef}>
     <div className="directory-heading"><div><p className="kicker">Istniejące zapisane sesje</p><h2 id="chats-title">Rozmowy</h2><p className="screen-lede">Otwórz historię bez tworzenia nowej sesji i bez wznawiania jej przy samym wejściu.</p></div><button className="button" onClick={props.onRefresh} type="button">Odśwież</button></div>
+    {mobileLayout && props.onCreateConversation && <MobileConversationEntry onCreate={props.onCreateConversation} teammates={props.teammates ?? []} />}
     <div className="chat-controls"><label>Agent<select aria-label="Agent" onChange={(event) => { const value = event.target.value; persistChatProfile(value); setParams({ agent: value === 'all' ? null : value }) }} value={profile}><option value="all">Wszystkie</option>{profiles.map((item) => <option key={item} value={item}>{profileLabel(item)}</option>)}</select></label><label className="chat-search">Szukaj rozmów<input aria-label="Szukaj rozmów" onChange={(event) => setParams({ chatQ: event.target.value || null })} placeholder="Nazwa rozmowy lub projektu" type="search" value={query} /></label></div>
     <TabList className="chat-view-tabs" idPrefix="chat-view" label="Widok rozmów" onSelect={(value) => setParams({ chatView: value === 'projekty' ? 'projects' : 'recent' })} selected={mode === 'projects' ? 'projekty' : 'ostatnie'} tabs={['projekty', 'ostatnie']} />
     {mode === 'recent' ? (matchingSessions.length ? <div className="chat-session-list">{matchingSessions.map((item) => <ChatSessionRow allProfiles={profile === 'all'} item={item} key={chatKey(item.source, item.profile, item.id)} onOpen={() => openSession(item)} />)}</div> : <Unavailable copy={emptyCopy} title={emptyTitle} />) : <div className="chat-project-list">
