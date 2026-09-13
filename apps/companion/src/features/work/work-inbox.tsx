@@ -2,6 +2,7 @@ import './work.css'
 
 import { useState } from 'react'
 
+import { workCopy } from '../../copy/work'
 import type { NeedsMePriorityItem } from '../../gateway/organization-types'
 import type { TrackerEvidence, WorkDecisionOption } from '../../gateway/work-types'
 
@@ -148,7 +149,7 @@ export function safeLibraryReference(value?: string): string | undefined {
 function safeArtifactLabel(value: string): string {
   if (safeLibraryReference(value) || safeWorkUrl(value)) {return value}
   if (/^(?:file:|[a-z]:[\\/]|[\\/])/i.test(value) || value.includes('/') || value.includes('\\')
-    || /^\.?[^\s/\\]+\.[a-z0-9]{1,12}$/i.test(value.trim())) {return 'Unverified file reference'}
+    || /^\.?[^\s/\\]+\.[a-z0-9]{1,12}$/i.test(value.trim())) {return workCopy.artifact.unverified}
 
   return value
 }
@@ -157,10 +158,10 @@ function artifactKind(value: string): string {
   const extension = value.split(/[?#]/, 1)[0].split('.').at(-1)?.toLocaleLowerCase()
 
   return ({
-    md: 'Markdown report', markdown: 'Markdown report', pdf: 'PDF report', json: 'Data file', csv: 'Spreadsheet data',
-    xlsx: 'Spreadsheet', png: 'Image asset', jpg: 'Image asset', jpeg: 'Image asset', webp: 'Image asset', gif: 'Image asset',
-    svg: 'Image asset', mp4: 'Video asset', mov: 'Video asset', mp3: 'Audio asset', wav: 'Audio asset', html: 'HTML report', htm: 'HTML report'
-  } as Record<string, string>)[extension ?? ''] ?? 'File'
+    md: workCopy.artifact.markdown, markdown: workCopy.artifact.markdown, pdf: workCopy.artifact.pdf, json: workCopy.artifact.data, csv: workCopy.artifact.spreadsheetData,
+    xlsx: workCopy.artifact.spreadsheet, png: workCopy.artifact.image, jpg: workCopy.artifact.image, jpeg: workCopy.artifact.image, webp: workCopy.artifact.image, gif: workCopy.artifact.image,
+    svg: workCopy.artifact.image, mp4: workCopy.artifact.video, mov: workCopy.artifact.video, mp3: workCopy.artifact.audio, wav: workCopy.artifact.audio, html: workCopy.artifact.html, htm: workCopy.artifact.html
+  } as Record<string, string>)[extension ?? ''] ?? workCopy.artifact.file
 }
 
 function WorkLinks({ links, profile, onOpenArtifact }: { links: WorkCardView['evidence']; profile: string; onOpenArtifact: WorkInboxProps['onOpenArtifact'] }) {
@@ -170,37 +171,37 @@ function WorkLinks({ links, profile, onOpenArtifact }: { links: WorkCardView['ev
     const label = safeArtifactLabel(link.label)
 
     return <li className="work-file" key={index}><span><strong>{artifactKind(label)}</strong><span>{label}</span></span>{url
-      ? <a aria-label={`Open ${label}`} href={url} rel="noopener noreferrer" target="_blank">Open source ↗</a>
+      ? <a aria-label={workCopy.artifact.openLabel(label)} href={url} rel="noopener noreferrer" target="_blank">{workCopy.artifact.openSource}</a>
       : reference
-        ? <button aria-label={`Open ${label} in Library`} onClick={() => onOpenArtifact(profile, reference)} type="button">Open in Library</button>
+        ? <button aria-label={workCopy.artifact.openInFilesLabel(label)} onClick={() => onOpenArtifact(profile, reference)} type="button">{workCopy.artifact.open}</button>
         : null}</li>
   })}</ul>
 }
 
 function TrackerStatus({ evidence, heading, profile, onOpenArtifact }: { evidence: TrackerEvidence; heading?: string; profile: string; onOpenArtifact: WorkInboxProps['onOpenArtifact'] }) {
-  return <section className="work-tracker-status">{heading && <h4>{heading}</h4>}<p><strong>{evidence.state.replaceAll('_', ' ')}</strong> · Observed {evidence.observed_at}</p>{evidence.blocker && <p><strong>Blocker:</strong> {evidence.blocker}</p>}{evidence.result_evidence?.length ? <p><strong>Result:</strong> {evidence.result_evidence.map(safeArtifactLabel).join(' · ')}</p> : null}<WorkLinks links={evidence.evidence.map((label) => ({ label, url: label }))} onOpenArtifact={onOpenArtifact} profile={profile} /></section>
+  return <section className="work-tracker-status">{heading && <h4>{heading}</h4>}<p><strong>{evidence.state.replaceAll('_', ' ')}</strong> · {workCopy.tracker.observed} {evidence.observed_at}</p>{evidence.blocker && <p><strong>{workCopy.tracker.blocker}</strong> {evidence.blocker}</p>}{evidence.result_evidence?.length ? <p><strong>{workCopy.tracker.result}</strong> {evidence.result_evidence.map(safeArtifactLabel).join(' · ')}</p> : null}<WorkLinks links={evidence.evidence.map((label) => ({ label, url: label }))} onOpenArtifact={onOpenArtifact} profile={profile} /></section>
 }
 
 function WorkBrief({ value, profile, onOpenArtifact, showInference = true }: { value: string; profile: string; onOpenArtifact: WorkInboxProps['onOpenArtifact']; showInference?: boolean }) {
   const brief = parseWorkBrief(value)
 
-  if (!brief) {return <section className="work-brief"><h4>What this is about</h4><p className="work-plain-text">{value}</p></section>}
+  if (!brief) {return <section className="work-brief"><h4>{workCopy.brief.about}</h4><p className="work-plain-text">{value}</p></section>}
 
   return <section className="work-brief">
-    <h4>What this is about</h4>
-    <p>{brief.evidenceSummary ?? 'This is a structured preparation request.'}</p>
-    {brief.decisionScope && <p><strong>Decision scope:</strong> {brief.decisionScope.replaceAll('_', ' ')}</p>}
-    {showInference && brief.inference && <><h4>Why it is being proposed</h4><p>{brief.inference}</p></>}
+    <h4>{workCopy.brief.about}</h4>
+    <p>{brief.evidenceSummary ?? workCopy.brief.fallback}</p>
+    {brief.decisionScope && <p><strong>{workCopy.brief.decisionScope}</strong> {brief.decisionScope.replaceAll('_', ' ')}</p>}
+    {showInference && brief.inference && <><h4>{workCopy.brief.proposedWhy}</h4><p>{brief.inference}</p></>}
     {(brief.scopeBoundary || brief.costBoundary) && <div className="work-boundary-grid">
-      {brief.scopeBoundary && <section><strong>Authorized scope</strong><p>{brief.scopeBoundary}</p></section>}
-      {brief.costBoundary && <section><strong>Cost and activation boundary</strong><p>{brief.costBoundary}</p></section>}
+      {brief.scopeBoundary && <section><strong>{workCopy.brief.authorizedScope}</strong><p>{brief.scopeBoundary}</p></section>}
+      {brief.costBoundary && <section><strong>{workCopy.brief.costBoundary}</strong><p>{brief.costBoundary}</p></section>}
     </div>}
-    {brief.forbiddenActions.length > 0 && <section className="work-not-authorized"><strong>Not authorized by this decision</strong><ul>{brief.forbiddenActions.map((action) => <li key={action}>{action.replaceAll('_', ' ')}</li>)}</ul></section>}
-    {brief.artifacts.length > 0 && <><h4>Files named in this brief</h4><ul>{brief.artifacts.map((artifact) => {
+    {brief.forbiddenActions.length > 0 && <section className="work-not-authorized"><strong>{workCopy.brief.notAuthorized}</strong><ul>{brief.forbiddenActions.map((action) => <li key={action}>{action.replaceAll('_', ' ')}</li>)}</ul></section>}
+    {brief.artifacts.length > 0 && <><h4>{workCopy.brief.files}</h4><ul>{brief.artifacts.map((artifact) => {
       const reference = safeLibraryReference(artifact.path)
       const label = safeArtifactLabel(artifact.path)
 
-      return <li className="work-file" key={artifact.path}><span><strong>{artifactKind(label)}</strong><span>{label}</span>{artifact.sha256 && <small>SHA-256: {artifact.sha256}</small>}</span>{reference && <button aria-label={`Open ${label} in Library`} onClick={() => onOpenArtifact(profile, reference)} type="button">Open in Library</button>}</li>
+      return <li className="work-file" key={artifact.path}><span><strong>{artifactKind(label)}</strong><span>{label}</span>{artifact.sha256 && <small>SHA-256: {artifact.sha256}</small>}</span>{reference && <button aria-label={workCopy.artifact.openInFilesLabel(label)} onClick={() => onOpenArtifact(profile, reference)} type="button">{workCopy.artifact.open}</button>}</li>
     })}</ul></>}
   </section>
 }
@@ -223,48 +224,48 @@ export function WorkInbox(props: WorkInboxProps) {
   })
 
   return <section aria-labelledby="work-title" className="work-inbox">
-    <div className="section-heading"><div><p className="kicker">Persisted business work</p><h2 id="work-title">Do decyzji</h2></div><button disabled={props.status === 'loading' || props.pending} onClick={props.onRefresh} type="button">Refresh work</button></div>
-    <p>Ideas, preparation decisions and focused discussion, shared across your devices. Separate from runtime tool permissions.</p>
-    {props.status === 'unsupported' && <p role="status">This gateway does not support the durable work inbox. Upgrade the server to use business decisions; runtime attention remains available below.</p>}
-    {props.status === 'loading' && <p role="status">Verifying persisted work… Decisions are disabled until refreshed.</p>}
-    {(props.status === 'offline' || props.status === 'error') && <p role="alert">Work could not be verified. The last view is retained; reconnect and refresh before making decisions.</p>}
+    <div className="section-heading"><div><p className="kicker">{workCopy.chrome.kicker}</p><h2 id="work-title">{workCopy.chrome.title}</h2></div><button disabled={props.status === 'loading' || props.pending} onClick={props.onRefresh} type="button">{workCopy.chrome.refresh}</button></div>
+    <p>{workCopy.chrome.lede}</p>
+    {props.status === 'unsupported' && <p role="status">{workCopy.status.unsupported}</p>}
+    {props.status === 'loading' && <p role="status">{workCopy.status.loading}</p>}
+    {(props.status === 'offline' || props.status === 'error') && <p role="alert">{workCopy.status.unavailable}</p>}
     {props.message && <p role="status">{props.message}</p>}
-    {props.sources.some((source) => source.incomplete) && <details className="work-source-coverage-panel"><summary>{props.sources.filter((source) => source.incomplete).length} of {props.sources.length} work sources incomplete</summary><ul aria-label="Work source coverage" className="work-source-coverage">{props.sources.map((source) => <li key={source.profile}><strong>{source.profile}</strong>: {source.incomplete ? `Incomplete (${source.status})` : 'Complete'} · Last success: {source.lastSuccess ?? 'never'}{source.message ? ` · ${source.message}` : ''}</li>)}</ul></details>}
-    <details className="work-source-coverage-panel"><summary>Opcje widoku</summary>
-      <div className="work-group-control"><label htmlFor="needs-me-group">Group by</label><select disabled={props.pending} id="needs-me-group" onChange={(event) => props.onGroupBy(event.target.value as WorkInboxProps['groupBy'])} value={props.groupBy}><option value="topic">Topic</option><option value="session">Session</option><option value="project">Project</option></select></div>
-      <div aria-label="Work filters" className="work-filters" role="group">
-      {([['needs_me', 'Do decyzji'], ['in_progress', 'W toku'], ['ideas', 'Pomysły']] as const).map(([id, label]) => <button aria-pressed={!history && filter === id} disabled={props.pending} key={id} onClick={() => {setFilter(id); setHistory(false);
+    {props.sources.some((source) => source.incomplete) && <details className="work-source-coverage-panel"><summary>{workCopy.coverage.incomplete(props.sources.filter((source) => source.incomplete).length, props.sources.length)}</summary><ul aria-label={workCopy.coverage.label} className="work-source-coverage">{props.sources.map((source) => <li key={source.profile}><strong>{source.profile}</strong>: {source.incomplete ? workCopy.coverage.incompleteStatus(source.status) : workCopy.coverage.complete} · {workCopy.coverage.lastSuccess}: {source.lastSuccess ?? workCopy.coverage.never}{source.message ? ` · ${source.message}` : ''}</li>)}</ul></details>}
+    <details className="work-source-coverage-panel"><summary>{workCopy.chrome.viewOptions}</summary>
+      <div className="work-group-control"><label htmlFor="needs-me-group">{workCopy.group.label}</label><select disabled={props.pending} id="needs-me-group" onChange={(event) => props.onGroupBy(event.target.value as WorkInboxProps['groupBy'])} value={props.groupBy}><option value="topic">{workCopy.group.topic}</option><option value="session">{workCopy.group.session}</option><option value="project">{workCopy.group.project}</option></select></div>
+      <div aria-label={workCopy.chrome.filtersLabel} className="work-filters" role="group">
+      {([['needs_me', workCopy.filters.needsMe], ['in_progress', workCopy.filters.inProgress], ['ideas', workCopy.filters.ideas]] as const).map(([id, label]) => <button aria-pressed={!history && filter === id} disabled={props.pending} key={id} onClick={() => {setFilter(id); setHistory(false);
 
  if (props.selected) {props.onClose()}}} type="button">{label}</button>)}
       <button aria-pressed={history} disabled={props.pending} onClick={() => {setHistory(!history);
 
- if (props.selected) {props.onClose()}}} type="button">Historia i odłożone</button>
+ if (props.selected) {props.onClose()}}} type="button">{workCopy.filters.history}</button>
       </div>
     </details>
     {props.selected ? <WorkDetail key={`${props.selected.profile}:${props.selected.id}`} {...props} item={props.selected} /> : <div className="work-list">
       {visible.map((item, index) => <div className="work-priority-row" key={`${item.profile}:${item.id}`}>
         {!history && filter === 'needs_me' && item.priority && (index === 0 || visible[index - 1]?.priority?.groupOrder !== item.priority.groupOrder) && <header className="work-topic-heading">
-          <p className="kicker">{item.priority.group.kind[0].toUpperCase() + item.priority.group.kind.slice(1)}{item.priority.topicCollection ? ` · ${item.priority.topicCollection}` : ''}</p>
+          <p className="kicker">{workCopy.group[item.priority.group.kind]}{item.priority.topicCollection ? ` · ${item.priority.topicCollection}` : ''}</p>
           <h3>{item.priority.topicName}</h3>
-          <p>Recommended · {item.priority.eligibility.replaceAll('_', ' ')}</p>
+          <p>{workCopy.summary.recommended} · {item.priority.eligibility.replaceAll('_', ' ')}</p>
         </header>}
         <button className="work-summary" disabled={props.status !== 'verified' || props.pending} onClick={() => props.onOpen(item.profile, item.id)} type="button">
-          <span className="label">{item.profile} · {item.status} · Revision {item.revision}</span>
+          <span className="label">{item.profile} · {item.status} · {workCopy.summary.revision} {item.revision}</span>
           <strong>{item.title}</strong><span>{workBriefSummary(item.brief)}</span>
           {item.priority && <>
-            <small><strong>Why here:</strong> {item.priority.why_here}</small>
-            <small><strong>Next step:</strong> {item.priority.next_step}</small>
-            <small><strong>Trade-off:</strong> {item.priority.trade_off}</small>
-            <small><strong>Assessment freshness:</strong> {item.priority.assessed_at ?? 'Not assessed'}</small>
-            <small><strong>Recommendation evidence:</strong> {item.priority.evidence.length ? item.priority.evidence.join(' · ') : 'No evidence supplied'}</small>
-            <small>Benefit {item.priority.assessment?.benefit ?? 'unassessed'} · Confidence {item.priority.assessment?.confidence ?? 'unknown'}</small>
-            {item.priority.override && <small className="work-override">{item.priority.override.active ? 'Active review override' : 'Review override'}: {item.priority.override.label} — {item.priority.override.reason}</small>}
+            <small><strong>{workCopy.summary.whyHere}</strong> {item.priority.why_here}</small>
+            <small><strong>{workCopy.summary.nextStep}</strong> {item.priority.next_step}</small>
+            <small><strong>{workCopy.summary.tradeOff}</strong> {item.priority.trade_off}</small>
+            <small><strong>{workCopy.summary.freshness}</strong> {item.priority.assessed_at ?? workCopy.summary.notAssessed}</small>
+            <small><strong>{workCopy.summary.evidence}</strong> {item.priority.evidence.length ? item.priority.evidence.join(' · ') : workCopy.summary.noEvidence}</small>
+            <small>{workCopy.summary.benefit} {item.priority.assessment?.benefit ?? workCopy.summary.unassessed} · {workCopy.summary.confidence} {item.priority.assessment?.confidence ?? workCopy.summary.unknown}</small>
+            {item.priority.override && <small className="work-override">{item.priority.override.active ? workCopy.summary.activeOverride : workCopy.summary.reviewOverride}: {item.priority.override.label} — {item.priority.override.reason}</small>}
           </>}
           <small>{item.owner}: {item.nextAction}</small>
           {item.preparationStatus && <small>{item.preparationStatus}</small>}
         </button>
       </div>)}
-      {props.status === 'verified' && visible.length === 0 && <p>No work in this view. Completed, declined and snoozed work remains in history.</p>}
+      {props.status === 'verified' && visible.length === 0 && <p>{workCopy.summary.empty}</p>}
     </div>}
   </section>
 }
@@ -283,7 +284,7 @@ function WorkDetail({ item, status, pending, priorityWritable, onClose, onDecisi
   const decide = async (action: WorkDecision) => {
     if (!enabled) {return}
 
-    if (action === 'request_changes' && !comment.trim()) {setValidation('Describe the changes you need in the discussion field.');
+    if (action === 'request_changes' && !comment.trim()) {setValidation(workCopy.decisions.validation);
 
  return}
 
@@ -293,54 +294,54 @@ function WorkDetail({ item, status, pending, priorityWritable, onClose, onDecisi
   }
 
   return <article aria-labelledby="work-detail-title" className="work-detail">
-    <button disabled={pending} onClick={onClose} type="button">Back to work</button>
-    <p className="label">{item.profile} · {item.status} · Revision {item.revision}</p>
+    <button disabled={pending} onClick={onClose} type="button">{workCopy.chrome.back}</button>
+    <p className="label">{item.profile} · {item.status} · {workCopy.summary.revision} {item.revision}</p>
     <h3 id="work-detail-title">{item.title}</h3>
-    <section aria-labelledby="work-decision-request-title" className="work-decision-request"><p className="kicker">Decyzja biznesowa</p><h4 id="work-decision-request-title">Czego potrzebujemy od Ciebie</h4><p>{item.nextAction || 'Nie określono oczekiwanej decyzji.'}</p></section>
-    <section><h4>Dlaczego teraz</h4><p>{item.priority?.why_here ?? brief?.inference ?? workBriefSummary(item.brief)}</p></section>
-    <section><h4>Rekomendacja</h4><p><strong>Server recommendation:</strong> {{ approve_preparation: 'Approve', request_changes: 'Request changes', remind_in_2_hours: 'Remind in 2 hours' }[item.recommendedAction]}</p>{item.priority && <p><strong>Kontekst priorytetu:</strong> {item.priority.next_step} · {item.priority.trade_off}</p>}</section>
-    <section className="work-boundary"><h4>Co zmieni kliknięcie</h4><ul>
-      <li><strong>Approve</strong> autoryzuje wyłącznie przygotowanie tej rewizji; nie publikuje, nie wysyła, nie wydaje pieniędzy i nie zmienia systemu produkcyjnego.</li>
-      <li><strong>Request changes</strong> zapisuje żądane poprawki i nie publikuje ani nie autoryzuje wykonania.</li>
-      <li><strong>Remind in 2 hours</strong> odkłada decyzję do terminu; gdy termin nadejdzie, wraca ona do decyzji.</li>
+    <section aria-labelledby="work-decision-request-title" className="work-decision-request"><p className="kicker">{workCopy.detail.businessDecision}</p><h4 id="work-decision-request-title">{workCopy.detail.needed}</h4><p>{item.nextAction || workCopy.detail.neededFallback}</p></section>
+    <section><h4>{workCopy.detail.whyNow}</h4><p>{item.priority?.why_here ?? brief?.inference ?? workBriefSummary(item.brief)}</p></section>
+    <section><h4>{workCopy.detail.recommendation}</h4><p><strong>{workCopy.detail.serverRecommendation}</strong> {{ approve_preparation: workCopy.decisions.approve, request_changes: workCopy.decisions.requestChanges, remind_in_2_hours: workCopy.decisions.remind }[item.recommendedAction]}</p>{item.priority && <p><strong>{workCopy.detail.priorityContext}</strong> {item.priority.next_step} · {item.priority.trade_off}</p>}</section>
+    <section className="work-boundary"><h4>{workCopy.detail.clickEffect}</h4><ul>
+      <li><strong>{workCopy.decisions.approve}</strong> {workCopy.detail.approveEffect}</li>
+      <li><strong>{workCopy.decisions.requestChanges}</strong> {workCopy.detail.changesEffect}</li>
+      <li><strong>{workCopy.decisions.remind}</strong> {workCopy.detail.reminderEffect}</li>
     </ul></section>
-    {item.priority?.group.kind === 'project' && item.priority.group.source_id && onOpenProject ? <button onClick={() => onOpenProject({ source_id: item.priority!.group.source_id!, profile: item.priority!.group.profile, backend_namespace: item.priority!.group.backend_namespace })} type="button">Otwórz projekt</button> : null}
-    {item.sourceSession && onOpenSourceSession ? <button onClick={() => onOpenSourceSession(item.sourceSession!)} type="button">Otwórz sesję źródłową</button> : <p>Sesja źródłowa nie jest powiązana z tym rekordem.</p>}
+    {item.priority?.group.kind === 'project' && item.priority.group.source_id && onOpenProject ? <button onClick={() => onOpenProject({ source_id: item.priority!.group.source_id!, profile: item.priority!.group.profile, backend_namespace: item.priority!.group.backend_namespace })} type="button">{workCopy.detail.openProject}</button> : null}
+    {item.sourceSession && onOpenSourceSession ? <button onClick={() => onOpenSourceSession(item.sourceSession!)} type="button">{workCopy.detail.openSourceSession}</button> : <p>{workCopy.detail.noSourceSession}</p>}
     <WorkBrief onOpenArtifact={onOpenArtifact} profile={item.profile} showInference={false} value={item.brief} />
-    <dl><dt>Owner</dt><dd>{item.owner || 'Unassigned'}</dd><dt>Current decision</dt><dd>{item.decision || 'No decision yet'}</dd>{item.snoozedUntil && <><dt>Snoozed until</dt><dd>{item.snoozedUntil}</dd></>}</dl>
+    <dl><dt>{workCopy.detail.owner}</dt><dd>{item.owner || workCopy.detail.unassigned}</dd><dt>{workCopy.detail.currentDecision}</dt><dd>{item.decision || workCopy.detail.noDecision}</dd>{item.snoozedUntil && <><dt>{workCopy.detail.snoozedUntil}</dt><dd>{item.snoozedUntil}</dd></>}</dl>
     {item.preparationStatus && <p className="work-boundary">{item.preparationStatus}</p>}
     {item.priority && <section aria-labelledby="priority-control-title" className="work-priority-control">
-      <h4 id="priority-control-title">Priority override</h4>
-      <p>Recommended order remains stable while this card is open. The verified order is applied when you return to the list.</p>
-      <label htmlFor="work-priority-label">Priority label</label><input disabled={!verified || !priorityWritable} id="work-priority-label" onChange={(event) => setPriorityLabel(event.target.value)} value={priorityLabel} />
-      <label htmlFor="work-priority-reason">Reason</label><textarea disabled={!verified || !priorityWritable} id="work-priority-reason" onChange={(event) => setPriorityReason(event.target.value)} rows={2} value={priorityReason} />
-      <label htmlFor="work-priority-expiry">Expires at (required)</label><input aria-describedby="work-priority-expiry-help" disabled={!verified || !priorityWritable} id="work-priority-expiry" onChange={(event) => setPriorityExpiry(event.target.value)} required type="datetime-local" value={priorityExpiry} />
-      <small id="work-priority-expiry-help">{priorityExpiry ? 'Choose a future expiration for this override.' : 'Choose when this override expires.'}</small>
-      <div className="work-actions"><button disabled={!verified || !priorityWritable || !priorityLabel.trim() || !priorityReason.trim() || !priorityExpiryValid} onClick={() => void onPriority({ label: priorityLabel.trim(), reason: priorityReason.trim(), expiresAt: new Date(priorityExpiry).toISOString() })} type="button">Set priority</button>
-        <button disabled={!verified || !priorityWritable || !item.priority.override?.active || !item.priority.override.version} onClick={() => void onRestorePriority()} type="button">Restore recommended</button></div>
-      {!priorityWritable && <p>Priority changes require an owner-authenticated connection and a compatible gateway.</p>}
+      <h4 id="priority-control-title">{workCopy.priority.title}</h4>
+      <p>{workCopy.priority.help}</p>
+      <label htmlFor="work-priority-label">{workCopy.priority.label}</label><input disabled={!verified || !priorityWritable} id="work-priority-label" onChange={(event) => setPriorityLabel(event.target.value)} value={priorityLabel} />
+      <label htmlFor="work-priority-reason">{workCopy.priority.reason}</label><textarea disabled={!verified || !priorityWritable} id="work-priority-reason" onChange={(event) => setPriorityReason(event.target.value)} rows={2} value={priorityReason} />
+      <label htmlFor="work-priority-expiry">{workCopy.priority.expiry}</label><input aria-describedby="work-priority-expiry-help" disabled={!verified || !priorityWritable} id="work-priority-expiry" onChange={(event) => setPriorityExpiry(event.target.value)} required type="datetime-local" value={priorityExpiry} />
+      <small id="work-priority-expiry-help">{priorityExpiry ? workCopy.priority.chooseFuture : workCopy.priority.chooseExpiry}</small>
+      <div className="work-actions"><button disabled={!verified || !priorityWritable || !priorityLabel.trim() || !priorityReason.trim() || !priorityExpiryValid} onClick={() => void onPriority({ label: priorityLabel.trim(), reason: priorityReason.trim(), expiresAt: new Date(priorityExpiry).toISOString() })} type="button">{workCopy.priority.set}</button>
+        <button disabled={!verified || !priorityWritable || !item.priority.override?.active || !item.priority.override.version} onClick={() => void onRestorePriority()} type="button">{workCopy.priority.restore}</button></div>
+      {!priorityWritable && <p>{workCopy.priority.ownerRequired}</p>}
     </section>}
-    {item.executionAcknowledgedAt && <p>Tracker handoff acknowledged: {item.executionAcknowledgedAt}</p>}
-    {item.trackerEvidence && <TrackerStatus evidence={item.trackerEvidence} heading="Current tracker evidence" onOpenArtifact={onOpenArtifact} profile={item.profile} />}
-    {item.completionEvidence?.length ? <><h4>Completion evidence</h4><WorkLinks links={item.completionEvidence.map((label) => ({ label, url: label }))} onOpenArtifact={onOpenArtifact} profile={item.profile} /></> : null}
-    <h4>Tracker status history</h4>
-    {item.trackerStatusHistory?.length ? <ol className="work-discussion">{item.trackerStatusHistory.map((entry, index) => <li key={`${entry.observed_at}:${index}`}><TrackerStatus evidence={entry} onOpenArtifact={onOpenArtifact} profile={item.profile} /></li>)}</ol> : <p>No recorded tracker status.</p>}
-    <h4>Evidence, files &amp; reports</h4>{item.evidence.length ? <WorkLinks links={item.evidence} onOpenArtifact={onOpenArtifact} profile={item.profile} /> : <p>No supporting files or links were supplied.</p>}
-    <div className="work-scope"><section><h4>Proposed preparation scope</h4><ul>{item.permitted.map((text, i) => <li key={i}>{text}</li>)}</ul></section><section><h4>Excluded scope</h4><ul>{item.excluded.map((text, i) => <li key={i}>{text}</li>)}</ul></section></div>
-    <h4>Previews &amp; links</h4>{item.previews.length ? <WorkLinks links={item.previews} onOpenArtifact={onOpenArtifact} profile={item.profile} /> : <p>No additional previews or links were supplied.</p>}
+    {item.executionAcknowledgedAt && <p>{workCopy.tracker.acknowledged} {item.executionAcknowledgedAt}</p>}
+    {item.trackerEvidence && <TrackerStatus evidence={item.trackerEvidence} heading={workCopy.tracker.currentEvidence} onOpenArtifact={onOpenArtifact} profile={item.profile} />}
+    {item.completionEvidence?.length ? <><h4>{workCopy.tracker.completionEvidence}</h4><WorkLinks links={item.completionEvidence.map((label) => ({ label, url: label }))} onOpenArtifact={onOpenArtifact} profile={item.profile} /></> : null}
+    <h4>{workCopy.tracker.history}</h4>
+    {item.trackerStatusHistory?.length ? <ol className="work-discussion">{item.trackerStatusHistory.map((entry, index) => <li key={`${entry.observed_at}:${index}`}><TrackerStatus evidence={entry} onOpenArtifact={onOpenArtifact} profile={item.profile} /></li>)}</ol> : <p>{workCopy.tracker.empty}</p>}
+    <h4>{workCopy.detail.evidence}</h4>{item.evidence.length ? <WorkLinks links={item.evidence} onOpenArtifact={onOpenArtifact} profile={item.profile} /> : <p>{workCopy.detail.noEvidence}</p>}
+    <div className="work-scope"><section><h4>{workCopy.detail.proposedScope}</h4><ul>{item.permitted.map((text, i) => <li key={i}>{text}</li>)}</ul></section><section><h4>{workCopy.detail.excludedScope}</h4><ul>{item.excluded.map((text, i) => <li key={i}>{text}</li>)}</ul></section></div>
+    <h4>{workCopy.detail.previews}</h4>{item.previews.length ? <WorkLinks links={item.previews} onOpenArtifact={onOpenArtifact} profile={item.profile} /> : <p>{workCopy.detail.noPreviews}</p>}
 
-    <h4>Decision history</h4>
-    {item.decisionHistory?.length ? <ol className="work-discussion">{item.decisionHistory.map((entry) => <li key={entry.id}><strong>{entry.action.replaceAll('_', ' ')} · Revision {entry.revision}</strong><p>{entry.actor} · {entry.createdAt} · Scope: {entry.scope.replaceAll('_', ' ')}</p>{entry.reason && <p className="work-plain-text">{entry.reason}</p>}{entry.snoozedUntil && <p>Snoozed until: {entry.snoozedUntil}</p>}</li>)}</ol> : <p>No recorded decisions.</p>}
-    <h4>Focused discussion</h4>
-    <p>Comments are not approval. Only the currently verified owner can add them; shared-token and agent connections remain read-only.</p>
+    <h4>{workCopy.detail.decisionHistory}</h4>
+    {item.decisionHistory?.length ? <ol className="work-discussion">{item.decisionHistory.map((entry) => <li key={entry.id}><strong>{entry.action.replaceAll('_', ' ')} · {workCopy.summary.revision} {entry.revision}</strong><p>{entry.actor} · {entry.createdAt} · {workCopy.detail.scope} {entry.scope.replaceAll('_', ' ')}</p>{entry.reason && <p className="work-plain-text">{entry.reason}</p>}{entry.snoozedUntil && <p>{workCopy.detail.snoozedUntil}: {entry.snoozedUntil}</p>}</li>)}</ol> : <p>{workCopy.detail.noDecisions}</p>}
+    <h4>{workCopy.detail.discussion}</h4>
+    <p>{workCopy.detail.discussionHelp}</p>
     <ol className="work-discussion">{item.discussion.map((entry) => <li key={entry.id}><strong>{entry.author}</strong><p className="work-plain-text">{entry.body}</p></li>)}</ol>
-    <label htmlFor="work-comment">Discussion / requested changes</label><textarea disabled={!verified || !item.canDecide} id="work-comment" onChange={(event) => setComment(event.target.value)} rows={3} value={comment} />
-    <button disabled={!verified || !item.canDecide || !comment.trim()} onClick={() => void onComment(comment.trim()).then((saved) => {if (saved) {setComment('')}})} type="button">Add comment</button>
+    <label htmlFor="work-comment">{workCopy.detail.discussionLabel}</label><textarea disabled={!verified || !item.canDecide} id="work-comment" onChange={(event) => setComment(event.target.value)} rows={3} value={comment} />
+    <button disabled={!verified || !item.canDecide || !comment.trim()} onClick={() => void onComment(comment.trim()).then((saved) => {if (saved) {setComment('')}})} type="button">{workCopy.detail.addComment}</button>
     {validation && <p role="alert">{validation}</p>}
-    <fieldset disabled={!enabled}><legend>Decision for revision {item.revision}</legend><div className="work-actions">{([
-      ['approve_preparation', 'Approve'], ['request_changes', 'Request changes'], ['remind_in_2_hours', 'Remind in 2 hours']
-    ] as const).map(([action, label]) => <button className={item.recommendedAction === action ? 'primary-button' : undefined} key={action} onClick={() => void decide(action)} type="button">{label}{item.recommendedAction === action && <strong aria-hidden="true"> · Recommended</strong>}</button>)}</div></fieldset>
-    {pending && <p role="status">Saving and verifying…</p>}
-    {!item.actionable && <p>{item.readOnlyReason || 'This work is read-only in its current state.'}</p>}
+    <fieldset disabled={!enabled}><legend>{workCopy.detail.decisionForRevision(item.revision)}</legend><div className="work-actions">{([
+      ['approve_preparation', workCopy.decisions.approve], ['request_changes', workCopy.decisions.requestChanges], ['remind_in_2_hours', workCopy.decisions.remind]
+    ] as const).map(([action, label]) => <button className={item.recommendedAction === action ? 'primary-button' : undefined} key={action} onClick={() => void decide(action)} type="button">{label}{item.recommendedAction === action && <strong aria-hidden="true"> · {workCopy.decisions.recommended}</strong>}</button>)}</div></fieldset>
+    {pending && <p role="status">{workCopy.detail.saving}</p>}
+    {!item.actionable && <p>{item.readOnlyReason || workCopy.detail.readOnly}</p>}
   </article>
 }

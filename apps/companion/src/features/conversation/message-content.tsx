@@ -1,5 +1,6 @@
 import { Fragment, type ReactNode, useState } from 'react'
 
+import { conversationCopy } from '../../copy/conversation'
 import type { MessageRole } from '../../state/companion-store'
 
 const CONTEXT_COMPACTION = '[CONTEXT COMPACTION — REFERENCE ONLY]'
@@ -24,13 +25,13 @@ export function MessageContent({ role, text }: MessageContentProps) {
     const details = normalized.slice(CONTEXT_COMPACTION.length).trim()
 
     return (
-      <aside aria-label="Earlier context summary" className="context-disclosure">
+      <aside aria-label={conversationCopy.messageContent.contextSummaryLabel} className="context-disclosure">
         <div className="context-disclosure__heading">
           <span aria-hidden="true">↺</span>
-          <div><strong>Earlier context summary</strong><small>Older conversation details are hidden to keep this view readable.</small></div>
+          <div><strong>{conversationCopy.messageContent.contextSummaryHeading}</strong><small>{conversationCopy.messageContent.contextSummaryDetail}</small></div>
         </div>
         {expanded && <div className="context-disclosure__details"><MarkdownContent text={details} /></div>}
-        <button aria-expanded={expanded} className="disclosure-button" onClick={() => setExpanded((value) => !value)} type="button">{expanded ? 'Hide details' : 'Show details'}</button>
+        <button aria-expanded={expanded} className="disclosure-button" onClick={() => setExpanded((value) => !value)} type="button">{expanded ? conversationCopy.messageContent.hideDetails : conversationCopy.messageContent.showDetails}</button>
       </aside>
     )
   }
@@ -40,8 +41,8 @@ export function MessageContent({ role, text }: MessageContentProps) {
 
   return (
     <div className="message-content">
-      {visibleText ? <MarkdownContent text={visibleText} /> : <p className="attachment-note">Image attachment</p>}
-      {collapsible && <button aria-expanded={expanded} className="disclosure-button" onClick={() => setExpanded((value) => !value)} type="button">{expanded ? 'Show less' : 'Show more'}</button>}
+      {visibleText ? <MarkdownContent text={visibleText} /> : <p className="attachment-note">{conversationCopy.messageContent.imageAttachment}</p>}
+      {collapsible && <button aria-expanded={expanded} className="disclosure-button" onClick={() => setExpanded((value) => !value)} type="button">{expanded ? conversationCopy.messageContent.showLess : conversationCopy.messageContent.showMore}</button>}
     </div>
   )
 }
@@ -58,7 +59,7 @@ export function isContextCompactionMessage(role: MessageRole, text: string): boo
 
 function buildPlainTextPreview(text: string): string {
   const plain = text
-    .replace(/```[\s\S]*?```/g, 'Code block')
+    .replace(/```[\s\S]*?```/g, conversationCopy.messageContent.codeBlock)
     .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
     .replace(/[*_`#>~]/g, '')
     .replace(/\s+/g, ' ')
@@ -173,7 +174,7 @@ function parseBlocks(text: string): MarkdownBlock[] {
 
 function renderBlock(block: MarkdownBlock, index: number): ReactNode {
   if (block.type === 'attachment') {
-    return <p className="attachment-note" key={index}><span aria-hidden="true">▧</span> Image attachment</p>
+    return <p className="attachment-note" key={index}><span aria-hidden="true">▧</span> {conversationCopy.messageContent.imageAttachment}</p>
   }
 
   if (block.type === 'code') {

@@ -1,5 +1,6 @@
 import { useState } from 'react'
 
+import { workCopy } from '../../copy/work'
 import { getOwnerAuthBridge } from '../../security/owner-auth'
 
 export function OwnerSignIn({ baseUrl, ownerConnected, onOwnerConnect, onOwnerSignOut }: {
@@ -12,14 +13,14 @@ export function OwnerSignIn({ baseUrl, ownerConnected, onOwnerConnect, onOwnerSi
   const signIn = async () => {
     if (!bridge || pending) {return}
     setPending(true)
-    setMessage('Complete owner sign-in in the system browser. No decision has been made.')
+    setMessage(workCopy.ownerSignIn.completeInBrowser)
 
     try {
       await bridge.ownerSignIn({ baseUrl })
       await onOwnerConnect()
-      setMessage('Sign-in flow returned. Decision access is determined by the refreshed server capability below, not by the shared token or this button.')
+      setMessage(workCopy.ownerSignIn.returned)
     } catch {
-      setMessage('Owner sign-in or reconnection could not be verified. Decisions remain governed by the server; no approval was submitted.')
+      setMessage(workCopy.ownerSignIn.connectFailed)
     } finally {setPending(false)}
   }
 
@@ -29,19 +30,19 @@ export function OwnerSignIn({ baseUrl, ownerConnected, onOwnerConnect, onOwnerSi
 
     try {
       await onOwnerSignOut()
-      setMessage('Saved owner decision credentials were cleared and the owner connection was closed.')
+      setMessage(workCopy.ownerSignIn.credentialsCleared)
     } catch {
-      setMessage('Owner sign-out could not be verified. The owner connection was closed; retry clearing saved credentials.')
+      setMessage(workCopy.ownerSignIn.signOutFailed)
     } finally {setPending(false)}
   }
 
-  return <section aria-label="Owner decision access" className="work-owner-auth">
-    <p>A shared server token is not human approval. Owner sign-in is separate from runtime tool permissions.</p>
+  return <section aria-label={workCopy.ownerSignIn.ariaLabel} className="work-owner-auth">
+    <p>{workCopy.ownerSignIn.boundary}</p>
     {bridge ? ownerConnected
-      ? <button className="button" disabled={pending} onClick={() => void signOut()} type="button">Sign out of decision access</button>
-      : <><button className="button primary-button" disabled={pending} onClick={() => void signIn()} type="button">{pending ? 'Working…' : 'Sign in to make decisions'}</button>
-        <button className="button" disabled={pending} onClick={() => void signOut()} type="button">Clear saved owner sign-in</button></>
-      : <p>Native owner sign-in is unavailable in this client. Use a human-authenticated dashboard connection; no token-based approval bypass is available.</p>}
+      ? <button className="button" disabled={pending} onClick={() => void signOut()} type="button">{workCopy.ownerSignIn.signOut}</button>
+      : <><button className="button primary-button" disabled={pending} onClick={() => void signIn()} type="button">{pending ? workCopy.ownerSignIn.working : workCopy.ownerSignIn.signIn}</button>
+        <button className="button" disabled={pending} onClick={() => void signOut()} type="button">{workCopy.ownerSignIn.clearSaved}</button></>
+      : <p>{workCopy.ownerSignIn.unavailable}</p>}
     {message && <p role="status">{message}</p>}
   </section>
 }

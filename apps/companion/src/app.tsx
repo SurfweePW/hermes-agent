@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
+import { appCopy } from './copy/app'
 import { NeedsMe } from './features/attention/needs-me'
 import { Conversation } from './features/conversation/conversation'
 import { transcriptSessionKey } from './features/conversation/transcript-scroll'
@@ -25,9 +26,7 @@ const primaryScreens = new Set<Screen>(['needs', 'work', 'library'])
 const fixtureMode = import.meta.env.VITE_COMPANION_FIXTURE === 'true'
 const defaultStore = createCompanionStore(fixtureMode ? { gatewayFactory: createFakeWorkGateway } : {})
 
-const screenTitles: Record<Screen, string> = {
-  needs: 'Decyzje', work: 'Rozmowy', library: 'Pliki', conversation: 'Conversation', details: 'Profil', recovery: 'Recovery'
-}
+const screenTitles: Record<Screen, string> = appCopy.screenTitles
 
 function initialScreen(): Screen {
   const view = new URLSearchParams(window.location.search).get('view') as Screen | null
@@ -290,8 +289,8 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
           ? directory.selectedSession
           : directory.sessions.find((session) => session.id === companion.storedSessionId)
       const projectLabel = directorySession?.project === null
-        ? 'Bez projektu'
-        : directorySession?.project?.title ?? 'Projekt nieznany'
+        ? appCopy.project.none
+        : directorySession?.project?.title ?? appCopy.project.unknown
 
       return selected
         ? <Conversation approval={companion.pendingApproval} connected={companion.phase === 'ready'} draft={companion.draft} messages={companion.messages} onApproval={(choice) => void store.respondToApproval(choice)} onBackToSessions={() => {
@@ -308,7 +307,7 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
     }
 
     if (screen === 'needs') {return <>
-      {companion.phase !== 'ready' && <button className="button reconnect-button" disabled={companion.phase === 'recovering'} onClick={() => void store.recover()} type="button">Reconnect to verify work</button>}
+      {companion.phase !== 'ready' && <button className="button reconnect-button" disabled={companion.phase === 'recovering'} onClick={() => void store.recover()} type="button">{appCopy.reconnectToVerify}</button>}
       <OwnerSignIn baseUrl={companion.baseUrl} onOwnerConnect={store.connectOwner} onOwnerSignOut={store.signOutOwner} ownerConnected={companion.connectionMode === 'owner' && companion.phase === 'ready'} />
       <WorkInbox {...work} onClose={store.work.close} onComment={store.work.comment} onDecision={store.work.decide} onGroupBy={(groupBy) => void store.work.setGroupBy(groupBy)} onOpen={(profile, id) => void store.work.open(profile, id)} onOpenArtifact={(profile, reference) => navigate('library', libraryAssetParams(profile, reference))} onOpenProject={(project) => navigate('work', new URLSearchParams({ view: 'work', section: 'projects', focus: project.source_id, focusProfile: project.profile, focusSource: project.backend_namespace }))} onOpenSourceSession={(source) => navigate('work', new URLSearchParams({ view: 'work', section: 'sessions', focus: source.id, focusProfile: source.profile, focusSource: source.backend }))} onPriority={store.work.setPriority} onRefresh={() => void store.work.refresh()} onRestorePriority={store.work.restoreRecommended} />
       <NeedsMe items={canonicalRuntimeAttention} onOpen={(item) => { if (companion.phase === 'ready') { const params = new URLSearchParams(locationSearch); params.set('view', 'needs'); params.set('request', item.id); params.set('runtimeSession', item.runtime_session_id); window.history.pushState({}, '', `${window.location.pathname}?${params.toString()}`); setLocationSearch(window.location.search); void store.openAttention(item).then(() => setScreen('conversation')) } }} onRefresh={() => void store.refreshAttention()} scope={companion.attentionScope} />
@@ -345,27 +344,27 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
 
   return (
     <div className="app-shell app-shell--two-column">
-      <header className="mobile-header"><div className="mobile-brand"><Wordmark /><BuildStamp /></div><span aria-label="Profile: Companion user" className="avatar avatar--user" role="img">CU</span></header>
+      <header className="mobile-header"><div className="mobile-brand"><Wordmark /><BuildStamp /></div><span aria-label={appCopy.profile.companionUser} className="avatar avatar--user" role="img">CU</span></header>
       <aside className="left-rail">
         <Wordmark />
-        <nav aria-label="Main navigation" className="primary-nav">
-          <NavButton active={screen === 'work'} icon="◇" label="Rozmowy" onClick={() => navigate('work')} />
-          <NavButton active={screen === 'needs' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Decyzje" onClick={() => navigate('needs')} />
-          <NavButton active={screen === 'library'} icon="▤" label="Pliki" onClick={() => navigate('library')} />
+        <nav aria-label={appCopy.navigation.main} className="primary-nav">
+          <NavButton active={screen === 'work'} icon="◇" label={appCopy.navigation.conversations} onClick={() => navigate('work')} />
+          <NavButton active={screen === 'needs' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label={appCopy.navigation.decisions} onClick={() => navigate('needs')} />
+          <NavButton active={screen === 'library'} icon="▤" label={appCopy.navigation.files} onClick={() => navigate('library')} />
         </nav>
-        <div className="rail-roster"><div className="rail-section-title"><span>Teammates</span><span>{profileOptions.filter((option) => option.selectable).length}</span></div><Roster compact onSelect={openTeammate} teammates={companion.teammates.filter((teammate) => profileOptions.some((option) => option.teammateId === teammate.id && option.selectable))} /></div>
-        <div className="connection"><span aria-hidden="true" /><div><strong>Companion is ready</strong><small>{companion.teammates.length} teammates · v{__COMPANION_VERSION__}</small></div></div>
+        <div className="rail-roster"><div className="rail-section-title"><span>{appCopy.profile.section}</span><span>{profileOptions.filter((option) => option.selectable).length}</span></div><Roster availability={profileOptions} compact onSelect={openTeammate} teammates={companion.teammates} /></div>
+        <div className="connection"><span aria-hidden="true" /><div><strong>{appCopy.profile.ready}</strong><small>{appCopy.profile.count(companion.teammates.length)} · v{__COMPANION_VERSION__}</small></div></div>
       </aside>
       <main aria-label={screenTitles[screen]} className={`main-content${screen === 'conversation' || screen === 'work' && new URLSearchParams(locationSearch).has('chat') ? ' main-content--conversation' : ''}`} ref={mainRef} tabIndex={-1}>
         <h1 className="sr-only">Hermes Companion</h1>
-        {screen !== 'conversation' && <header className="desktop-topbar"><div><span>Hermes Companion · v{__COMPANION_VERSION__}</span><strong>{screenTitles[screen]}</strong></div><span aria-label="Profile: Companion user" className="avatar avatar--user" role="img">CU</span></header>}
+        {screen !== 'conversation' && <header className="desktop-topbar"><div><span>Hermes Companion · v{__COMPANION_VERSION__}</span><strong>{screenTitles[screen]}</strong></div><span aria-label={appCopy.profile.companionUser} className="avatar avatar--user" role="img">CU</span></header>}
         {companion.error && <div className="decision-toast" role="alert">{companion.error}</div>}
         {content}
       </main>
-      <nav aria-label="Mobile navigation" className="bottom-nav">
-        <NavButton active={screen === 'work'} icon="◇" label="Rozmowy" onClick={() => navigate('work')} />
-        <NavButton active={screen === 'needs' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label="Decyzje" onClick={() => navigate('needs')} />
-        <NavButton active={screen === 'library'} icon="▤" label="Pliki" onClick={() => navigate('library')} />
+      <nav aria-label={appCopy.navigation.mobile} className="bottom-nav">
+        <NavButton active={screen === 'work'} icon="◇" label={appCopy.navigation.conversations} onClick={() => navigate('work')} />
+        <NavButton active={screen === 'needs' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label={appCopy.navigation.decisions} onClick={() => navigate('needs')} />
+        <NavButton active={screen === 'library'} icon="▤" label={appCopy.navigation.files} onClick={() => navigate('library')} />
       </nav>
     </div>
   )
@@ -376,10 +375,10 @@ function SetupScreen({ initialBaseUrl, warnings, connecting, error, hasSavedToke
   const [token, setToken] = useState('')
 
   const storageCopy = storesTokenEncrypted
-    ? 'The native app stores the token encrypted in secure device storage.'
-    : 'The browser keeps the token for this session only.'
+    ? appCopy.setup.encryptedStorage
+    : appCopy.setup.sessionStorage
 
-  return <main aria-labelledby="setup-title" className="recovery-screen"><section className="recovery-card"><Wordmark /><BuildStamp /><p className="kicker">Connection setup</p><h1 id="setup-title">Connect Hermes Companion</h1><p>Use the private HTTP(S) base URL for your Hermes gateway. {storageCopy}</p><form onSubmit={(event) => { event.preventDefault(); onConnect(baseUrl, token) }}><label>Gateway base URL<input autoComplete="url" onChange={(event) => setBaseUrl(event.target.value)} placeholder="http://localhost:8642" required type="url" value={baseUrl} /></label>{ownerAuthAvailable ? <><button className="primary-button" disabled={connecting || !baseUrl.trim()} onClick={() => onOwnerConnect(baseUrl)} type="button">{connecting ? 'Connecting…' : 'Sign in with Google'}</button><p role="status">Owner sign-in uses the native app and system browser with a single-use connection ticket.</p></> : <p role="status">Google owner sign-in requires a trusted native app bridge. Browser setup requires a session token.</p>}<label>Session token<input autoComplete="off" onChange={(event) => setToken(event.target.value)} placeholder={hasSavedToken ? 'Leave blank to use saved token' : undefined} required={!hasSavedToken} type="password" value={token} /></label>{hasSavedToken && <p role="status">A saved encrypted token is available. Enter a new token to replace it after a successful connection.</p>}{warnings.map((warning) => <p key={warning} role="status">{warning}</p>)}{error && <p role="alert">{error}</p>}<button className={ownerAuthAvailable ? undefined : 'primary-button'} disabled={connecting} type="submit">{connecting ? 'Connecting…' : hasSavedToken && !token ? 'Use saved token' : 'Connect privately'}</button>{canForgetSavedToken && <button disabled={connecting} onClick={onForgetSavedToken} type="button">Forget saved token</button>}</form></section></main>
+  return <main aria-labelledby="setup-title" className="recovery-screen"><section className="recovery-card"><Wordmark /><BuildStamp /><p className="kicker">{appCopy.setup.kicker}</p><h1 id="setup-title">{appCopy.setup.title}</h1><p>{appCopy.setup.lede} {storageCopy}</p><form onSubmit={(event) => { event.preventDefault(); onConnect(baseUrl, token) }}><label>{appCopy.setup.baseUrl}<input autoComplete="url" onChange={(event) => setBaseUrl(event.target.value)} placeholder="http://localhost:8642" required type="url" value={baseUrl} /></label>{ownerAuthAvailable ? <><button className="primary-button" disabled={connecting || !baseUrl.trim()} onClick={() => onOwnerConnect(baseUrl)} type="button">{connecting ? appCopy.setup.connecting : appCopy.setup.ownerConnect}</button><p role="status">{appCopy.setup.ownerExplanation}</p></> : <p role="status">{appCopy.setup.nativeBridgeRequired}</p>}<label>{appCopy.setup.sessionToken}<input autoComplete="off" onChange={(event) => setToken(event.target.value)} placeholder={hasSavedToken ? appCopy.setup.savedTokenPlaceholder : undefined} required={!hasSavedToken} type="password" value={token} /></label>{hasSavedToken && <p role="status">{appCopy.setup.savedTokenAvailable}</p>}{warnings.map((warning) => <p key={warning} role="status">{warning}</p>)}{error && <p role="alert">{error}</p>}<button className={ownerAuthAvailable ? undefined : 'primary-button'} disabled={connecting} type="submit">{connecting ? appCopy.setup.connecting : hasSavedToken && !token ? appCopy.setup.useSavedToken : appCopy.setup.connectPrivately}</button>{canForgetSavedToken && <button disabled={connecting} onClick={onForgetSavedToken} type="button">{appCopy.setup.forgetSavedToken}</button>}</form></section></main>
 }
 
 function Wordmark() { return <div className="wordmark"><span aria-hidden="true" className="wordmark__sigil">H+</span><span>Hermes<strong>Companion</strong></span></div> }
@@ -387,6 +386,6 @@ function Wordmark() { return <div className="wordmark"><span aria-hidden="true" 
 function BuildStamp() { return <small className="build-stamp">v{__COMPANION_VERSION__} · {__COMPANION_GIT_COMMIT__.slice(0, 8)}</small> }
 interface NavButtonProps { active: boolean; icon: string; label: string; onClick: () => void; badge?: string }
 
-function NavButton({ active, icon, label, onClick, badge }: NavButtonProps) { return <button aria-current={active ? 'page' : undefined} aria-label={badge ? `${label}, ${badge} items` : undefined} className={`nav-button${active ? ' nav-button--active' : ''}`} onClick={onClick} type="button"><span aria-hidden="true" className="nav-button__icon">{icon}</span><span>{label}</span>{badge && <span aria-hidden="true" className="nav-badge">{badge}</span>}</button> }
+function NavButton({ active, icon, label, onClick, badge }: NavButtonProps) { return <button aria-current={active ? 'page' : undefined} aria-label={badge ? appCopy.navigation.badgeLabel(label, badge) : undefined} className={`nav-button${active ? ' nav-button--active' : ''}`} onClick={onClick} type="button"><span aria-hidden="true" className="nav-button__icon">{icon}</span><span>{label}</span>{badge && <span aria-hidden="true" className="nav-badge">{badge}</span>}</button> }
 
-function ChooseTeammate({ onBack }: { onBack: () => void }) { return <section className="search-empty"><h2>Wybierz profil</h2><p>Otwórz profil z listy bocznej.</p><button className="primary-button" onClick={onBack} type="button">Wróć do rozmów</button></section> }
+function ChooseTeammate({ onBack }: { onBack: () => void }) { return <section className="search-empty"><h2>{appCopy.chooseProfile.title}</h2><p>{appCopy.chooseProfile.detail}</p><button className="primary-button" onClick={onBack} type="button">{appCopy.chooseProfile.back}</button></section> }

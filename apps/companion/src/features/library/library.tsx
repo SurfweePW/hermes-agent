@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { TechnicalDetails } from '../../components/technical-details'
+import { libraryCopy } from '../../copy/library'
 
 import type { LibraryChunk, LibraryDetail, LibraryGateway, LibraryItem, LibraryListOptions, LibraryListResult, LibraryPreviewKind, LibraryRelationshipContext } from './library-types'
 
@@ -22,7 +23,7 @@ function message(error: unknown): string {
 
   if (error && typeof error === 'object' && 'message' in error && typeof error.message === 'string') {return error.message}
 
-  return 'The Library request failed. Try again.'
+  return libraryCopy.errors.request
 }
 
 function decodeBase64(value: string): Uint8Array {
@@ -108,14 +109,14 @@ function safeDownloadMime(filename: string, bytes: Uint8Array): string {
 
 async function verifySha256(bytes: Uint8Array, expected: string | undefined): Promise<void> {
   if (!expected || !/^[0-9a-f]{64}$/i.test(expected) || !globalThis.crypto?.subtle) {
-    throw new Error('The original artifact could not be integrity verified.')
+    throw new Error(libraryCopy.errors.integrityUnavailable)
   }
 
   const digest = await globalThis.crypto.subtle.digest('SHA-256', Uint8Array.from(bytes).buffer)
   const actual = [...new Uint8Array(digest)].map((value) => value.toString(16).padStart(2, '0')).join('')
 
   if (actual.toLowerCase() !== expected.toLowerCase()) {
-    throw new Error('The original artifact failed integrity verification.')
+    throw new Error(libraryCopy.errors.integrityFailed)
   }
 }
 
@@ -136,22 +137,22 @@ async function allChunks(
 
     if (chunk.available === false) {return { bytes: new Uint8Array(), first: chunk }}
 
-    if (chunk.offset !== offset || chunk.next_offset === undefined || chunk.eof === undefined || chunk.size === undefined || chunk.data_base64 === undefined || chunk.next_offset < offset || chunk.next_offset > chunk.size) {throw new Error('The Library returned an invalid content chunk.')}
+    if (chunk.offset !== offset || chunk.next_offset === undefined || chunk.eof === undefined || chunk.size === undefined || chunk.data_base64 === undefined || chunk.next_offset < offset || chunk.next_offset > chunk.size) {throw new Error(libraryCopy.errors.invalidChunk)}
 
     if (expectedSize === undefined) {expectedSize = chunk.size}
 
-    if (chunk.size !== expectedSize) {throw new Error('The artifact changed while it was being transferred. Try again.')}
+    if (chunk.size !== expectedSize) {throw new Error(libraryCopy.errors.changed)}
 
-    if (!chunk.descriptor || (descriptor && chunk.descriptor !== descriptor)) {throw new Error('The artifact changed while it was being transferred. Try again.')}
+    if (!chunk.descriptor || (descriptor && chunk.descriptor !== descriptor)) {throw new Error(libraryCopy.errors.changed)}
     descriptor = chunk.descriptor
     const bytes = decodeBase64(chunk.data_base64)
 
-    if (bytes.length !== chunk.next_offset - offset || bytes.length > maxChunkSize) {throw new Error('The Library returned an invalid content chunk.')}
+    if (bytes.length !== chunk.next_offset - offset || bytes.length > maxChunkSize) {throw new Error(libraryCopy.errors.invalidChunk)}
     chunks.push(bytes)
     offset = chunk.next_offset
 
     if (chunk.eof) {
-      if (offset !== expectedSize) {throw new Error('The Library returned an incomplete artifact.')}
+      if (offset !== expectedSize) {throw new Error(libraryCopy.errors.incompleteArtifact)}
       const combined = new Uint8Array(expectedSize)
       let target = 0
 
@@ -160,10 +161,10 @@ async function allChunks(
       return { bytes: combined, first: first ?? chunk }
     }
 
-    if (bytes.length === 0) {throw new Error('The Library transfer made no progress.')}
+    if (bytes.length === 0) {throw new Error(libraryCopy.errors.noProgress)}
   }
 
-  throw new Error('The Library transfer exceeded its safety limit.')
+  throw new Error(libraryCopy.errors.transferLimit)
 }
 
 export async function downloadOriginal(gateway: LibraryGateway, artifactId: string, versionId?: string, profile?: string): Promise<void> {
@@ -204,7 +205,7 @@ async function completeList(gateway: LibraryGateway, options: LibraryListOptions
   const cursors = new Set<string>()
 
   while (result.has_more) {
-    if (!result.next_cursor || cursors.has(result.next_cursor)) {throw new Error('The Library returned an invalid pagination cursor.')}
+    if (!result.next_cursor || cursors.has(result.next_cursor)) {throw new Error(libraryCopy.errors.invalidCursor)}
     cursors.add(result.next_cursor)
     result = await gateway.listLibrary({ ...request, cursor: result.next_cursor })
     items.push(...result.items)
@@ -212,18 +213,18 @@ async function completeList(gateway: LibraryGateway, options: LibraryListOptions
 
   const unique = new Set(items.map((item) => item.artifact_id))
 
-  if (unique.size !== items.length) {throw new Error('The Library returned duplicate artifacts across pages.')}
+  if (unique.size !== items.length) {throw new Error(libraryCopy.errors.duplicateArtifacts)}
 
-  if (result.coverage.status === 'complete' && result.total !== undefined && result.total !== items.length) {throw new Error('The Library returned an incomplete result set.')}
+  if (result.coverage.status === 'complete' && result.total !== undefined && result.total !== items.length) {throw new Error(libraryCopy.errors.incompleteResults)}
 
   return { ...result, items, has_more: false, next_cursor: null }
 }
 
 function formatDate(value: string | null | undefined): string {
-  if (!value) {return 'Date unavailable'}
+  if (!value) {return libraryCopy.common.dateUnavailable}
   const date = new Date(value)
 
-  return Number.isFinite(date.valueOf()) ? new Intl.DateTimeFormat(undefined, { dateStyle: 'medium' }).format(date) : 'Date unavailable'
+  return Number.isFinite(date.valueOf()) ? new Intl.DateTimeFormat('pl-PL', { dateStyle: 'medium' }).format(date) : libraryCopy.common.dateUnavailable
 }
 
 function formatBytes(size: number): string {
@@ -345,7 +346,7 @@ export function Library({ params, onNavigate, gateway, refreshToken = 0, relatio
     void gateway.resolveLibraryReference(openReference, profile || undefined).then((resolved) => {
       if (!active) {return}
       if (!resolved.available || !resolved.artifact_id) {
-        setReferenceError('The referenced Library artifact is unavailable.')
+        setReferenceError(libraryCopy.errors.unavailableReference)
 
         return
       }
@@ -354,7 +355,7 @@ export function Library({ params, onNavigate, gateway, refreshToken = 0, relatio
       next.set('libraryArtifact', resolved.artifact_id)
       next.set('libraryProfile', resolved.profile)
       onNavigate(next)
-    }).catch(() => {if (active) {setReferenceError('The referenced Library artifact is unavailable.')}})
+    }).catch(() => {if (active) {setReferenceError(libraryCopy.errors.unavailableReference)}})
 
     return () => {active = false}
   }, [gateway, onNavigate, openReference, params, profile, selectedId])
@@ -445,21 +446,21 @@ export function Library({ params, onNavigate, gateway, refreshToken = 0, relatio
       const reviewedSource = { selection: requestSelection, descriptor: transferred.first.descriptor, versionId: transferred.first.version_id }
 
       if (transferred.first.available === false || !policy?.preview_available) {
-        setPreview({ kind: 'unsupported', text: policy?.message || 'A safe preview is not available for this artifact.', mimeType: 'text/plain', ...reviewedSource })
+        setPreview({ kind: 'unsupported', text: policy?.message || libraryCopy.errors.safePreviewUnavailable, mimeType: 'text/plain', ...reviewedSource })
       } else if (policy.kind === 'html') {
-        if (transferred.first.sandbox !== '' || transferred.first.scripts !== false || transferred.first.network !== false) {throw new Error('The HTML preview did not satisfy the static sandbox contract.')}
+        if (transferred.first.sandbox !== '' || transferred.first.scripts !== false || transferred.first.network !== false) {throw new Error(libraryCopy.errors.unsafeHtml)}
         setPreview({ kind: 'html', text: decodeText(transferred.bytes), mimeType: transferred.first.mime_type || 'text/html', ...reviewedSource })
       } else if (policy.kind === 'markdown' || policy.kind === 'text') {
         setPreview({ kind: policy.kind, text: decodeText(transferred.bytes), mimeType: transferred.first.mime_type || 'text/plain', ...reviewedSource })
       } else if (policy.kind === 'pdf') {
         await verifySha256(transferred.bytes, transferred.first.sha256)
 
-        if (safeDownloadMime(transferred.first.filename ?? '', transferred.bytes) !== 'application/pdf') {throw new Error('The PDF preview did not contain verified PDF bytes.')}
+        if (safeDownloadMime(transferred.first.filename ?? '', transferred.bytes) !== 'application/pdf') {throw new Error(libraryCopy.errors.invalidPdf)}
         setPreview({ kind: 'pdf', objectUrl: URL.createObjectURL(new Blob([Uint8Array.from(transferred.bytes).buffer], { type: 'application/pdf' })), mimeType: 'application/pdf', ...reviewedSource })
       } else if (policy.kind === 'image') {
         setPreview({ kind: 'image', objectUrl: URL.createObjectURL(new Blob([Uint8Array.from(transferred.bytes).buffer], { type: transferred.first.mime_type })), mimeType: transferred.first.mime_type || 'application/octet-stream', ...reviewedSource })
       } else {
-        setPreview({ kind: 'unsupported', text: policy.message || 'A safe preview is not available for this artifact.', mimeType: 'text/plain', ...reviewedSource })
+        setPreview({ kind: 'unsupported', text: policy.message || libraryCopy.errors.safePreviewUnavailable, mimeType: 'text/plain', ...reviewedSource })
       }
     } catch (cause) {
       if (isCurrentRequest()) {setDetailError(message(cause))}
@@ -472,7 +473,7 @@ export function Library({ params, onNavigate, gateway, refreshToken = 0, relatio
     if (!detail || !displayedPreview?.descriptor || selectedVersion) {return}
 
     if (relationshipUnavailable) {
-      setDetailError('The requested Library relationship could not be verified. Pinning is disabled.')
+      setDetailError(libraryCopy.errors.relationship)
 
       return
     }
@@ -492,12 +493,12 @@ export function Library({ params, onNavigate, gateway, refreshToken = 0, relatio
   if (selectedId) {
     const selected = detail ? selectedDetailVersion(detail, selectedVersion) : undefined
 
-    return <section aria-labelledby="library-detail-title" className="library-screen library-detail"><button onClick={close} type="button">← Back to Library</button>{detailLoading && <p role="status">Loading artifact details…</p>}{relationshipUnavailable && !detailError && <div role="alert">The requested Library relationship could not be verified. Pinning is disabled.</div>}{detailError && <div role="alert">{detailError}<button onClick={() => close()} type="button">Return to Library</button></div>}{detail && !selected && selectedVersion && <><p className="kicker">{detail.collection.name}</p><h2 id="library-detail-title">{detail.filename}</h2><div role="alert">Requested retained version <code>{selectedVersion}</code> is unavailable.</div></>}{detail && selected && <><p className="kicker">{detail.collection.name}</p><h2 id="library-detail-title">{detail.filename}</h2><p>Canonical Library artifact · {selected.mime_type} · {formatBytes(selected.size)}</p><dl><div><dt>Dostępność</dt><dd>{selected.availability}</dd></div></dl><TechnicalDetails><dl><div><dt>Backend</dt><dd>{detail.backend_namespace}</dd></div><div><dt>ID artefaktu</dt><dd>{detail.artifact_id}</dd></div><div><dt>Wersja</dt><dd>{selectedVersion || selected.version_id || 'Najnowsza'}</dd></div><div><dt>Pochodzenie</dt><dd>{selected.reviewed ? 'Wersja zatwierdzona' : 'Bieżąca kolekcja'}</dd></div></dl>{selectedVersion && <section aria-label="Pochodzenie wersji"><pre>{JSON.stringify(selected.provenance ?? 'Brak danych.', null, 2)}</pre></section>}</TechnicalDetails><label>Version<select aria-label="Version" onChange={(event) => selectVersion(event.target.value)} value={selectedVersion}><option value="">Latest</option>{detail.versions.map((version, index) => <option key={version.version_id} value={version.version_id}>{version.ingested_at ? `${formatDate(version.ingested_at)} · ` : ''}Wersja zachowana {detail.versions.length - index}</option>)}</select></label><div className="library-actions"><button disabled={previewLoading} onClick={() => void loadPreview()} type="button">{previewLoading ? 'Loading preview…' : 'Load safe preview'}</button><button disabled={downloading} onClick={() => {setDownloading(true); setDetailError(null); void downloadOriginal(gateway, detail.artifact_id, selectedVersion || undefined, detail.profile).catch((cause) => setDetailError(message(cause))).finally(() => setDownloading(false))}} type="button">{downloading ? 'Downloading original…' : 'Download original'}</button>{displayedPreview?.descriptor && !selectedVersion && <button disabled={pinning || relationshipUnavailable} onClick={() => void pinReviewed()} type="button">{pinning ? 'Saving reviewed version…' : 'Mark previewed version reviewed'}</button>}</div>{displayedPreview && <section aria-label="Artifact preview" className="library-preview">{jsonPlainTextFallback && <p role="note">JSON is shown as inert plain text; no embedded content is executed.</p>}{displayedPreview.kind === 'html' && <iframe sandbox="" srcDoc={displayedPreview.text} title={`Static preview of ${detail.filename}`} />}{(displayedPreview.kind === 'markdown' || displayedPreview.kind === 'text' || displayedPreview.kind === 'unsupported') && <pre>{displayedPreview.text}</pre>}{displayedPreview.kind === 'image' && displayedPreview.objectUrl && <img alt={`Preview of ${detail.filename}`} src={displayedPreview.objectUrl} />}{displayedPreview.kind === 'pdf' && displayedPreview.objectUrl && <iframe sandbox="" src={displayedPreview.objectUrl} title={`PDF preview of ${detail.filename}`} />}</section>}</>}</section>
+    return <section aria-labelledby="library-detail-title" className="library-screen library-detail"><button onClick={close} type="button">{libraryCopy.detail.back}</button>{detailLoading && <p role="status">{libraryCopy.detail.loading}</p>}{relationshipUnavailable && !detailError && <div role="alert">{libraryCopy.errors.relationship}</div>}{detailError && <div role="alert">{detailError}<button onClick={() => close()} type="button">{libraryCopy.detail.return}</button></div>}{detail && !selected && selectedVersion && <><p className="kicker">{detail.collection.name}</p><h2 id="library-detail-title">{detail.filename}</h2><div role="alert">{libraryCopy.detail.missingVersion(selectedVersion)}</div></>}{detail && selected && <><p className="kicker">{detail.collection.name}</p><h2 id="library-detail-title">{detail.filename}</h2><p>{libraryCopy.detail.canonical} · {selected.mime_type} · {formatBytes(selected.size)}</p><dl><div><dt>{libraryCopy.detail.availability}</dt><dd>{selected.availability}</dd></div></dl><TechnicalDetails><dl><div><dt>{libraryCopy.detail.backend}</dt><dd>{detail.backend_namespace}</dd></div><div><dt>{libraryCopy.detail.artifactId}</dt><dd>{detail.artifact_id}</dd></div><div><dt>{libraryCopy.detail.version}</dt><dd>{selectedVersion || selected.version_id || libraryCopy.common.latest}</dd></div><div><dt>{libraryCopy.detail.origin}</dt><dd>{selected.reviewed ? libraryCopy.common.reviewedVersion : libraryCopy.common.currentCollection}</dd></div></dl>{selectedVersion && <section aria-label={libraryCopy.detail.versionOrigin}><pre>{JSON.stringify(selected.provenance ?? libraryCopy.detail.noData, null, 2)}</pre></section>}</TechnicalDetails><label>{libraryCopy.detail.versionLabel}<select aria-label={libraryCopy.detail.versionLabel} onChange={(event) => selectVersion(event.target.value)} value={selectedVersion}><option value="">{libraryCopy.common.latest}</option>{detail.versions.map((version, index) => <option key={version.version_id} value={version.version_id}>{version.ingested_at ? `${formatDate(version.ingested_at)} · ` : ''}Wersja zachowana {detail.versions.length - index}</option>)}</select></label><div className="library-actions"><button disabled={previewLoading} onClick={() => void loadPreview()} type="button">{previewLoading ? libraryCopy.detail.loadingPreview : libraryCopy.detail.loadPreview}</button><button disabled={downloading} onClick={() => {setDownloading(true); setDetailError(null); void downloadOriginal(gateway, detail.artifact_id, selectedVersion || undefined, detail.profile).catch((cause) => setDetailError(message(cause))).finally(() => setDownloading(false))}} type="button">{downloading ? libraryCopy.detail.downloading : libraryCopy.detail.download}</button>{displayedPreview?.descriptor && !selectedVersion && <button disabled={pinning || relationshipUnavailable} onClick={() => void pinReviewed()} type="button">{pinning ? libraryCopy.detail.markingReviewed : libraryCopy.detail.markReviewed}</button>}</div>{displayedPreview && <section aria-label={libraryCopy.detail.preview} className="library-preview">{jsonPlainTextFallback && <p role="note">{libraryCopy.detail.jsonFallback}</p>}{displayedPreview.kind === 'html' && <iframe sandbox="" srcDoc={displayedPreview.text} title={libraryCopy.detail.staticTitle(detail.filename)} />}{(displayedPreview.kind === 'markdown' || displayedPreview.kind === 'text' || displayedPreview.kind === 'unsupported') && <pre>{displayedPreview.text}</pre>}{displayedPreview.kind === 'image' && displayedPreview.objectUrl && <img alt={libraryCopy.detail.imageAlt(detail.filename)} src={displayedPreview.objectUrl} />}{displayedPreview.kind === 'pdf' && displayedPreview.objectUrl && <iframe sandbox="" src={displayedPreview.objectUrl} title={libraryCopy.detail.pdfTitle(detail.filename)} />}</section>}</>}</section>
   }
 
   const filtered = Boolean(query || type !== 'all' || date !== 'any' || collection || profile || project || topic || session || status !== 'all')
 
-  return <section aria-labelledby="library-title" className="library-screen"><div className="directory-heading"><div><p className="kicker">Authorized deliverables</p><h2 id="library-title">Library</h2><p className="screen-lede">Search configured canonical output collections. Device paths and arbitrary file browsing are not exposed.</p></div><button className="button" disabled={loading} onClick={() => setRetry((value) => value + 1)} type="button">Refresh Library</button></div><div className="directory-filters"><label className="directory-search">Search titles and metadata<input aria-label="Search titles and metadata" onChange={(event) => update('libraryQ', event.target.value, '')} type="search" value={query} /></label><label>Type<select aria-label="Type" onChange={(event) => update('libraryType', event.target.value, 'all')} value={type}><option value="all">All types</option>{DISPLAY_TYPES.map((kind) => <option key={kind} value={kind}>{kind === 'unsupported' ? 'Unsupported preview' : kind[0].toUpperCase() + kind.slice(1)}</option>)}</select></label><label>Date<select aria-label="Date" onChange={(event) => update('libraryDate', event.target.value, 'any')} value={date}><option value="any">Any date</option><option value="week">Last 7 days</option><option value="month">Last 30 days</option></select></label><label>Collection<select aria-label="Collection" onChange={(event) => update('libraryCollection', event.target.value, '')} value={collection}><option value="">All collections</option>{result?.collections.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label><label>Status<select aria-label="Status" onChange={(event) => update('libraryStatus', event.target.value, 'all')} value={status}><option value="all">All statuses</option><option value="reviewed">Reviewed</option><option value="live">Current/live</option></select></label><label>Profil<select aria-label="Profile" onChange={(event) => update('libraryProfile', event.target.value, '')} value={profile}><option value="">All authorized profiles</option>{profiles.map((entry) => <option key={entry.profile} value={entry.profile}>{entry.profile}{entry.configured ? '' : ' (unconfigured)'}</option>)}</select></label><label>Project ID<input aria-label="Project" onChange={(event) => update('libraryProject', event.target.value, '')} value={project} /></label><label>Topic ID<input aria-label="Topic" onChange={(event) => update('libraryTopic', event.target.value, '')} value={topic} /></label><label>Session ID<input aria-label="Session" onChange={(event) => update('librarySession', event.target.value, '')} value={session} /></label></div>{filtered && <div className="filter-chips"><span>Filters active</span><button onClick={() => {const next = new URLSearchParams(params);
+  return <section aria-labelledby="library-title" className="library-screen"><div className="directory-heading"><div><p className="kicker">{libraryCopy.chrome.kicker}</p><h2 id="library-title">{libraryCopy.chrome.title}</h2><p className="screen-lede">{libraryCopy.chrome.lede}</p></div><button className="button" disabled={loading} onClick={() => setRetry((value) => value + 1)} type="button">{libraryCopy.chrome.refresh}</button></div><div className="directory-filters"><label className="directory-search">{libraryCopy.filters.search}<input aria-label={libraryCopy.filters.search} onChange={(event) => update('libraryQ', event.target.value, '')} type="search" value={query} /></label><label>{libraryCopy.filters.type}<select aria-label={libraryCopy.filters.type} onChange={(event) => update('libraryType', event.target.value, 'all')} value={type}><option value="all">{libraryCopy.filters.allTypes}</option>{DISPLAY_TYPES.map((kind) => <option key={kind} value={kind}>{kind === 'unsupported' ? libraryCopy.filters.unsupportedPreview : libraryCopy.filters.typeLabels[kind]}</option>)}</select></label><label>{libraryCopy.filters.date}<select aria-label={libraryCopy.filters.date} onChange={(event) => update('libraryDate', event.target.value, 'any')} value={date}><option value="any">{libraryCopy.filters.anyDate}</option><option value="week">{libraryCopy.filters.last7Days}</option><option value="month">{libraryCopy.filters.last30Days}</option></select></label><label>{libraryCopy.filters.collection}<select aria-label={libraryCopy.filters.collection} onChange={(event) => update('libraryCollection', event.target.value, '')} value={collection}><option value="">{libraryCopy.filters.allCollections}</option>{result?.collections.map((entry) => <option key={entry.id} value={entry.id}>{entry.name}</option>)}</select></label><label>{libraryCopy.filters.status}<select aria-label={libraryCopy.filters.status} onChange={(event) => update('libraryStatus', event.target.value, 'all')} value={status}><option value="all">{libraryCopy.filters.allStatuses}</option><option value="reviewed">{libraryCopy.filters.reviewed}</option><option value="live">{libraryCopy.filters.live}</option></select></label><label>{libraryCopy.filters.profile}<select aria-label={libraryCopy.filters.profile} onChange={(event) => update('libraryProfile', event.target.value, '')} value={profile}><option value="">{libraryCopy.filters.allAuthorizedProfiles}</option>{profiles.map((entry) => <option key={entry.profile} value={entry.profile}>{entry.profile}{entry.configured ? '' : ` (${libraryCopy.filters.unconfigured})`}</option>)}</select></label><label>{libraryCopy.filters.projectId}<input aria-label={libraryCopy.filters.project} onChange={(event) => update('libraryProject', event.target.value, '')} value={project} /></label><label>{libraryCopy.filters.topicId}<input aria-label={libraryCopy.filters.topic} onChange={(event) => update('libraryTopic', event.target.value, '')} value={topic} /></label><label>{libraryCopy.filters.sessionId}<input aria-label={libraryCopy.filters.session} onChange={(event) => update('librarySession', event.target.value, '')} value={session} /></label></div>{filtered && <div className="filter-chips"><span>{libraryCopy.filters.active}</span><button onClick={() => {const next = new URLSearchParams(params);
 
- for (const key of ['libraryQ', 'libraryType', 'libraryDate', 'libraryCollection', 'libraryProfile', 'libraryProject', 'libraryTopic', 'librarySession', 'libraryStatus']) {next.delete(key)}; onNavigate(next)}} type="button">Clear filters</button></div>}{referenceError && <div className="library-boundary" role="alert">{referenceError}</div>}{loading && <p role="status">Loading the complete Library…</p>}{error && <div className="library-boundary" role="alert"><strong>Library unavailable</strong><p>{error}</p><button onClick={() => setRetry((value) => value + 1)} type="button">Try again</button></div>}{!loading && result?.coverage.status === 'unconfigured' && <div className="library-boundary" role="status"><strong>Library is not configured</strong><p>{result.warnings.join(' ') || 'No authorized collections are configured for this profile.'}</p></div>}{!loading && result?.coverage.status === 'partial' && <div className="library-boundary" role="status"><strong>Library coverage is partial</strong><p>{result.warnings.join(' ') || 'One or more configured collections are unavailable. Results are incomplete.'}</p></div>}{!loading && result && result.coverage.status !== 'unconfigured' && result.items.length === 0 && <div className="search-empty"><h3>No artifacts found</h3><p>{filtered ? 'No artifacts match these filters in the available collections.' : 'The configured Library is empty.'}</p></div>}{result && result.items.length > 0 && <><p role="status">{result.coverage.status === 'complete' ? `${result.items.length} artifacts across all available pages.` : `${result.items.length} artifacts found in available collections; this is not a complete total.`}</p><ul className="library-list">{result.items.map((item) => <li key={item.artifact_id}><button onClick={() => open(item)} ref={(node) => {if (node) {rows.current.set(item.artifact_id, node)} else {rows.current.delete(item.artifact_id)}}} type="button"><strong>{item.filename}</strong><span>Kolekcja: {item.collection.name} · Profil: {item.profile}</span><span>Type: {item.mime_type} · Updated: {formatDate(item.date)}</span><span>{item.reviewed ? 'Wersja zatwierdzona' : 'Wersja bieżąca'} · {formatBytes(item.size)}</span></button></li>)}</ul></>}</section>
+ for (const key of ['libraryQ', 'libraryType', 'libraryDate', 'libraryCollection', 'libraryProfile', 'libraryProject', 'libraryTopic', 'librarySession', 'libraryStatus']) {next.delete(key)}; onNavigate(next)}} type="button">{libraryCopy.filters.clear}</button></div>}{referenceError && <div className="library-boundary" role="alert">{referenceError}</div>}{loading && <p role="status">{libraryCopy.list.loading}</p>}{error && <div className="library-boundary" role="alert"><strong>{libraryCopy.list.unavailable}</strong><p>{error}</p><button onClick={() => setRetry((value) => value + 1)} type="button">{libraryCopy.list.retry}</button></div>}{!loading && result?.coverage.status === 'unconfigured' && <div className="library-boundary" role="status"><strong>{libraryCopy.list.unconfigured}</strong><p>{result.warnings.join(' ') || libraryCopy.list.noCollections}</p></div>}{!loading && result?.coverage.status === 'partial' && <div className="library-boundary" role="status"><strong>{libraryCopy.list.partial}</strong><p>{result.warnings.join(' ') || libraryCopy.list.partialFallback}</p></div>}{!loading && result && result.coverage.status !== 'unconfigured' && result.items.length === 0 && <div className="search-empty"><h3>{libraryCopy.list.noArtifacts}</h3><p>{filtered ? libraryCopy.list.noMatches : libraryCopy.list.empty}</p></div>}{result && result.items.length > 0 && <><p role="status">{result.coverage.status === 'complete' ? libraryCopy.list.completeCount(result.items.length) : libraryCopy.list.partialCount(result.items.length)}</p><ul className="library-list">{result.items.map((item) => <li key={item.artifact_id}><button onClick={() => open(item)} ref={(node) => {if (node) {rows.current.set(item.artifact_id, node)} else {rows.current.delete(item.artifact_id)}}} type="button"><strong>{item.filename}</strong><span>{libraryCopy.list.collection} {item.collection.name} · {libraryCopy.list.profile} {item.profile}</span><span>{libraryCopy.list.type} {item.mime_type} · {libraryCopy.list.updated} {formatDate(item.date)}</span><span>{item.reviewed ? libraryCopy.common.reviewedVersion : libraryCopy.list.currentVersion} · {formatBytes(item.size)}</span></button></li>)}</ul></>}</section>
 }

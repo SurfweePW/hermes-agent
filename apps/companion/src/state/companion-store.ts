@@ -1,5 +1,6 @@
 import { type ConnectionState, JsonRpcGatewayError } from '@hermes/shared'
 
+import { stateCopy } from '../copy/state'
 import { createDirectoryStore, type DirectoryGateway, type DirectoryStore } from '../features/directory/directory-store'
 import type { LibraryGateway } from '../features/library/library-types'
 import type { Teammate } from '../features/roster/roster'
@@ -210,10 +211,10 @@ interface ContinuityRetryMetadata {
 }
 
 const teammateMetadata: Record<string, Pick<Teammate, 'name' | 'role' | 'initials'>> = {
-  atlas: { name: 'Atlas', role: 'Chief of Staff', initials: 'A' },
-  mentor: { name: 'Mentor', role: 'Investments', initials: 'M' },
-  maven: { name: 'Maven', role: 'Data Operations', initials: 'MV' },
-  scout: { name: 'Scout', role: 'Research', initials: 'S' }
+  atlas: { name: 'Atlas', role: stateCopy.profileRoles.atlas, initials: 'A' },
+  mentor: { name: 'Mentor', role: stateCopy.profileRoles.mentor, initials: 'M' },
+  maven: { name: 'Maven', role: stateCopy.profileRoles.maven, initials: 'MV' },
+  scout: { name: 'Scout', role: stateCopy.profileRoles.scout, initials: 'S' }
 }
 
 function browserStorage(): CompanionStorage | undefined {
@@ -385,26 +386,26 @@ function rosterState(
   completedSessionId: string | null
 ): Pick<Teammate, 'status' | 'summary'> {
   if (teammateId !== state.selectedTeammateId) {
-    return { status: 'idle', summary: 'No local activity observed.' }
+    return { status: 'idle', summary: stateCopy.activity.idle }
   }
 
   if (state.phase === 'disconnected' || state.phase === 'recovering' || state.turnStatus === 'uncertain') {
-    return { status: 'blocked', summary: 'Connection interrupted.' }
+    return { status: 'blocked', summary: stateCopy.activity.disconnected }
   }
 
   if (state.pendingApproval?.sessionId === state.runtimeSessionId) {
-    return { status: 'needs-approval', summary: 'Waiting for your approval.' }
+    return { status: 'needs-approval', summary: stateCopy.activity.approval }
   }
 
   if (state.turnStatus === 'streaming' || state.turnStatus === 'sending' || state.turnStatus === 'submitting' || state.turnStatus === 'stopping') {
-    return { status: 'working', summary: 'Conversation in progress.' }
+    return { status: 'working', summary: stateCopy.activity.working }
   }
 
   if (state.runtimeSessionId && completedSessionId === state.runtimeSessionId) {
-    return { status: 'completed', summary: 'Turn completed.' }
+    return { status: 'completed', summary: stateCopy.activity.completed }
   }
 
-  return { status: 'idle', summary: 'No local activity observed.' }
+  return { status: 'idle', summary: stateCopy.activity.idle }
 }
 
 function messageText(message: SessionMessage): string | null {
@@ -444,7 +445,7 @@ function toPersistedMessages(history: CompanionSessionHistoryResult): CompanionM
         role: 'system',
         text: entry.content,
         kind: entry.kind,
-        label: entry.label ?? (entry.kind === 'compression' ? 'Earlier context summary' : entry.kind === 'tool' ? 'Tool activity' : 'Internal event'),
+        label: entry.label ?? (entry.kind === 'compression' ? stateCopy.history.contextSummary : entry.kind === 'tool' ? stateCopy.history.toolActivity : stateCopy.history.internalEvent),
         ...(entry.kind === 'tool' ? { toolStatus: 'complete' as const } : {})
       }]
     }
@@ -466,11 +467,11 @@ function toolPayload(payload: unknown): { toolId: string; label: string; details
   }
 
   const toolId = stringField('id', 'tool_call_id', 'call_id') || `tool-${++messageSequenceFallback}`
-  const name = stringField('name', 'tool_name') || 'Tool activity'
-  const safeName = name.replace(/[<>\r\n]/g, ' ').trim().slice(0, 120) || 'Tool activity'
+  const name = stringField('name', 'tool_name') || stateCopy.history.toolActivity
+  const safeName = name.replace(/[<>\r\n]/g, ' ').trim().slice(0, 120) || stateCopy.history.toolActivity
   let details = ''
 
-  try {details = JSON.stringify(payload, null, 2).slice(0, 20_000)} catch {details = 'Tool details are unavailable.'}
+  try {details = JSON.stringify(payload, null, 2).slice(0, 20_000)} catch {details = stateCopy.history.toolDetailsUnavailable}
 
   return { toolId, label: safeName, details }
 }
@@ -489,16 +490,16 @@ function approvalFromPayload(sessionId: string, payload: ApprovalRequestPayload)
   return {
     requestId: payload.request_id,
     sessionId,
-    title: payload.description || 'Approval requested',
-    description: payload.command ? 'Review this action before Hermes continues.' : (payload.description || 'Hermes needs your decision to continue.'),
+    title: payload.description || stateCopy.request.title,
+    description: payload.command ? stateCopy.request.reviewAction : (payload.description || stateCopy.request.decisionNeeded),
     ...(payload.command ? { command: payload.command } : {}),
     choices,
     responding: false
   }
 }
 
-const SECURE_CREDENTIAL_ERROR = 'Companion could not access encrypted token storage. Forget the saved token or try again.'
-const DRAFT_PERSISTENCE_ERROR = 'Companion could not save drafts securely on this device. The current draft is available only until the app closes.'
+const SECURE_CREDENTIAL_ERROR = stateCopy.errors.secureCredential
+const DRAFT_PERSISTENCE_ERROR = stateCopy.errors.draftPersistence
 
 class SecureCredentialError extends Error {
   constructor() {
@@ -516,7 +517,7 @@ class DraftPersistenceError extends Error {
 
 class UncertainContinuationError extends Error {
   constructor() {
-    super('The saved conversation may have accepted this message. Retry to reconcile it; Hermes will not submit it twice.')
+    super(stateCopy.errors.uncertainContinuation)
     this.name = 'UncertainContinuationError'
   }
 }
@@ -524,7 +525,7 @@ class UncertainContinuationError extends Error {
 function publicError(error: unknown): string {
   if (error instanceof SecureCredentialError || error instanceof DraftPersistenceError || error instanceof UncertainContinuationError) { return error.message }
 
-  return 'Companion could not reach the gateway. Check the connection and try again.'
+  return stateCopy.errors.gatewayUnavailable
 }
 
 function isUncertainContinuationFailure(error: unknown): boolean {
@@ -694,7 +695,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     streamingText: '',
     pendingApproval: null,
     attentionItems: [],
-    attentionScope: 'This gateway runtime only',
+    attentionScope: stateCopy.attentionScope,
     recentSessions: [],
     sessionsLoading: false,
     draft: '',
@@ -907,7 +908,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       streamingText: '',
       pendingApproval: null,
       attentionItems: [],
-      attentionScope: 'This gateway runtime only',
+      attentionScope: stateCopy.attentionScope,
       recentSessions: [],
       sessionsLoading: false,
       draft: preservedDraft,
@@ -1181,7 +1182,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       if (typeof profile.name !== 'string' || !profile.name) {return []}
       const alias = profileAlias(profile.id, profile.name)
       const metadata = alias ? teammateMetadata[alias] : null
-      const name = metadata?.name ?? displayName(profile.name, `Hermes Teammate ${index + 1}`)
+      const name = metadata?.name ?? displayName(profile.name, stateCopy.fallbackProfileName(index + 1))
       const baseId = alias ?? `teammate-${index + 1}`
       const count = (idCounts.get(baseId) ?? 0) + 1
       idCounts.set(baseId, count)
@@ -1193,9 +1194,9 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         id,
         name,
         initials: metadata?.initials ?? initialsFor(name),
-        role: metadata?.role ?? 'Hermes Teammate',
+        role: metadata?.role ?? stateCopy.fallbackProfileRole,
         status: 'idle',
-        summary: 'No local activity observed.'
+        summary: stateCopy.activity.idle
       }]
     })
 
@@ -1216,9 +1217,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
       if (!isCurrentConnection(client, generation)) {return false}
 
-      const scope = typeof result.scope === 'string'
-        ? result.scope
-        : result.scope?.label || 'This gateway runtime only'
+      const scope = stateCopy.attentionScope
 
       publish({ attentionItems: result.items, attentionScope: scope })
 
@@ -1226,7 +1225,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     } catch (error) {
       if (isUnsupportedMethod(error) && isCurrentConnection(client, generation)) {
         attentionSupported = false
-        publish({ attentionItems: [], attentionScope: 'Unavailable on this gateway version' })
+        publish({ attentionItems: [], attentionScope: stateCopy.attentionUnavailable })
 
         return true
       }
@@ -1351,7 +1350,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     token: string | undefined = savedToken
   ) => {
     if (mode === 'shared' && !token) {
-      publish({ phase: 'setup', error: 'Enter a gateway session token to connect.' })
+      publish({ phase: 'setup', error: stateCopy.errors.tokenRequired })
 
       return null
     }
@@ -1420,7 +1419,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     const teammateId = [...profileIds].find(([, profile]) => profile === target.profile)?.[0]
     const teammate = teammateId ? snapshot.teammates.find((item) => item.id === teammateId) : undefined
 
-    if (!teammateId || !teammate) {throw new Error('The saved conversation profile is unavailable after reconnect.')}
+    if (!teammateId || !teammate) {throw new Error(stateCopy.errors.profileUnavailableAfterReconnect)}
 
     const activeSession = preservedActiveSession?.target
       && sameContinuationTarget(preservedActiveSession.target, target)
@@ -1492,7 +1491,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         ? null
         : outcomeUnknown
           ? new UncertainContinuationError().message
-          : `The previous continuation ended with status: ${result.operation_status}.`
+          : stateCopy.errors.previousContinuation(result.operation_status)
     })
 
     if (result.runtime_session_id) {
@@ -1616,17 +1615,17 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     },
     running: (retry, receipt) => creationReceiptHandlers.admitted(retry, receipt),
     completed: (retry, receipt) => completeCreation(retry, receipt),
-    failed: (retry, receipt) => completeCreation(retry, receipt, 'The new conversation failed after it was created.'),
-    cancelled: (retry, receipt) => completeCreation(retry, receipt, 'The new conversation was cancelled after it was created.'),
+    failed: (retry, receipt) => completeCreation(retry, receipt, stateCopy.errors.creationFailed),
+    cancelled: (retry, receipt) => completeCreation(retry, receipt, stateCopy.errors.creationCancelled),
     not_admitted: (retry, receipt) => receipt.row_state === 'present'
-      ? completeCreation(retry, receipt, 'The conversation was created, but the first message was not admitted.')
+      ? completeCreation(retry, receipt, stateCopy.errors.firstMessageRejected)
       : (() => {
           operationRetries.remove(retry)
-          publish({ turnStatus: 'idle', error: 'The conversation was not created. Try again when capacity is available.' })
+          publish({ turnStatus: 'idle', error: stateCopy.errors.creationRefused })
         })(),
-    interrupted_outcome_unknown: (retry, receipt) => retainCreation(retry, receipt, 'Creation was interrupted after durable binding. Reconnect to reconcile it.'),
-    recovery_required: (retry, receipt) => retainCreation(retry, receipt, 'Creation recovery is required. The original request ID is retained.'),
-    not_found: (retry, receipt) => retainCreation(retry, receipt, 'Creation was not found. Retry will reuse the original request ID.')
+    interrupted_outcome_unknown: (retry, receipt) => retainCreation(retry, receipt, stateCopy.errors.creationInterrupted),
+    recovery_required: (retry, receipt) => retainCreation(retry, receipt, stateCopy.errors.creationRecovery),
+    not_found: (retry, receipt) => retainCreation(retry, receipt, stateCopy.errors.creationNotFound)
   }
 
   const applyCreationReceipt = (retry: CreationRetryEntry, receipt: CompanionSessionCreationReceipt) => creationReceiptHandlers[receipt.operation_status](retry, receipt)
@@ -1659,7 +1658,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         applyCreationReceipt(retry, receipt)
       } catch (error) {
         if (isUncertainCreationFailure(error)) {
-          publish({ turnStatus: 'uncertain', error: 'Creation reconciliation is uncertain. The original request ID is retained.' })
+          publish({ turnStatus: 'uncertain', error: stateCopy.errors.creationReconciliationUncertain })
         } else {
           operationRetries.remove(retry)
           publish({ turnStatus: 'error', error: publicError(error) })
@@ -1670,7 +1669,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
   const submitLocalCreation = async (identity: LocalSessionDraftIdentity, text: string): Promise<ConversationCreationResult> => {
     if (!creationLock || !ownerScope || !gateway?.createCompanionSession || connectionMode !== 'owner') {
-      publish({ turnStatus: 'error', error: 'Secure exclusive creation is unavailable on this device.' })
+      publish({ turnStatus: 'error', error: stateCopy.errors.exclusiveCreationUnavailable })
 
       return { status: 'refused' }
     }
@@ -1680,7 +1679,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
     return creationLock.request(lockName, { ifAvailable: true, mode: 'exclusive' }, async (lock): Promise<ConversationCreationResult> => {
       if (!lock) {
-        publish({ turnStatus: 'error', error: 'This draft is already being submitted.' })
+        publish({ turnStatus: 'error', error: stateCopy.errors.draftAlreadySubmitting })
 
         return { status: 'refused' }
       }
@@ -1698,20 +1697,20 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
           storedSessionId: null, operationStatus: 'untransmitted' }
         try {
           operationRetries.put(retry)
-        } catch (error) {
-          publish({ turnStatus: 'error', error: error instanceof Error ? error.message : 'Companion could not durably save creation retry metadata.' })
+        } catch {
+          publish({ turnStatus: 'error', error: stateCopy.errors.creationRetrySave })
 
           return { status: 'refused' }
         }
         const verified = operationRetries.get(retry)
 
         if (!verified || verified.messageSha256 !== payloadDigest) {
-          publish({ turnStatus: 'error', error: 'Companion could not durably save creation retry metadata.' })
+          publish({ turnStatus: 'error', error: stateCopy.errors.creationRetrySave })
 
           return { status: 'refused' }
         }
       } else if (retry.messageSha256 !== payloadDigest) {
-        publish({ turnStatus: 'error', error: 'The submitted draft revision no longer matches its retry metadata.' })
+        publish({ turnStatus: 'error', error: stateCopy.errors.draftRevisionMismatch })
 
         return { status: 'refused' }
       }
@@ -1720,7 +1719,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       operationRetries.put(retry)
 
       if (operationRetries.get(retry)?.operationStatus !== 'uncertain') {
-        publish({ turnStatus: 'error', error: 'Companion could not mark creation uncertain before transmission.' })
+        publish({ turnStatus: 'error', error: stateCopy.errors.markCreationUncertain })
 
         return { status: 'refused' }
       }
@@ -1747,7 +1746,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         }
 
         if (isUncertainCreationFailure(error)) {
-          publish({ turnStatus: 'uncertain', error: 'The new conversation may have been created. Reconnect to reconcile it; Hermes will not create it twice.' })
+          publish({ turnStatus: 'uncertain', error: stateCopy.errors.creationOutcomeUnknown })
 
           return { status: 'unknown' }
         }
@@ -1924,7 +1923,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       ownerScope = null
 
       try {await ownerAuth?.ownerSignOut({ baseUrl: snapshot.baseUrl })} catch {
-        publish({ error: 'Owner sign-out could not be verified. The connection was closed.' })
+        publish({ error: stateCopy.errors.ownerSignOut })
       }
 
       if (!identityStatePurged && snapshot.error === null) {publish({ error: DRAFT_PERSISTENCE_ERROR })}
@@ -1989,22 +1988,22 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       const rawText = submittedText
       const text = rawText.trim()
 
-      if (!client || snapshot.phase !== 'ready') {throw new Error('Companion is not connected.')}
+      if (!client || snapshot.phase !== 'ready') {throw new Error(stateCopy.errors.notConnected)}
 
-      if (connectionMode !== 'owner') {throw new Error('Owner authentication is required to continue a saved conversation.')}
+      if (connectionMode !== 'owner') {throw new Error(stateCopy.errors.ownerRequired)}
 
-      if (!text || text.length > MAX_CONTINUATION_TEXT_LENGTH) {throw new Error('Enter a bounded message to continue this conversation.')}
+      if (!text || text.length > MAX_CONTINUATION_TEXT_LENGTH) {throw new Error(stateCopy.errors.boundedMessage)}
 
       if (!validBoundedString(target.backend_namespace, 4_096)
         || !validBoundedString(target.profile, 4_096)
-        || !validBoundedString(target.stored_session_id, 512)) {throw new Error('The saved conversation target is invalid.')}
+        || !validBoundedString(target.stored_session_id, 512)) {throw new Error(stateCopy.errors.invalidConversationTarget)}
 
       const teammateId = [...profileIds].find(([, profile]) => profile === target.profile)?.[0]
 
-      if (!teammateId) {throw new Error('The saved conversation profile is unavailable.')}
+      if (!teammateId) {throw new Error(stateCopy.errors.profileUnavailable)}
       const teammate = snapshot.teammates.find((item) => item.id === teammateId)
 
-      if (!teammate) {throw new Error('The saved conversation agent is unavailable.')}
+      if (!teammate) {throw new Error(stateCopy.errors.profileUnavailable)}
       const directorySnapshot = directory.getSnapshot()
 
       const directorySession = [directorySnapshot.selectedSession, ...directorySnapshot.sessions]

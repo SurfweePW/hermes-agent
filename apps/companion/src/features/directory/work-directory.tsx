@@ -1,6 +1,7 @@
 import { type FormEvent, type KeyboardEvent, useEffect, useMemo, useRef, useState } from 'react'
 
 import { TechnicalDetails } from '../../components/technical-details'
+import { directoryCopy } from '../../copy/directory'
 import type { CompanionOriginalRoute } from '../../gateway/original-route'
 import type { CompanionProject, CompanionSession, CompanionSessionTarget } from '../../gateway/types'
 import type { ConversationCreationResult } from '../../state/companion-store'
@@ -27,16 +28,29 @@ interface DirectoryProps {
   onOpenOriginal?(route: CompanionOriginalRoute, profile: string, sessionId: string): Promise<void>
 }
 
-const projectType = { desktop_project: 'Desktop project', business_project: 'Business project', discovered_repository: 'Discovered repository', unknown: 'Unknown project type' } as const
-const displayDate = (value: string | null) => value ? new Date(value).toLocaleString() : 'Freshness unknown'
-const count = (value: number | null, noun: string) => value === null ? `${noun} count unknown` : `${value} ${noun}`
+const projectType = directoryCopy.projectType
+const displayDate = (value: string | null) => value ? new Date(value).toLocaleString('pl-PL') : directoryCopy.freshnessUnknown
+const count = (value: number | null, noun: string) => value === null ? directoryCopy.countUnknown(noun) : `${value} ${noun}`
 const selected = (params: URLSearchParams, key: string) => new Set(params.getAll(key).filter(Boolean))
-const statusLabel = (status: DirectoryStatus) => status === 'unsupported' ? 'Backend update required' : status[0].toUpperCase() + status.slice(1)
+const statusLabel = (status: DirectoryStatus) => directoryCopy.status[status]
 const domSlug = (value: string) => value.toLocaleLowerCase().normalize('NFKD').replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'item'
 const tabId = (prefix: string, kind: 'tab' | 'panel', value: string) => `${domSlug(prefix)}-${kind}-${domSlug(value)}`
 const chatProfileStorageKey = 'hermes.companion.chats.profile'
 const chatKey = (source: string, profile: string, id: string) => JSON.stringify([source, profile, id])
-const profileLabel = (profile: string) => profile ? profile[0].toLocaleUpperCase() + profile.slice(1) : 'Agent'
+const profileLabel = (profile: string) => profile ? profile[0].toLocaleUpperCase() + profile.slice(1) : directoryCopy.profileFallback
+const tabLabel: Record<string, string> = {
+  topics: directoryCopy.chrome.topics,
+  projects: directoryCopy.chrome.projects,
+  sessions: directoryCopy.chrome.sessions,
+  overview: directoryCopy.details.overview,
+  'needs me': directoryCopy.details.decisions,
+  needs_me: directoryCopy.details.decisions,
+  work: directoryCopy.details.work,
+  files: directoryCopy.details.files,
+  history: directoryCopy.details.history,
+  'linked work': directoryCopy.details.linkedWork,
+  sources: directoryCopy.details.sources
+}
 
 const enumParam = <T extends string>(params: URLSearchParams, key: string, allowed: readonly T[], fallback: T): T => {
   const value = params.get(key)
@@ -256,7 +270,7 @@ export function ChatsDirectory(props: ChatsDirectoryProps) {
   const complete = props.snapshot.coverage.length > 0 && props.snapshot.coverage.every((item) => item.sessionStatus === 'ready' && item.sessionComplete && !item.sessionsHasMore
     && (mode === 'recent' || item.projectStatus === 'ready' && item.projectComplete && !item.projectsHasMore))
   const emptyTitle = loading ? 'Ładowanie rozmów…' : failed || !complete ? 'Niepełne dane rozmów' : query ? 'Brak pasujących rozmów' : 'Brak rozmów'
-  const emptyCopy = loading ? 'Czekamy na autoryzowane źródła.' : failed || !complete ? 'Co najmniej jedno źródło nie potwierdziło pełnej listy.' : query ? 'Zmień nazwę lub zakres agenta.' : 'Autoryzowane źródła zwróciły kompletną pustą listę.'
+  const emptyCopy = loading ? 'Czekamy na autoryzowane źródła.' : failed || !complete ? 'Co najmniej jedno źródło nie potwierdziło pełnej listy.' : query ? 'Zmień nazwę lub zakres profilu.' : 'Autoryzowane źródła zwróciły kompletną pustą listę.'
   const unassigned = matchingSessions.filter((item) => item.project === null)
   const unknownMembership = matchingSessions.filter((item) => item.project === undefined)
   const unmatched = matchingSessions.filter((item) => item.project && !matchingProjects.some((project) => project.id === item.project?.id && project.profile === item.profile && project.source === item.source))
@@ -332,8 +346,8 @@ export function WorkDirectory(props: DirectoryProps) {
   }
 
   return <section aria-labelledby="work-directory-title" className="directory-screen">
-    <div className="directory-heading"><div><p className="kicker">Source directories</p><h2 id="work-directory-title">Work</h2><p className="screen-lede">Browse persisted source records, including empty and unlinked records. Browsing never activates a project or resumes a session.</p></div><button className="button" onClick={props.onRefresh} type="button">Refresh sources</button></div>
-    <TabList className="directory-tabs" idPrefix="work-directory" label="Work directories" onSelect={(item) => setParams({ section: item as WorkSection, focus: null, focusProfile: null, focusSource: null, tab: null })} selected={section} tabs={['topics', 'projects', 'sessions']} />
+    <div className="directory-heading"><div><p className="kicker">{directoryCopy.chrome.kicker}</p><h2 id="work-directory-title">{directoryCopy.chrome.title}</h2><p className="screen-lede">{directoryCopy.chrome.lede}</p></div><button className="button" onClick={props.onRefresh} type="button">{directoryCopy.chrome.refresh}</button></div>
+    <TabList className="directory-tabs" idPrefix="work-directory" label={directoryCopy.chrome.tabsLabel} onSelect={(item) => setParams({ section: item as WorkSection, focus: null, focusProfile: null, focusSource: null, tab: null })} selected={section} tabs={['topics', 'projects', 'sessions']} />
     {section !== 'topics' && <Coverage coverage={props.snapshot.coverage} />}
     {(['topics', 'projects', 'sessions'] as const).map((item) => <div aria-labelledby={tabId('work-directory', 'tab', item)} hidden={section !== item} id={tabId('work-directory', 'panel', item)} key={item} role="tabpanel">
       {section === item && (item === 'topics'
@@ -344,9 +358,9 @@ export function WorkDirectory(props: DirectoryProps) {
 }
 
 function Coverage({ coverage }: { coverage: DirectorySnapshot['coverage'] }) {
-  if (!coverage.length) {return <div className="coverage-panel" role="status"><strong>Coverage not configured</strong><span>No authorized profile sources were reported.</span></div>}
+  if (!coverage.length) {return <div className="coverage-panel" role="status"><strong>{directoryCopy.coverage.notConfigured}</strong><span>{directoryCopy.coverage.noProfiles}</span></div>}
 
-  return <>{coverage.filter((source) => source.message).map((source) => <p className="coverage-warning" key={source.profile} role="status">{source.message}</p>)}<TechnicalDetails><div aria-label="Source coverage" className="coverage-grid">{coverage.map((source) => <article className={`coverage-card coverage-card--${source.status}`} key={source.profile}><strong>{source.profile}</strong><span>{source.complete ? 'Complete source coverage' : statusLabel(source.status)}</span><small>Sessions: {statusLabel(source.sessionStatus)} · Projects: {statusLabel(source.projectStatus)}</small><small>{source.freshness ? `Fresh ${displayDate(source.freshness)}` : 'Freshness unknown'}</small></article>)}</div></TechnicalDetails></>
+  return <>{coverage.filter((source) => source.message).map((source) => <p className="coverage-warning" key={source.profile} role="status">{directoryCopy.coverage.genericWarning}</p>)}<TechnicalDetails><div aria-label={directoryCopy.coverage.label} className="coverage-grid">{coverage.map((source) => <article className={`coverage-card coverage-card--${source.status}`} key={source.profile}><strong>{source.profile}</strong><span>{source.complete ? directoryCopy.coverage.complete : statusLabel(source.status)}</span><small>{directoryCopy.coverage.sessions}: {statusLabel(source.sessionStatus)} · {directoryCopy.coverage.projects}: {statusLabel(source.projectStatus)}</small><small>{source.freshness ? `${directoryCopy.coverage.fresh} ${displayDate(source.freshness)}` : directoryCopy.freshnessUnknown}</small>{source.message && <small>{source.message}</small>}</article>)}</div></TechnicalDetails></>
 }
 
 function DirectoryList({ snapshot, params, kind, onOpen, onLoadOlder, onNavigate }: DirectoryProps & { kind: 'projects' | 'sessions'; onOpen: (kind: 'project' | 'session', profile: string, source: string, id: string) => void }) {
@@ -404,7 +418,7 @@ function DirectoryList({ snapshot, params, kind, onOpen, onLoadOlder, onNavigate
 
  for (const key of ['q', 'source', 'profile', 'origin', 'visibility', 'archive', 'dateFrom', 'dateTo', 'topic', 'project', 'type']) {next.delete(key)}; onNavigate(next)}
 
-  const chips = [query && `Title: ${query}`, ...[...sources].map((value) => `Source: ${value}`), ...[...profiles].map((value) => `Profile: ${value}`), ...[...origins].map((value) => `Origin: ${value}`), ...[...topics].map((value) => `Topic: ${availableTopics.find((item) => item.id === value)?.title ?? value}`), ...[...projects].map((value) => `Project: ${availableProjects.find((item) => item.id === value)?.title ?? value}`), ...[...types].map((value) => `Type: ${value}`), dateFrom && `From: ${dateFrom}`, dateTo && `To: ${dateTo}`, archive !== (kind === 'sessions' ? 'all' : 'current') && `Visibility: ${archive}`].filter(Boolean) as string[]
+  const chips = [query && `Nazwa: ${query}`, ...[...sources].map((value) => `Źródło: ${value}`), ...[...profiles].map((value) => `Profil: ${value}`), ...[...origins].map((value) => `Pochodzenie: ${value}`), ...[...topics].map((value) => `Temat: ${availableTopics.find((item) => item.id === value)?.title ?? value}`), ...[...projects].map((value) => `Projekt: ${availableProjects.find((item) => item.id === value)?.title ?? value}`), ...[...types].map((value) => `Typ: ${value}`), dateFrom && `Od: ${dateFrom}`, dateTo && `Do: ${dateTo}`, archive !== (kind === 'sessions' ? 'all' : 'current') && `Widoczność: ${archive}`].filter(Boolean) as string[]
   const statuses = snapshot.coverage.map((item) => kind === 'sessions' ? item.sessionStatus : item.projectStatus)
   const unavailable = statuses.some((item) => item === 'unsupported')
   const failed = statuses.some((item) => item === 'error' || item === 'offline')
@@ -414,39 +428,39 @@ function DirectoryList({ snapshot, params, kind, onOpen, onLoadOlder, onNavigate
     ? item.sessionStatus === 'ready' && item.sessionComplete && !item.sessionsHasMore
     : item.projectStatus === 'ready' && item.projectComplete && !item.projectsHasMore)
 
-  const groupKey = (item: CompanionSession | CompanionProject) => group === 'profile' ? item.profile : group === 'source' ? item.source : group === 'origin' && 'origin' in item ? item.origin ?? 'Unknown origin' : ''
+  const groupKey = (item: CompanionSession | CompanionProject) => group === 'profile' ? item.profile : group === 'source' ? item.source : group === 'origin' && 'origin' in item ? item.origin ?? directoryCopy.filters.unknownOrigin : ''
   const groups = [...new Set(items.map(groupKey))]
 
   return <>
     <div className="directory-filters">
-      <label className="directory-search">Search titles<input aria-label="Search titles" onChange={(event) => {const next = new URLSearchParams(params);
+      <label className="directory-search">{directoryCopy.filters.searchTitles}<input aria-label={directoryCopy.filters.searchTitles} onChange={(event) => {const next = new URLSearchParams(params);
 
  if (event.target.value) {next.set('q', event.target.value)} else {next.delete('q')}; onNavigate(next)}} type="search" value={query} /></label>
-      <FilterMenu active={sources} label="Source" onChange={(value, checked) => updateMulti('source', value, checked)} values={availableSources} />
-      <FilterMenu active={profiles} label="Profile" onChange={(value, checked) => updateMulti('profile', value, checked)} values={availableProfiles} />
-      {kind === 'sessions' && <FilterMenu active={origins} label="Origin" onChange={(value, checked) => updateMulti('origin', value, checked)} values={availableOrigins} />}
-      {kind === 'sessions' && <LabeledFilterMenu active={topics} label="Topic" onChange={(value, checked) => updateMulti('topic', value, checked)} values={availableTopics} />}
-      {kind === 'sessions' && <LabeledFilterMenu active={projects} label="Project" onChange={(value, checked) => updateMulti('project', value, checked)} values={availableProjects} />}
-      {kind === 'sessions' && <FilterMenu active={types} label="Type" onChange={(value, checked) => updateMulti('type', value, checked)} values={availableTypes} />}
-      {kind === 'sessions' && <label>From<input aria-label="From date" onChange={(event) => updateParam(params, onNavigate, 'dateFrom', event.target.value)} type="date" value={dateFrom} /></label>}
-      {kind === 'sessions' && <label>To<input aria-label="To date" onChange={(event) => updateParam(params, onNavigate, 'dateTo', event.target.value)} type="date" value={dateTo} /></label>}
-      <label>Visibility<select aria-label="Visibility" onChange={(event) => {const next = new URLSearchParams(params); next.delete('archive'); next.set('visibility', event.target.value); onNavigate(next)}} value={archive}><option value="all">All eligible</option><option value="current">Current</option>{kind === 'sessions' && <option value="hidden">Hidden</option>}<option value="archived">Archived</option></select></label>
-      <label>Sort<select aria-label="Sort" onChange={(event) => {const next = new URLSearchParams(params); next.set('sort', event.target.value); onNavigate(next)}} value={sort}><option value="recent">Recent activity</option><option value="name">Name</option></select></label>
-      <label>Group by<select aria-label="Group by" onChange={(event) => {const next = new URLSearchParams(params); next.set('group', event.target.value); onNavigate(next)}} value={group}><option value="none">No grouping</option><option value="profile">Profile</option><option value="source">Source backend</option>{kind === 'sessions' && <option value="origin">Origin</option>}</select></label>
+      <FilterMenu active={sources} label={directoryCopy.filters.source} onChange={(value, checked) => updateMulti('source', value, checked)} values={availableSources} />
+      <FilterMenu active={profiles} label={directoryCopy.filters.profile} onChange={(value, checked) => updateMulti('profile', value, checked)} values={availableProfiles} />
+      {kind === 'sessions' && <FilterMenu active={origins} label={directoryCopy.filters.origin} onChange={(value, checked) => updateMulti('origin', value, checked)} values={availableOrigins} />}
+      {kind === 'sessions' && <LabeledFilterMenu active={topics} label={directoryCopy.filters.topic} onChange={(value, checked) => updateMulti('topic', value, checked)} values={availableTopics} />}
+      {kind === 'sessions' && <LabeledFilterMenu active={projects} label={directoryCopy.filters.project} onChange={(value, checked) => updateMulti('project', value, checked)} values={availableProjects} />}
+      {kind === 'sessions' && <FilterMenu active={types} label={directoryCopy.filters.type} onChange={(value, checked) => updateMulti('type', value, checked)} values={availableTypes} />}
+      {kind === 'sessions' && <label>{directoryCopy.filters.from}<input aria-label={directoryCopy.filters.fromDate} onChange={(event) => updateParam(params, onNavigate, 'dateFrom', event.target.value)} type="date" value={dateFrom} /></label>}
+      {kind === 'sessions' && <label>{directoryCopy.filters.to}<input aria-label={directoryCopy.filters.toDate} onChange={(event) => updateParam(params, onNavigate, 'dateTo', event.target.value)} type="date" value={dateTo} /></label>}
+      <label>{directoryCopy.filters.visibility}<select aria-label={directoryCopy.filters.visibility} onChange={(event) => {const next = new URLSearchParams(params); next.delete('archive'); next.set('visibility', event.target.value); onNavigate(next)}} value={archive}><option value="all">{directoryCopy.filters.allEligible}</option><option value="current">{directoryCopy.filters.current}</option>{kind === 'sessions' && <option value="hidden">{directoryCopy.filters.hidden}</option>}<option value="archived">{directoryCopy.filters.archived}</option></select></label>
+      <label>{directoryCopy.filters.sort}<select aria-label={directoryCopy.filters.sort} onChange={(event) => {const next = new URLSearchParams(params); next.set('sort', event.target.value); onNavigate(next)}} value={sort}><option value="recent">{directoryCopy.filters.recentActivity}</option><option value="name">{directoryCopy.filters.name}</option></select></label>
+      <label>{directoryCopy.filters.groupBy}<select aria-label={directoryCopy.filters.groupBy} onChange={(event) => {const next = new URLSearchParams(params); next.set('group', event.target.value); onNavigate(next)}} value={group}><option value="none">{directoryCopy.filters.noGrouping}</option><option value="profile">{directoryCopy.filters.profile}</option><option value="source">{directoryCopy.filters.sourceBackend}</option>{kind === 'sessions' && <option value="origin">{directoryCopy.filters.origin}</option>}</select></label>
     </div>
-    {chips.length > 0 && <div aria-label="Active filters" className="filter-chips">{chips.map((chip) => <span key={chip}>{chip}</span>)}<button onClick={clear} type="button">Clear filters</button></div>}
-    {items.length ? <div className="directory-groups">{groups.map((name) => <section aria-label={name || 'Directory results'} key={name || 'all'}>{name && <h3>{name}</h3>}<div className="directory-list">{items.filter((item) => groupKey(item) === name).map((item) => kind === 'sessions' ? <SessionRow item={item as CompanionSession} key={`${item.source}:${item.profile}:${item.id}`} onOpen={() => onOpen('session', item.profile, item.source, item.id)} /> : <ProjectRow item={item as CompanionProject} key={`${item.source}:${item.profile}:${item.id}`} onOpen={() => onOpen('project', item.profile, item.source, item.id)} />)}</div></section>)}</div>
-      : <Unavailable copy={loading ? 'Waiting for authorized source APIs.' : unavailable || failed || !verifiedComplete ? 'At least one source cannot verify this directory, so this is not a complete empty result.' : chips.length ? 'Clear one or more filters to restore eligible records.' : 'Every configured source returned a complete empty result.'} title={loading ? 'Loading verified source records…' : unavailable ? 'Backend update required' : failed || !verifiedComplete ? 'Source coverage unavailable' : chips.length ? 'No matching items' : 'No eligible records'} />}
-    <div className="load-older">{snapshot.coverage.filter((item) => kind === 'sessions' ? item.sessionsHasMore : item.projectsHasMore).map((item) => <button className="button" key={item.profile} onClick={() => onLoadOlder(kind, item.profile)} type="button">Load older from {item.profile}</button>)}</div>
+    {chips.length > 0 && <div aria-label={directoryCopy.filters.active} className="filter-chips">{chips.map((chip) => <span key={chip}>{chip}</span>)}<button onClick={clear} type="button">{directoryCopy.filters.clear}</button></div>}
+    {items.length ? <div className="directory-groups">{groups.map((name) => <section aria-label={name || directoryCopy.filters.results} key={name || 'all'}>{name && <h3>{name}</h3>}<div className="directory-list">{items.filter((item) => groupKey(item) === name).map((item) => kind === 'sessions' ? <SessionRow item={item as CompanionSession} key={`${item.source}:${item.profile}:${item.id}`} onOpen={() => onOpen('session', item.profile, item.source, item.id)} /> : <ProjectRow item={item as CompanionProject} key={`${item.source}:${item.profile}:${item.id}`} onOpen={() => onOpen('project', item.profile, item.source, item.id)} />)}</div></section>)}</div>
+      : <Unavailable copy={loading ? directoryCopy.empty.waiting : unavailable || failed || !verifiedComplete ? directoryCopy.empty.incomplete : chips.length ? directoryCopy.empty.filtered : directoryCopy.empty.complete} title={loading ? directoryCopy.empty.loading : unavailable ? directoryCopy.empty.updateRequired : failed || !verifiedComplete ? directoryCopy.empty.unavailable : chips.length ? directoryCopy.empty.noMatches : directoryCopy.empty.none} />}
+    <div className="load-older">{snapshot.coverage.filter((item) => kind === 'sessions' ? item.sessionsHasMore : item.projectsHasMore).map((item) => <button className="button" key={item.profile} onClick={() => onLoadOlder(kind, item.profile)} type="button">{directoryCopy.loadOlder(item.profile)}</button>)}</div>
   </>
 }
 
 function FilterMenu({ label, values, active, onChange }: { label: string; values: readonly string[]; active: Set<string>; onChange(value: string, checked: boolean): void }) {
-  return <details className="filter-menu"><summary>{label}{active.size ? ` (${active.size})` : ''}</summary><div>{values.length ? values.map((value) => <label key={value}><input checked={active.has(value)} onChange={(event) => onChange(value, event.target.checked)} type="checkbox" />{value === 'unknown' ? 'Unknown origin' : value}</label>) : <span>No values reported</span>}</div></details>
+  return <details className="filter-menu"><summary>{label}{active.size ? ` (${active.size})` : ''}</summary><div>{values.length ? values.map((value) => <label key={value}><input checked={active.has(value)} onChange={(event) => onChange(value, event.target.checked)} type="checkbox" />{value === 'unknown' ? directoryCopy.filters.unknownOrigin : value}</label>) : <span>{directoryCopy.filters.noValues}</span>}</div></details>
 }
 
 function LabeledFilterMenu({ label, values, active, onChange }: { label: string; values: readonly { id: string; title: string }[]; active: Set<string>; onChange(value: string, checked: boolean): void }) {
-  return <details className="filter-menu"><summary>{label}{active.size ? ` (${active.size})` : ''}</summary><div>{values.length ? values.map((value) => <label key={value.id}><input checked={active.has(value.id)} onChange={(event) => onChange(value.id, event.target.checked)} type="checkbox" />{value.title}</label>) : <span>No values reported</span>}</div></details>
+  return <details className="filter-menu"><summary>{label}{active.size ? ` (${active.size})` : ''}</summary><div>{values.length ? values.map((value) => <label key={value.id}><input checked={active.has(value.id)} onChange={(event) => onChange(value.id, event.target.checked)} type="checkbox" />{value.title}</label>) : <span>{directoryCopy.filters.noValues}</span>}</div></details>
 }
 
 function updateParam(params: URLSearchParams, onNavigate: (params: URLSearchParams) => void, key: string, value: string) {
@@ -456,22 +470,22 @@ function updateParam(params: URLSearchParams, onNavigate: (params: URLSearchPara
   onNavigate(next)
 }
 
-function ProjectRow({ item, onOpen }: { item: CompanionProject; onOpen(): void }) {return <article className="directory-row-shell"><button className="directory-row" onClick={onOpen} type="button"><span><strong>{item.title}</strong><small>{projectType[item.type]} · {item.profile}{item.archived ? ' · Archived' : ''}</small></span><span><small>{count(item.session_count, 'sessions')} · {count(item.linked_work_count, 'linked work')}</small><small>{displayDate(item.last_active)}</small></span><b aria-hidden="true">→</b></button><TechnicalDetails><dl><div><dt>Backend</dt><dd>{item.source}</dd></div><div><dt>ID źródła</dt><dd>{item.id}</dd></div></dl></TechnicalDetails></article>}
+function ProjectRow({ item, onOpen }: { item: CompanionProject; onOpen(): void }) {return <article className="directory-row-shell"><button className="directory-row" onClick={onOpen} type="button"><span><strong>{item.title}</strong><small>{projectType[item.type]} · {item.profile}{item.archived ? ` · ${directoryCopy.badges.archived}` : ''}</small></span><span><small>{count(item.session_count, directoryCopy.row.sessions)} · {count(item.linked_work_count, directoryCopy.row.linkedWork)}</small><small>{displayDate(item.last_active)}</small></span><b aria-hidden="true">→</b></button><TechnicalDetails><dl><div><dt>Backend</dt><dd>{item.source}</dd></div><div><dt>ID źródła</dt><dd>{item.id}</dd></div></dl></TechnicalDetails></article>}
 
-function SessionRow({ item, onOpen }: { item: CompanionSession; onOpen(): void }) {return <article className="directory-row-shell"><button className="directory-row" onClick={onOpen} type="button"><span><strong>{item.title || 'Untitled saved session'}</strong><small>{item.profile}{item.archived ? ' · Archived' : ''}{item.hidden ? ' · Hidden' : ''}</small></span><span><small>{item.project?.title ?? 'Project membership not reported'} · {count(item.message_count, 'messages')} · {count(item.linked_work_count, 'linked work')}</small><small>{displayDate(item.last_active)}</small></span><b aria-hidden="true">→</b></button><TechnicalDetails><dl><div><dt>Backend</dt><dd>{item.source}</dd></div><div><dt>ID źródła</dt><dd>{item.id}</dd></div><div><dt>Tożsamość źródła</dt><dd>{item.origin ?? 'Unknown'}</dd></div></dl></TechnicalDetails></article>}
+function SessionRow({ item, onOpen }: { item: CompanionSession; onOpen(): void }) {return <article className="directory-row-shell"><button className="directory-row" onClick={onOpen} type="button"><span><strong>{item.title || directoryCopy.row.untitled}</strong><small>{item.profile}{item.archived ? ` · ${directoryCopy.badges.archived}` : ''}{item.hidden ? ` · ${directoryCopy.badges.hidden}` : ''}</small></span><span><small>{item.project?.title ?? directoryCopy.row.projectUnknown} · {count(item.message_count, directoryCopy.row.messages)} · {count(item.linked_work_count, directoryCopy.row.linkedWork)}</small><small>{displayDate(item.last_active)}</small></span><b aria-hidden="true">→</b></button><TechnicalDetails><dl><div><dt>Backend</dt><dd>{item.source}</dd></div><div><dt>ID źródła</dt><dd>{item.id}</dd></div><div><dt>Tożsamość źródła</dt><dd>{item.origin ?? directoryCopy.row.unknown}</dd></div></dl></TechnicalDetails></article>}
 
 function ProjectDetail({ snapshot, tab, onTab, onBack, onOpenSession, onNavigate, onLoadOlderProjectSessions, params }: DirectoryProps & { tab: string; onTab(tab: string): void; onOpenSession(item: CompanionSession): void }) {
   const detail = snapshot.selectedProject
 
-  return <section className="directory-detail"><BackButton label="projects" onBack={onBack} onNavigate={onNavigate} params={params} />{detail ? <><p className="kicker">{projectType[detail.project.type]} · {detail.project.profile}</p><h2>{detail.project.title}</h2><TechnicalDetails><dl><div><dt>Źródło</dt><dd>{detail.project.source}</dd></div><div><dt>ID</dt><dd>{detail.project.id}</dd></div></dl></TechnicalDetails><p className="read-only-note">Read-only source detail</p><DetailCoverage coverage={detail.coverage} label="Membership coverage" /><DetailTabs idPrefix="project-detail" onTab={onTab} tab={tab} tabs={['Overview', 'Sessions', 'Topics', 'Needs Me', 'Work', 'Files']} /><div aria-labelledby={tabId('project-detail', 'tab', tab)} id={tabId('project-detail', 'panel', tab)} role="tabpanel">{tab === 'overview' && <dl className="detail-facts"><div><dt>Last activity</dt><dd>{displayDate(detail.project.last_active)}</dd></div><div><dt>Sessions</dt><dd>{count(detail.project.session_count, 'sessions')}</dd></div><div><dt>Linked work</dt><dd>{count(detail.project.linked_work_count, 'items')}</dd></div></dl>}{tab === 'sessions' && <>{detail.sessions.length ? <div className="directory-list">{detail.sessions.map((item) => <SessionRow item={item} key={`${item.source}:${item.profile}:${item.id}`} onOpen={() => onOpenSession(item)} />)}</div> : <Unavailable copy={detail.coverage.complete ? 'This eligible project exists without an authoritative session membership.' : detail.coverage.message ?? 'The source did not report complete project membership.'} title={detail.coverage.complete ? 'No sessions yet' : 'Session membership unavailable'} />}{detail.membership_has_more && <button className="button" onClick={onLoadOlderProjectSessions} type="button">Load complete project membership</button>}</>}{tab === 'topics' && (detail.organization_available ? <ProjectTopics detail={detail} onNavigate={onNavigate} params={params} /> : <Unavailable copy="This gateway does not expose verified topic or work bindings; no empty relationship is being claimed." title="Organization data unavailable" />)}{tab === 'needs me' && <EntityWork projection={snapshot.entityProjection} type="needsMe" />}{tab === 'work' && <EntityWork projection={snapshot.entityProjection} type="work" />}{tab === 'files' && <FilesLibraryLink onNavigate={onNavigate} params={params} />}</div></> : <DetailLoading snapshot={snapshot} />}</section>
+  return <section className="directory-detail"><BackButton label="projects" onBack={onBack} onNavigate={onNavigate} params={params} />{detail ? <><p className="kicker">{projectType[detail.project.type]} · {detail.project.profile}</p><h2>{detail.project.title}</h2><TechnicalDetails><dl><div><dt>Źródło</dt><dd>{detail.project.source}</dd></div><div><dt>ID</dt><dd>{detail.project.id}</dd></div></dl></TechnicalDetails><p className="read-only-note">Szczegóły źródła tylko do odczytu</p><DetailCoverage coverage={detail.coverage} label="Zakres przypisania" /><DetailTabs idPrefix="project-detail" onTab={onTab} tab={tab} tabs={['Overview', 'Sessions', 'Topics', 'Needs Me', 'Work', 'Files']} /><div aria-labelledby={tabId('project-detail', 'tab', tab)} id={tabId('project-detail', 'panel', tab)} role="tabpanel">{tab === 'overview' && <dl className="detail-facts"><div><dt>Ostatnia aktywność</dt><dd>{displayDate(detail.project.last_active)}</dd></div><div><dt>Rozmowy</dt><dd>{count(detail.project.session_count, directoryCopy.row.sessions)}</dd></div><div><dt>Powiązana praca</dt><dd>{count(detail.project.linked_work_count, directoryCopy.row.items)}</dd></div></dl>}{tab === 'sessions' && <>{detail.sessions.length ? <div className="directory-list">{detail.sessions.map((item) => <SessionRow item={item} key={`${item.source}:${item.profile}:${item.id}`} onOpen={() => onOpenSession(item)} />)}</div> : <Unavailable copy={detail.coverage.complete ? 'Ten dostępny projekt nie ma autorytatywnie przypisanych rozmów.' : 'Źródło nie zgłosiło pełnego przypisania rozmów do projektu.'} title={detail.coverage.complete ? 'Brak rozmów' : 'Przypisanie rozmów niedostępne'} />}{detail.membership_has_more && <button className="button" onClick={onLoadOlderProjectSessions} type="button">Wczytaj pełne przypisanie projektu</button>}</>}{tab === 'topics' && (detail.organization_available ? <ProjectTopics detail={detail} onNavigate={onNavigate} params={params} /> : <Unavailable copy="Ten gateway nie udostępnia zweryfikowanych powiązań tematów ani pracy; brak relacji nie został potwierdzony." title="Dane organizacji niedostępne" />)}{tab === 'needs me' && <EntityWork projection={snapshot.entityProjection} type="needsMe" />}{tab === 'work' && <EntityWork projection={snapshot.entityProjection} type="work" />}{tab === 'files' && <FilesLibraryLink onNavigate={onNavigate} params={params} />}</div></> : <DetailLoading snapshot={snapshot} />}</section>
 }
 
 function ProjectTopics({ detail, params, onNavigate }: { detail: NonNullable<DirectorySnapshot['selectedProject']>; params: URLSearchParams; onNavigate(params: URLSearchParams): void }) {
   if (!detail.topics.length) {
-    return <Unavailable copy={detail.organization_complete ? 'The complete authorized organization projection returned no linked topics.' : detail.organization_message ?? 'No empty relationship is being claimed because organization coverage is incomplete.'} title={detail.organization_complete ? 'No linked topics yet' : 'Topic coverage incomplete'} />
+    return <Unavailable copy={detail.organization_complete ? 'Pełna autoryzowana lista organizacji nie zawiera powiązanych tematów.' : 'Nie potwierdzono braku relacji, ponieważ zakres danych organizacji jest niepełny.'} title={detail.organization_complete ? 'Brak powiązanych tematów' : 'Zakres tematów jest niepełny'} />
   }
 
-  return <><ul className="reference-list">{detail.topics.map((topic) => <li key={`${topic.source}:${topic.profile}:${topic.id}`}><strong>{topic.title}</strong><span>{topic.source} · {topic.profile}{topic.status ? ` · ${topic.status}` : ''}</span><button onClick={() => {const next = new URLSearchParams(params); next.set('section', 'topics'); next.set('focus', topic.id); next.set('focusProfile', topic.profile); next.set('focusSource', topic.source); next.set('tab', 'overview'); onNavigate(next)}} type="button">Open topic</button></li>)}</ul>{!detail.organization_complete && <p className="coverage-warning" role="status">{detail.organization_message ?? 'Some authorized Topic relationships could not be verified.'}</p>}</>
+  return <><ul className="reference-list">{detail.topics.map((topic) => <li key={`${topic.source}:${topic.profile}:${topic.id}`}><strong>{topic.title}</strong><span>{topic.source} · {topic.profile}{topic.status ? ` · ${topic.status}` : ''}</span><button onClick={() => {const next = new URLSearchParams(params); next.set('section', 'topics'); next.set('focus', topic.id); next.set('focusProfile', topic.profile); next.set('focusSource', topic.source); next.set('tab', 'overview'); onNavigate(next)}} type="button">Otwórz temat</button></li>)}</ul>{!detail.organization_complete && <p className="coverage-warning" role="status">Nie udało się zweryfikować części autoryzowanych powiązań tematów.</p>}</>
 }
 
 function SessionDetail({ snapshot, tab, onTab, onBack, onNavigate, onLoadOlderHistory, onOpenOriginal, params }: DirectoryProps & { tab: string; onTab(tab: string): void }) {
@@ -499,7 +513,7 @@ function SessionDetail({ snapshot, tab, onTab, onBack, onNavigate, onLoadOlderHi
     }
   }
 
-  return <section className="directory-detail"><BackButton label="sessions" onBack={onBack} onNavigate={onNavigate} params={params} />{session || history ? <><p className="kicker">Read-only session · {profile}</p><h2>{session?.title || 'Saved session'}</h2><TechnicalDetails><dl><div><dt>Źródło</dt><dd>{source}</dd></div><div><dt>ID</dt><dd>{id}</dd></div></dl></TechnicalDetails>{!session && <p className="coverage-warning" role="status">Listing metadata was not reported for this deep link. Only authoritative persisted history is shown.</p>}<p className="read-only-note">Viewing history does not resume or activate this session.</p><aside aria-label="Original conversation" className="coverage-panel"><strong>Rozmowa źródłowa</strong><span>Continue this conversation in its existing client using this complete source identity.</span>{originalRoute && onOpenOriginal && <button disabled={opening} onClick={() => void openOriginal()} type="button">{opening ? 'Opening original…' : 'Open original'}</button>}{openFailed && <p role="alert">Hermes Desktop could not open this conversation. Use the source identity above to continue manually.</p>}</aside>{history && <DetailCoverage coverage={history.coverage} label="History coverage" />}<DetailTabs idPrefix="session-detail" onTab={onTab} tab={tab} tabs={['Overview', 'History', 'Linked work', 'Files']} /><div aria-labelledby={tabId('session-detail', 'tab', tab)} id={tabId('session-detail', 'panel', tab)} role="tabpanel">{tab === 'overview' && (session ? <dl className="detail-facts"><div><dt>Origin</dt><dd>{session.origin ?? 'Unknown origin'}</dd></div><div><dt>Project</dt><dd>{session.project?.title ?? 'Project membership not reported'}</dd></div><div><dt>Messages</dt><dd>{count(session.message_count, 'messages')}</dd></div><div><dt>Status</dt><dd>{session.status ?? 'Status unknown'}</dd></div></dl> : <Unavailable copy="The history response verifies identity and messages, but does not provide title, origin, project membership, status, or counts." title="Listing metadata unavailable" />)}{tab === 'history' && <History onLoadOlder={onLoadOlderHistory} snapshot={snapshot} />}{tab === 'linked work' && <EntityWork projection={snapshot.entityProjection} type="work" />}{tab === 'files' && <FilesLibraryLink onNavigate={onNavigate} params={params} />}</div></> : <DetailLoading snapshot={snapshot} />}</section>
+  return <section className="directory-detail"><BackButton label="sessions" onBack={onBack} onNavigate={onNavigate} params={params} />{session || history ? <><p className="kicker">Rozmowa tylko do odczytu · {profile}</p><h2>{session?.title || 'Zapisana rozmowa'}</h2><TechnicalDetails><dl><div><dt>Źródło</dt><dd>{source}</dd></div><div><dt>ID</dt><dd>{id}</dd></div></dl></TechnicalDetails>{!session && <p className="coverage-warning" role="status">Dla tego bezpośredniego odnośnika nie zgłoszono metadanych listy. Wyświetlana jest tylko autorytatywna zapisana historia.</p>}<p className="read-only-note">Wyświetlenie historii nie wznawia ani nie aktywuje tej rozmowy.</p><aside aria-label="Rozmowa źródłowa" className="coverage-panel"><strong>Rozmowa źródłowa</strong><span>Kontynuuj tę rozmowę w dotychczasowym kliencie, używając pełnej tożsamości źródła.</span>{originalRoute && onOpenOriginal && <button disabled={opening} onClick={() => void openOriginal()} type="button">{opening ? 'Otwieranie źródła…' : 'Otwórz źródło'}</button>}{openFailed && <p role="alert">Hermes Desktop nie mógł otworzyć tej rozmowy. Użyj powyższej tożsamości źródła, aby kontynuować ręcznie.</p>}</aside>{history && <DetailCoverage coverage={history.coverage} label="Zakres historii" />}<DetailTabs idPrefix="session-detail" onTab={onTab} tab={tab} tabs={['Overview', 'History', 'Linked work', 'Files']} /><div aria-labelledby={tabId('session-detail', 'tab', tab)} id={tabId('session-detail', 'panel', tab)} role="tabpanel">{tab === 'overview' && (session ? <dl className="detail-facts"><div><dt>Pochodzenie</dt><dd>{session.origin ?? 'Pochodzenie nieznane'}</dd></div><div><dt>Projekt</dt><dd>{session.project?.title ?? 'Przypisanie projektu niezgłoszone'}</dd></div><div><dt>Wiadomości</dt><dd>{count(session.message_count, directoryCopy.row.messages)}</dd></div><div><dt>Status</dt><dd>{session.status ?? 'Status nieznany'}</dd></div></dl> : <Unavailable copy="Odpowiedź historii potwierdza tożsamość i wiadomości, ale nie zawiera nazwy, pochodzenia, przypisania projektu, statusu ani liczników." title="Metadane listy niedostępne" />)}{tab === 'history' && <History onLoadOlder={onLoadOlderHistory} snapshot={snapshot} />}{tab === 'linked work' && <EntityWork projection={snapshot.entityProjection} type="work" />}{tab === 'files' && <FilesLibraryLink onNavigate={onNavigate} params={params} />}</div></> : <DetailLoading snapshot={snapshot} />}</section>
 }
 
 function BackButton({ label, onBack, onNavigate, params }: { label: string; onBack(): void; onNavigate(params: URLSearchParams): void; params: URLSearchParams }) {
@@ -511,7 +525,7 @@ function BackButton({ label, onBack, onNavigate, params }: { label: string; onBa
     onNavigate(next)
   }
 
-  return <button className="back-button" onClick={back} type="button">← Back to {label}</button>
+  return <button className="back-button" onClick={back} type="button">{label === 'projects' ? directoryCopy.details.backProjects : directoryCopy.details.backSessions}</button>
 }
 
 function FilesLibraryLink({ params, onNavigate }: { params: URLSearchParams; onNavigate(params: URLSearchParams): void }) {
@@ -531,7 +545,7 @@ function FilesLibraryLink({ params, onNavigate }: { params: URLSearchParams; onN
     onNavigate(next)
   }
 
-  return <div className="directory-empty" role="status"><strong>Linked Library files</strong><p>Open the authorized Library relationship filter for this entity.</p><button onClick={openLibrary} type="button">View files in Library</button></div>
+  return <div className="directory-empty" role="status"><strong>Powiązane pliki</strong><p>Otwórz filtr autoryzowanych powiązań plików dla tej pozycji.</p><button onClick={openLibrary} type="button">Zobacz pliki</button></div>
 }
 
 function DetailTabs({ tabs, tab, onTab, idPrefix }: { tabs: readonly string[]; tab: string; onTab(tab: string): void; idPrefix: string }) {
@@ -557,10 +571,10 @@ function TabList({ tabs, selected, onSelect, idPrefix, className, label }: { tab
     requestAnimationFrame(() => (list?.querySelectorAll<HTMLElement>('[role="tab"]')[nextIndex!])?.focus())
   }
 
-  return <div aria-label={label} className={className} role="tablist">{tabs.map((value, index) => <button aria-controls={tabId(idPrefix, 'panel', value)} aria-selected={selected === value} id={tabId(idPrefix, 'tab', value)} key={value} onClick={() => onSelect(value)} onKeyDown={(event) => onKeyDown(event, index)} role="tab" tabIndex={selected === value ? 0 : -1} type="button">{value[0].toUpperCase() + value.slice(1)}</button>)}</div>
+  return <div aria-label={label} className={className} role="tablist">{tabs.map((value, index) => <button aria-controls={tabId(idPrefix, 'panel', value)} aria-selected={selected === value} id={tabId(idPrefix, 'tab', value)} key={value} onClick={() => onSelect(value)} onKeyDown={(event) => onKeyDown(event, index)} role="tab" tabIndex={selected === value ? 0 : -1} type="button">{tabLabel[value] ?? value}</button>)}</div>
 }
 
-function DetailCoverage({ coverage, label }: { coverage: { complete: boolean; freshness: string | null; message: string | null }; label: string }) {return <div className="coverage-panel" role="status"><strong>{label}: {coverage.complete ? 'Complete' : 'Incomplete'}</strong><span>{coverage.freshness ? `Fresh ${displayDate(coverage.freshness)}` : 'Freshness unknown'}</span><span>{coverage.message ?? 'No source warnings reported.'}</span></div>}
+function DetailCoverage({ coverage, label }: { coverage: { complete: boolean; freshness: string | null; message: string | null }; label: string }) {return <><div className="coverage-panel" role="status"><strong>{label}: {coverage.complete ? directoryCopy.coverage.completeLabel : directoryCopy.coverage.incompleteLabel}</strong><span>{coverage.freshness ? `${directoryCopy.coverage.fresh} ${displayDate(coverage.freshness)}` : directoryCopy.freshnessUnknown}</span><span>{coverage.message ? directoryCopy.coverage.genericWarning : directoryCopy.coverage.noWarnings}</span></div>{coverage.message && <TechnicalDetails><p>{coverage.message}</p></TechnicalDetails>}</>}
 
 function History({ snapshot, onLoadOlder }: { snapshot: DirectorySnapshot; onLoadOlder(): void }) {
   const history = snapshot.history
@@ -573,9 +587,9 @@ function History({ snapshot, onLoadOlder }: { snapshot: DirectorySnapshot; onLoa
 
   return <div className="history-shell">
     <div className="history-transcript" onScroll={transcriptScroll.onScroll} ref={transcriptScroll.viewportRef}>
-      {history.has_more && <button className="button history-load-older" onClick={onLoadOlder} type="button">Load older history</button>}
+      {history.has_more && <button className="button history-load-older" onClick={onLoadOlder} type="button">Wczytaj starszą historię</button>}
       <div className="history-flow">{history.entries.map((entry) => <div data-transcript-id={entry.id} key={entry.id}>{entry.kind !== 'message'
-        ? <StatusRow kind={entry.kind} label={entry.label} payload={entry.content} state={entry.kind === 'tool' ? 'Recorded' : null} />
+        ? <StatusRow kind={entry.kind} label={entry.label} payload={entry.content} state={entry.kind === 'tool' ? 'Zarejestrowano' : null} />
         : <article className={`history-message history-message--${entry.role ?? 'system'}`}><small>{entry.role === 'user' ? 'You' : entry.role === 'assistant' ? 'Assistant' : 'System'}</small><MessageContent role={entry.role ?? 'system'} text={entry.content} /></article>}
       </div>)}</div>
       <div aria-hidden="true" ref={transcriptScroll.endRef} />

@@ -1,5 +1,7 @@
 import { useState } from 'react'
 
+import { conversationCopy } from '../../copy/conversation'
+
 import { MessageContent } from './message-content'
 
 export type StatusKind = 'tool' | 'internal' | 'compression'
@@ -12,9 +14,9 @@ interface StatusRowProps {
 }
 
 const kindLabel: Record<StatusKind, string> = {
-  compression: 'Earlier context summary',
-  internal: 'Internal',
-  tool: 'Tool'
+  compression: conversationCopy.statusRow.compression,
+  internal: conversationCopy.statusRow.internal,
+  tool: conversationCopy.statusRow.tool
 }
 
 export function StatusRow({ kind, label, payload = '', state = null }: StatusRowProps) {

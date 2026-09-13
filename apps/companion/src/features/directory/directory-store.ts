@@ -1,3 +1,4 @@
+import { directoryCopy } from '../../copy/directory'
 import type { NeedsMePriorityItem, NeedsMePriorityResult } from '../../gateway/organization-types'
 import type { TopicCoverage, TopicDetail, TopicItem, TopicLifecycle, TopicListOptions, TopicListResult, TopicSourceItem, TopicWorkItem } from '../../gateway/topic-types'
 import type {
@@ -134,8 +135,10 @@ const pendingCoverage = (profile: string): SourceCoverage => ({
 })
 
 const failureStatus = (error: unknown): DirectoryStatus => unsupported(error) ? 'unsupported' : 'error'
-const failureCopy = (kind: 'Sessions' | 'Projects', error: unknown) => `${kind} ${unsupported(error) ? 'require a backend update.' : 'could not be verified.'}`
-const UNAUTHORIZED_SOURCE_MESSAGE = 'This source is not authorized.'
+const failureCopy = (kind: 'Sessions' | 'Projects', error: unknown) => kind === 'Sessions'
+  ? directoryCopy.store.sessionsFailure(unsupported(error))
+  : directoryCopy.store.projectsFailure(unsupported(error))
+const UNAUTHORIZED_SOURCE_MESSAGE = directoryCopy.store.unauthorized
 
 /** Feature-owned, read-only projection. Gateway responses remain authoritative. */
 export function createDirectoryStore(options: DirectoryStoreOptions = {}): DirectoryStore {
@@ -254,7 +257,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
     }
 
     if (!client.listCompanionTopics) {
-      topicCoverage.set(profile, { profile, status: 'unsupported', coverage: null, message: 'Backend update required for Topics.', cursor: null, hasMore: false, loaded: 0, total: null, backendNamespace: null })
+      topicCoverage.set(profile, { profile, status: 'unsupported', coverage: null, message: directoryCopy.store.topicsUpdateRequired, cursor: null, hasMore: false, loaded: 0, total: null, backendNamespace: null })
       publish(projection())
 
       return
@@ -296,8 +299,8 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
       }
 
       topicCoverage.set(profile, append
-        ? { profile, status: failureStatus(error), coverage: previous?.coverage ?? null, message: unsupported(error) ? 'Backend update required for Topics.' : 'Topics could not be verified.', cursor: previous?.cursor ?? null, hasMore: previous?.hasMore ?? false, loaded: previous?.loaded ?? 0, total: previous?.total ?? null, backendNamespace: previous?.backendNamespace ?? null }
-        : { profile, status: failureStatus(error), coverage: null, message: unsupported(error) ? 'Backend update required for Topics.' : 'Topics could not be verified.', cursor: null, hasMore: false, loaded: 0, total: null, backendNamespace: null })
+        ? { profile, status: failureStatus(error), coverage: previous?.coverage ?? null, message: unsupported(error) ? directoryCopy.store.topicsUpdateRequired : directoryCopy.store.topicsUnverified, cursor: previous?.cursor ?? null, hasMore: previous?.hasMore ?? false, loaded: previous?.loaded ?? 0, total: previous?.total ?? null, backendNamespace: previous?.backendNamespace ?? null }
+        : { profile, status: failureStatus(error), coverage: null, message: unsupported(error) ? directoryCopy.store.topicsUpdateRequired : directoryCopy.store.topicsUnverified, cursor: null, hasMore: false, loaded: 0, total: null, backendNamespace: null })
       publish(projection())
     }
   }
@@ -465,7 +468,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
         sessionComplete: false,
         sessionStatus: failureStatus(error),
         status: failureStatus(error),
-        message: 'Project session matches could not be completely verified.'
+        message: directoryCopy.store.projectMembershipUnverified
       })
       publish(projection())
     }
@@ -624,7 +627,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
         source,
         status: errorCode(result.reason) === 4404 ? 'missing' : 'error',
         title: source.kind === 'project' ? source.source_id : source.kind === 'session' ? source.session.persisted_session_id : source.namespace.profile,
-        detail: errorCode(result.reason) === 4403 ? UNAUTHORIZED_SOURCE_MESSAGE : errorCode(result.reason) === 4404 ? 'Source record not found' : 'Live source could not be verified'
+        detail: errorCode(result.reason) === 4403 ? UNAUTHORIZED_SOURCE_MESSAGE : errorCode(result.reason) === 4404 ? directoryCopy.store.sourceNotFound : directoryCopy.store.liveSourceUnverified
       })
     })
 
@@ -840,9 +843,9 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
       if (!candidate.listCompanionSessions || !candidate.getCompanionSessionHistory || !candidate.listCompanionProjects || !candidate.getCompanionProject) {
         gateway = null
 
-        for (const profile of profiles) {coverage.set(profile, { ...pendingCoverage(profile), status: 'unsupported', sessionStatus: 'unsupported', projectStatus: 'unsupported', message: 'Backend update required for complete browsing.' })}
+        for (const profile of profiles) {coverage.set(profile, { ...pendingCoverage(profile), status: 'unsupported', sessionStatus: 'unsupported', projectStatus: 'unsupported', message: directoryCopy.store.browsingUpdateRequired })}
 
-        for (const profile of profiles) {topicCoverage.set(profile, { profile, status: 'unsupported', coverage: null, message: 'Backend update required for Topics.', cursor: null, hasMore: false, loaded: 0, total: null, backendNamespace: null })}
+        for (const profile of profiles) {topicCoverage.set(profile, { profile, status: 'unsupported', coverage: null, message: directoryCopy.store.topicsUpdateRequired, cursor: null, hasMore: false, loaded: 0, total: null, backendNamespace: null })}
         publish({ ...projection(), selectedProject: null, selectedSession: null, selectedTopic: null, entityProjection: null, topicSourceDetails: [], history: null, detailStatus: 'idle', detailMessage: null })
 
         return
@@ -857,10 +860,10 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
       refreshInFlight = null
       gateway = null
 
-      for (const [profile, item] of coverage) {coverage.set(profile, { ...item, status: 'offline', sessionStatus: 'offline', projectStatus: 'offline', complete: false, message: 'Reconnect to verify this source.' })}
+      for (const [profile, item] of coverage) {coverage.set(profile, { ...item, status: 'offline', sessionStatus: 'offline', projectStatus: 'offline', complete: false, message: directoryCopy.store.reconnectSource })}
 
-      for (const [profile, item] of topicCoverage) {topicCoverage.set(profile, { ...item, status: 'offline', message: 'Reconnect to verify Topics.' })}
-      publish({ ...projection(), selectedProject: null, selectedSession: null, selectedTopic: null, entityProjection: null, topicSourceDetails: [], history: null, detailStatus: 'offline', detailMessage: 'Reconnect to verify details.' })
+      for (const [profile, item] of topicCoverage) {topicCoverage.set(profile, { ...item, status: 'offline', message: directoryCopy.store.reconnectTopics })}
+      publish({ ...projection(), selectedProject: null, selectedSession: null, selectedTopic: null, entityProjection: null, topicSourceDetails: [], history: null, detailStatus: 'offline', detailMessage: directoryCopy.store.reconnectDetails })
     },
     reset() {
       ++epoch; gateway = null; profiles = []; selection = null; refreshInFlight = null; sessions.clear(); projects.clear(); topics.clear(); coverage.clear(); topicCoverage.clear()
