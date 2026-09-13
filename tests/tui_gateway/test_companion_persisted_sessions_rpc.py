@@ -1074,7 +1074,7 @@ def test_companion_capabilities_revalidates_owner_lease_and_sanitizes_denial():
             reset_transport(token)
 
         assert response["error"] == {
-            "code": 4403,
+            "code": 4401,
             "message": "authenticated dashboard owner required",
         }
         assert "agent:internal" not in json.dumps(response)
@@ -1685,7 +1685,7 @@ def test_session_rpcs_reject_agent_shared_and_revoked_authority(db):
         try:
             for method, params in calls:
                 response = server._methods[method]("denied", params)
-                assert response["error"]["code"] == 4403
+                assert response["error"]["code"] == 4401
         finally:
             reset_transport(token)
 

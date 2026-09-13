@@ -21,6 +21,7 @@ from hermes_cli.companion_organization import (
     Topic,
     WorkBinding,
 )
+from tui_gateway.companion_errors import OWNER_AUTHORIZATION_REQUIRED_CODE
 from tui_gateway.companion_projects import _backend_namespace
 
 DEFAULT_PAGE_SIZE = 100
@@ -50,7 +51,9 @@ def _require_owner(owner_authorization) -> str:
     try:
         return require_owner(owner_authorization)
     except Exception as exc:
-        raise CompanionTopicsError("authenticated dashboard owner required", 4403) from exc
+        raise CompanionTopicsError(
+            "authenticated dashboard owner required", OWNER_AUTHORIZATION_REQUIRED_CODE
+        ) from exc
 
 
 def _owner_authorized_profiles(server) -> frozenset[str]:

@@ -19,6 +19,7 @@ import time
 from typing import Any, Iterator, Mapping
 import unicodedata
 
+from tui_gateway.companion_errors import OWNER_AUTHORIZATION_REQUIRED_CODE
 from tui_gateway.companion_projects import _backend_namespace
 
 
@@ -96,7 +97,7 @@ def _require_owner(owner_authorization: Any) -> str:
         return require_owner(owner_authorization)
     except Exception as exc:
         raise CompanionSessionsError(
-            "authenticated dashboard owner required", 4403
+            "authenticated dashboard owner required", OWNER_AUTHORIZATION_REQUIRED_CODE
         ) from exc
 
 

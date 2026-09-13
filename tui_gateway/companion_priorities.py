@@ -19,6 +19,7 @@ from hermes_cli.companion_organization import (
     rank_groups,
 )
 from hermes_cli.companion_work_store import WorkError, WorkStore
+from tui_gateway.companion_errors import OWNER_AUTHORIZATION_REQUIRED_CODE
 from tui_gateway.companion_projects import _backend_namespace
 from tui_gateway.companion_topics import (
     _owner_authorized_profiles,
@@ -256,7 +257,7 @@ def execute(
         _require_owner(owner_authorization)
     except Exception as exc:
         raise CompanionPrioritiesError(
-            "authenticated dashboard owner required", 4403
+            "authenticated dashboard owner required", OWNER_AUTHORIZATION_REQUIRED_CODE
         ) from exc
 
     try:

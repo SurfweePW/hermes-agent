@@ -367,7 +367,7 @@ def test_creation_reconcile_revoked_owner_leaks_no_receipt_or_binding(rpc_env):
         reset_transport(token)
 
     assert response["error"] == {
-        "code": 4403,
+        "code": 4401,
         "message": "authenticated dashboard owner required",
     }
     encoded = json.dumps(response)

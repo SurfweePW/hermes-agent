@@ -63,7 +63,7 @@ def topics_context(tmp_path: Path, monkeypatch):
         if value is authorization
         else (_ for _ in ()).throw(
             companion_topics.CompanionTopicsError(
-                "authenticated dashboard owner required", 4403
+                "authenticated dashboard owner required", 4401
             )
         ),
     )
@@ -186,7 +186,7 @@ def test_methods_and_capability_are_registered(topics_context):
     finally:
         reset_transport(token)
     assert denied["error"] == {
-        "code": 4403,
+        "code": 4401,
         "message": "authenticated dashboard owner required",
     }
 
@@ -210,7 +210,7 @@ def test_owner_is_checked_before_profile_or_database_probe(topics_context, monke
     )
     with pytest.raises(companion_topics.CompanionTopicsError) as denied:
         companion_topics.execute(server, "list", {}, owner_authorization=None)
-    assert denied.value.code == 4403
+    assert denied.value.code == 4401
     assert probed == []
 
 
@@ -228,7 +228,7 @@ def test_owner_error_is_translated_to_topics_taxonomy(monkeypatch):
     with pytest.raises(companion_topics.CompanionTopicsError) as denied:
         companion_topics._require_owner(None)
 
-    assert denied.value.code == 4403
+    assert denied.value.code == 4401
     assert str(denied.value) == "authenticated dashboard owner required"
 
 
@@ -240,7 +240,7 @@ def test_rpc_uses_bound_owner_authorization(topics_context):
         denied = server._methods["companion.topics.list"]("denied", {})
     finally:
         reset_transport(token)
-    assert denied["error"]["code"] == 4403
+    assert denied["error"]["code"] == 4401
 
 
 def test_query_filters_apply_before_pagination_across_complete_population(

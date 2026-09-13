@@ -40,7 +40,7 @@ def mutation_context(tmp_path: Path, monkeypatch):
         if value is authorization
         else (_ for _ in ()).throw(
             companion_organization_mutations.CompanionOrganizationMutationError(
-                "authenticated dashboard owner required", 4403
+                "authenticated dashboard owner required", 4401
             )
         ),
     )
@@ -141,7 +141,7 @@ def test_methods_capabilities_and_owner_gate(mutation_context):
         topic_params(),
         authorization=None,
     )
-    assert denied["error"]["code"] == 4403
+    assert denied["error"]["code"] == 4401
     assert not (mutation_context.home / "organization.db").exists()
 
 
@@ -521,7 +521,7 @@ def test_explicit_source_reference_methods_are_registered_and_owner_only(
         source_params("project"),
         authorization=None,
     )
-    assert denied["error"]["code"] == 4403
+    assert denied["error"]["code"] == 4401
     assert not (mutation_context.home / "organization.db").exists()
 
 

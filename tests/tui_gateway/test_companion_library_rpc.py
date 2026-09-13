@@ -116,7 +116,7 @@ def test_methods_and_capability_negotiation_are_registered(library_context):
     finally:
         reset_transport(token)
     assert denied["error"] == {
-        "code": 4403,
+        "code": 4401,
         "message": "authenticated dashboard owner required",
     }
 
@@ -145,7 +145,7 @@ def test_all_registered_reads_use_bound_owner_authorization(library_context):
             denied = server._methods[f"companion.library.{operation}"]("denied", params)
         finally:
             reset_transport(token)
-        assert denied["error"]["code"] == 4403
+        assert denied["error"]["code"] == 4401
 
 
 def test_missing_config_is_authenticated_complete_empty_and_does_not_create_storage(
@@ -192,12 +192,12 @@ def test_every_read_requires_live_owner_authorization(library_context, monkeypat
     (ctx.root / "private.txt").write_text("private", encoding="utf-8")
     with pytest.raises(companion_library.CompanionLibraryError) as denied:
         companion_library.execute(server, "list", {}, owner_authorization=None)
-    assert denied.value.code == 4403
+    assert denied.value.code == 4401
 
     monkeypatch.setattr(companion_library, "_owner_identity", lambda _value: None)
     with pytest.raises(companion_library.CompanionLibraryError) as revoked:
         call(ctx, "list")
-    assert revoked.value.code == 4403
+    assert revoked.value.code == 4401
 
 
 def test_cross_profile_is_denied_before_profile_resolution(library_context, monkeypatch):

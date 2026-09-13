@@ -345,7 +345,7 @@ def test_revoked_owner_is_checked_on_each_public_call(create_env):
     finally:
         reset_transport(expired)
     assert response["error"] == {
-        "code": 4403, "message": "authenticated dashboard owner required"
+        "code": 4401, "message": "authenticated dashboard owner required"
     }
     assert create_env["claims"] == []
     assert server._sessions == {}

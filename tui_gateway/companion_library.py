@@ -50,6 +50,7 @@ from hermes_cli.artifact_library import (
     ArtifactSecurityError,
     ArtifactUnavailable,
 )
+from tui_gateway.companion_errors import OWNER_AUTHORIZATION_REQUIRED_CODE
 from tui_gateway.companion_projects import _backend_namespace
 
 
@@ -290,7 +291,9 @@ def _require_owner(owner_authorization: Any) -> str:
     human = leased_human_identity(owner_authorization)
     owner = _owner_identity(human)
     if not owner:
-        raise CompanionLibraryError("authenticated dashboard owner required", 4403)
+        raise CompanionLibraryError(
+            "authenticated dashboard owner required", OWNER_AUTHORIZATION_REQUIRED_CODE
+        )
     return owner
 
 

@@ -22,6 +22,7 @@ from hermes_cli.companion_organization import (
     Topic,
     WorkBinding,
 )
+from tui_gateway.companion_errors import OWNER_AUTHORIZATION_REQUIRED_CODE
 from tui_gateway.companion_projects import _backend_namespace
 from tui_gateway.companion_topics import (
     CompanionTopicsError,
@@ -339,7 +340,7 @@ def _context(server: Any, params: Mapping[str, Any], authorization: Any):
         actor = _require_owner(authorization)
     except Exception as exc:
         raise CompanionOrganizationMutationError(
-            "authenticated dashboard owner required", 4403
+            "authenticated dashboard owner required", OWNER_AUTHORIZATION_REQUIRED_CODE
         ) from exc
     try:
         profile, home = _profile(server, params.get("profile"))

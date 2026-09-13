@@ -22,6 +22,8 @@ import time
 import uuid
 from typing import Any
 
+from tui_gateway.companion_errors import OWNER_AUTHORIZATION_REQUIRED_CODE
+
 
 class CompanionProjectsError(Exception):
     def __init__(self, message: str, code: int):
@@ -36,7 +38,7 @@ def _require_owner(owner_authorization: Any) -> str:
         return require_owner(owner_authorization)
     except Exception as exc:
         raise CompanionProjectsError(
-            "authenticated dashboard owner required", 4403
+            "authenticated dashboard owner required", OWNER_AUTHORIZATION_REQUIRED_CODE
         ) from exc
 
 

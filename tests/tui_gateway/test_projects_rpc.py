@@ -111,7 +111,7 @@ def test_companion_project_rpcs_reject_agent_shared_and_revoked_authority():
                 ("companion.projects.get", {"id": "private"}),
             ):
                 response = server._methods[method]("denied", params)
-                assert response["error"]["code"] == 4403
+                assert response["error"]["code"] == 4401
         finally:
             reset_transport(token)
 
