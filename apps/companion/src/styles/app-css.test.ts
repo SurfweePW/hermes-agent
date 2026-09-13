@@ -1,9 +1,25 @@
 import { readFileSync } from 'node:fs'
 
+import { render } from '@testing-library/react'
+import { createElement } from 'react'
 import { describe, expect, it } from 'vitest'
 
 const appCss = readFileSync(`${process.cwd()}/src/styles/app.css`, 'utf8')
 const tokensCss = readFileSync(`${process.cwd()}/src/styles/tokens.css`, 'utf8')
+const appSource = readFileSync(`${process.cwd()}/src/app.tsx`, 'utf8')
+
+const channel = (value: number) => value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
+const luminance = (hex: string) => {
+  const channels = hex.slice(1).match(/.{2}/g)?.map((value) => channel(Number.parseInt(value, 16) / 255)) ?? []
+
+  return 0.2126 * (channels[0] ?? 0) + 0.7152 * (channels[1] ?? 0) + 0.0722 * (channels[2] ?? 0)
+}
+const contrastRatio = (foreground: string, background: string) => {
+  const values = [luminance(foreground), luminance(background)].sort((left, right) => right - left)
+
+  return ((values[0] ?? 0) + 0.05) / ((values[1] ?? 0) + 0.05)
+}
+const token = (name: string) => tokensCss.match(new RegExp(`${name}\\s*:\\s*(#[0-9a-f]{6})`, 'i'))?.[1] ?? ''
 
 const approvedTokens = {
   '--ink': '#141513',
@@ -22,6 +38,12 @@ const approvedTokens = {
 }
 
 describe('Signal House CSS contract', () => {
+  it('has no deleted legacy view selector or class in application sources', () => {
+    const deletedClass = ['legacy', 'panel'].join('-')
+
+    expect(appCss).not.toContain(deletedClass)
+    expect(appSource).not.toContain(deletedClass)
+  })
   it('defines the approved palette exactly', () => {
     for (const [name, value] of Object.entries(approvedTokens)) {
       expect(tokensCss).toMatch(new RegExp(`${name}\\s*:\\s*${value}`, 'i'))
@@ -72,6 +94,39 @@ describe('Signal House CSS contract', () => {
     expect(tokensCss).toMatch(/--muted-text\s*:\s*#62665e/i)
     expect(appCss).toMatch(/\.kicker,\s*\.label\s*\{[^}]*color:\s*var\(--muted-text\)/i)
     expect(appCss).toMatch(/\.session-row time\s*\{[^}]*color:\s*var\(--muted-text\)/i)
+  })
+
+  it('keeps every used muted-text background pairing at WCAG AA contrast', () => {
+    for (const background of ['--paper', '--paper2', '--white']) {
+      expect(contrastRatio(token('--muted-text'), token(background))).toBeGreaterThanOrEqual(4.5)
+    }
+  })
+
+  it('computes replacement focus rings for controls whose base rule clears outlines', () => {
+    const style = document.createElement('style')
+    style.textContent = `:root { --blue: #4d6dff; } ${appCss.replaceAll(':focus-visible', ':focus')}`
+    document.head.append(style)
+    const rendered = render(createElement('div', {},
+      createElement('form', { className: 'quick-task' }, createElement('select', { 'aria-label': 'quick select' }), createElement('textarea', { 'aria-label': 'quick text' })),
+      createElement('div', { className: 'composer' }, createElement('textarea', { 'aria-label': 'composer text' })),
+      createElement('div', { className: 'search-box' }, createElement('input', { 'aria-label': 'search text' }))
+    ))
+    const controls = [...rendered.container.querySelectorAll<HTMLElement>('select, textarea, input')]
+
+    for (const control of controls) {
+      control.focus()
+      const computed = getComputedStyle(control)
+
+      expect(computed.outline, control.getAttribute('aria-label') ?? control.tagName).toContain('3px solid')
+    }
+    rendered.unmount()
+    style.remove()
+  })
+
+  it('keeps technical identifiers fluid at 390px', () => {
+    expect(appCss).toMatch(/\.technical-details__body[^}]*overflow-wrap:\s*anywhere/i)
+    expect(appCss).toMatch(/\.technical-details__body pre[^}]*word-break:\s*break-word/i)
+    expect(appCss).not.toMatch(/(?:width|min-width):\s*390px/i)
   })
 
   it('uses accessible muted text for sidebar section titles', () => {
