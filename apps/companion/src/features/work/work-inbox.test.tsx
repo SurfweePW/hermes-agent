@@ -52,7 +52,7 @@ describe('durable work inbox', () => {
       decisionHistory: [{ id: 'd1', revision: 1, action: 'request_changes', actor: 'human', reason: 'Narrow earlier scope', createdAt: '2026-01-01T00:00:00Z', scope: 'none', snoozedUntil: null }]
     } })} />)
     expect(screen.getByText('Preparation approved — awaiting execution tracker task link')).toBeTruthy()
-    expect(screen.getByText('request changes · Rewizja 1')).toBeTruthy()
+    expect(screen.getByText('request changes · Wersja 1')).toBeTruthy()
     expect(screen.getByText('Narrow earlier scope')).toBeTruthy()
     expect(screen.getByText(/połączenia przez współdzielony token i połączenia agentów pozostają tylko do odczytu/)).toBeTruthy()
     expect(screen.getByRole('group', { name: 'Decyzja dla rewizji 2' }).hasAttribute('disabled')).toBe(true)
@@ -69,7 +69,7 @@ describe('durable work inbox', () => {
   it('renders revision, evidence, scope, owner and persisted discussion without active unsafe previews', () => {
     render(<WorkInbox {...props()} />)
     expect(screen.getByRole('heading', { name: card.title })).toBeTruthy()
-    expect(screen.getByText('CMO Exact · needs_me · Rewizja 2')).toBeTruthy()
+    expect(screen.getByText('CMO Exact · Wymaga decyzji · Wersja 2')).toBeTruthy()
 
     for (const text of ['Draft copy', 'Publish', 'Pawel', 'Which audience?']) {expect(screen.getByText(text)).toBeTruthy()}
     expect(screen.getByRole('link', { name: /Research/ }).getAttribute('rel')).toBe('noopener noreferrer')
@@ -146,6 +146,8 @@ describe('durable work inbox', () => {
       completionEvidence: ['final artifact'],
       trackerStatusHistory: [{ state: 'blocked', observed_at: '2026-09-06T10:00:00Z', evidence: ['block event'], blocker: 'Legal review' }]
     } })} />)
+    expect(screen.getByText('Przygotowanie zakończone')).toBeTruthy()
+    expect(screen.getByText('Przygotowanie zablokowane')).toBeTruthy()
     expect(screen.getByText(/Zaobserwowano 2026-09-06T11:00:00Z/)).toBeTruthy()
     expect(screen.getByText(/Wynik:/)).toBeTruthy()
     expect(screen.getByText(/Blokada:/)).toBeTruthy()

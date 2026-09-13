@@ -1,3 +1,4 @@
+import { workCopy } from '../../copy/work'
 import type { OrganizationGateway } from '../../gateway/organization-types'
 import type { WorkCapability, WorkCard, WorkComment, WorkDecisionRecord, WorkDetail, WorkGateway } from '../../gateway/work-types'
 
@@ -45,7 +46,7 @@ export function verifiedWorkProfiles(snapshot: Pick<WorkSnapshot, 'status' | 'so
 }
 
 const key = (profile: string, id: string) => JSON.stringify([profile, id])
-const UNAUTHORIZED_SOURCE_MESSAGE = 'This source is not authorized.'
+const UNAUTHORIZED_SOURCE_MESSAGE = workCopy.presentation.unauthorizedSource
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
 type PriorityView = NonNullable<WorkCardView['priority']>
 
@@ -126,33 +127,25 @@ function view(card: WorkCard, capability: WorkCapability | undefined, detail?: W
     id: card.id, profile: card.profile, title: card.title, brief: card.brief, revision: card.revision,
     status: card.state, bucket: card.state === 'done' || card.state === 'declined' || snoozed ? 'history' : card.state,
     evidence: card.evidence.map((label) => ({ label, url: label })),
-    permitted: ['Prepare only the work described in this revision’s brief.'],
-    excluded: ['Publishing, paid activation, live store changes, sending, spending and other external writes require separate authorization.'],
+    permitted: [workCopy.presentation.permitted],
+    excluded: [workCopy.presentation.excluded],
     nextAction: card.next_action, owner: card.owner,
     recommendedAction: card.recommended_action,
-    decision: decision ? `${decision.action}${decision.reason ? `: ${decision.reason}` : ''}` : card.approval ? `Preparation approved for revision ${card.approval.revision}` : '',
+    decision: decision ? `${decision.action}${decision.reason ? `: ${decision.reason}` : ''}` : card.approval ? workCopy.presentation.approvedForRevision(card.approval.revision) : '',
     ...(card.snoozed_until ? { snoozedUntil: card.snoozed_until } : {}),
-    preparationStatus: {
-      not_authorized: 'Preparation not authorized',
-      approved_task_linking_pending: 'Preparation approved — awaiting execution tracker task link',
-      linked_awaiting_triage: 'Linked to execution tracker — awaiting triage',
-      preparing: 'Preparation in progress — verified from the execution tracker',
-      prepared: 'Preparation completed — publication still not authorized',
-      blocked: 'Preparation blocked — review tracker evidence',
-      status_unavailable: 'Execution tracker status unavailable — handoff reconciliation required'
-    }[card.preparation_status],
+    preparationStatus: workCopy.presentation.preparationStatus[card.preparation_status],
     ...(card.execution_link ? { executionAcknowledgedAt: card.execution_link.acknowledged_at } : {}),
     ...(card.tracker_evidence ? { trackerEvidence: card.tracker_evidence } : {}),
     ...(card.completion_evidence ? { completionEvidence: Array.isArray(card.completion_evidence) ? card.completion_evidence : [card.completion_evidence] } : {}),
     previews: card.execution_link ? [{ label: card.execution_link.execution_ref, url: card.execution_link.execution_ref }]
-      : card.execution_ref ? [{ label: `Proposed tracker reference: ${card.execution_ref}`, url: card.execution_ref }] : [],
+      : card.execution_ref ? [{ label: workCopy.presentation.proposedTrackerReference(card.execution_ref), url: card.execution_ref }] : [],
     attentionKey: card.attention_key,
     attentionDue: card.attention_due,
     ...(priority?.source_session ? { sourceSession: { backend: priority.source_session.namespace.backend_id, profile: priority.source_session.namespace.profile, id: priority.source_session.persisted_session_id } } : {}),
     decisionHistory: detail?.decisions.map((entry) => ({ id: entry.id, action: entry.action, revision: entry.revision, actor: entry.actor, reason: entry.reason, createdAt: entry.created_at, scope: entry.scope, snoozedUntil: entry.snoozed_until })) ?? [],
-    discussion: detail?.comments.map((comment) => ({ id: comment.id, author: `${comment.actor} · Revision ${comment.revision} · ${comment.created_at}`, body: comment.text })) ?? [],
+    discussion: detail?.comments.map((comment) => ({ id: comment.id, author: workCopy.presentation.discussionAuthor(comment.actor, comment.revision, comment.created_at), body: comment.text })) ?? [],
     trackerStatusHistory: detail?.tracker_status_history ?? [],
-    ...(!capability?.can_decide ? { readOnlyReason: capability?.reason || 'Human-authenticated dashboard login is required for business decisions.' } : {}),
+    ...(!capability?.can_decide ? { readOnlyReason: capability?.reason || workCopy.presentation.decisionLoginRequired } : {}),
     canDecide: capability?.can_decide === true,
     ...(priority ? { priority } : {}),
     actionable: capability?.can_decide === true && card.state === 'needs_me' && card.attention_due && !snoozed
@@ -186,6 +179,45 @@ export function createWorkStore(options: WorkStoreOptions = {}): WorkStore {
     options.onOwnerAuthorizationLost?.(error)
 
     return true
+  }
+
+  const markProfileUnauthorized = (profile: string) => {
+    for (const cardKey of [...cards.keys()]) {
+      if (JSON.parse(cardKey)[0] === profile) {cards.delete(cardKey)}
+    }
+
+    for (const priorityKey of [...priorities.keys()]) {
+      if (JSON.parse(priorityKey)[0] === profile) {priorities.delete(priorityKey)}
+    }
+
+    for (const priorityKey of [...latestPriorities.keys()]) {
+      if (JSON.parse(priorityKey)[0] === profile) {latestPriorities.delete(priorityKey)}
+    }
+
+    capabilities.delete(profile)
+
+    if (selection?.profile === profile || detail?.item.profile === profile) {
+      selection = null
+      detail = null
+    }
+
+    sourceStates.set(profile, {
+      profile,
+      incomplete: true,
+      status: 'error',
+      lastSuccess: sourceStates.get(profile)?.lastSuccess ?? null,
+      message: UNAUTHORIZED_SOURCE_MESSAGE
+    })
+  }
+
+  const sourceProjection = () => profiles.map((profile) => sourceStates.get(profile)!).filter(Boolean)
+  const aggregateStatus = (): WorkSnapshot['status'] => {
+    const sources = sourceProjection()
+
+    if (sources.some((source) => source.status === 'verified')) {return 'verified'}
+    if (sources.length > 0 && sources.every((source) => source.status === 'unsupported')) {return 'unsupported'}
+
+    return 'error'
   }
 
   const projection = () => ({
@@ -280,23 +312,35 @@ export function createWorkStore(options: WorkStoreOptions = {}): WorkStore {
 
     for (const response of failed) {
       ownerAuthorizationLost(response.error)
-      const unsupported = errorCode(response.error) === -32601
-      sourceStates.set(response.profile, { profile: response.profile, incomplete: true, status: unsupported ? 'unsupported' : 'error', lastSuccess: sourceStates.get(response.profile)?.lastSuccess ?? null, message: unsupported ? 'Durable Work is unsupported by this source.' : errorCode(response.error) === 4403 ? UNAUTHORIZED_SOURCE_MESSAGE : 'Refresh failed; the last verified view is retained.' })
+      const code = errorCode(response.error)
+
+      if (code === 4403) {
+        markProfileUnauthorized(response.profile)
+      } else {
+        const unsupported = code === -32601
+        sourceStates.set(response.profile, { profile: response.profile, incomplete: true, status: unsupported ? 'unsupported' : 'error', lastSuccess: sourceStates.get(response.profile)?.lastSuccess ?? null, message: unsupported ? workCopy.presentation.unsupportedSource : workCopy.presentation.refreshFailed })
+      }
     }
 
     try {
       detail = selection && successful.some(({ profile }) => profile === selection?.profile) ? await client.getWork(selection.profile, selection.id) : detail
     } catch (error) {
       ownerAuthorizationLost(error)
-      // Keep the last verified detail; source coverage already communicates an incomplete refresh.
+
+      if (selection && errorCode(error) === 4403) {
+        markProfileUnauthorized(selection.profile)
+      }
+      // Keep the last verified detail for non-authorization failures; source
+      // coverage already communicates an incomplete refresh.
     }
 
     if (generation !== epoch || gateway !== client) {return}
 
     if (detail) {cards.set(key(detail.item.profile, detail.item.id), detail.item)}
-    const reasons = [...new Set(successful.filter(({ capability }) => !capability.can_decide).map(({ capability }) => capability.reason || 'Human-authenticated dashboard login is required for business decisions.'))]
-    const status = successful.length ? 'verified' : failed.every(({ error }) => errorCode(error) === -32601) ? 'unsupported' : 'error'
-    publish({ ...projection(), status, priorityWritable, sources: profiles.map((profile) => sourceStates.get(profile)!).filter(Boolean), message: reasons.join(' ') || null })
+    const reasons = [...new Set(successful
+      .filter(({ profile, capability }) => sourceStates.get(profile)?.status === 'verified' && !capability.can_decide)
+      .map(({ capability }) => capability.reason || workCopy.presentation.decisionLoginRequired))]
+    publish({ ...projection(), status: aggregateStatus(), priorityWritable, sources: sourceProjection(), message: reasons.join(' ') || null })
   }
 
   const mutatePriority = async (input?: WorkPriorityInput): Promise<boolean> => {
@@ -354,7 +398,7 @@ export function createWorkStore(options: WorkStoreOptions = {}): WorkStore {
       publish({ pending: false })
 
       if (snapshot.status !== 'verified') {return false}
-      publish({ message: input ? 'Priority saved and verified from the server.' : 'Recommended priority restored and verified from the server.' })
+      publish({ message: input ? workCopy.presentation.prioritySaved : workCopy.presentation.recommendedPriorityRestored })
 
       return true
     } catch (error) {
@@ -362,11 +406,14 @@ export function createWorkStore(options: WorkStoreOptions = {}): WorkStore {
       ownerAuthorizationLost(error)
       publish({ pending: false })
 
-      if (errorCode(error) === 4403) {publish({ status: 'error', message: UNAUTHORIZED_SOURCE_MESSAGE })} else if (errorCode(error) === 4090) {
+      if (errorCode(error) === 4403) {
+        markProfileUnauthorized(current.profile)
+        publish({ ...projection(), status: aggregateStatus(), sources: sourceProjection(), message: UNAUTHORIZED_SOURCE_MESSAGE })
+      } else if (errorCode(error) === 4090) {
         await refresh()
-        publish({ message: 'This priority changed. The latest verified version was loaded; nothing was automatically retried.' })
+        publish({ message: workCopy.presentation.priorityChanged })
       } else {
-        publish({ status: 'error', message: 'Priority save could not be verified. Refresh before trying again; it may already have reached the server.' })
+        publish({ status: 'error', message: workCopy.presentation.prioritySaveUnverified })
       }
 
       return false
@@ -424,26 +471,28 @@ export function createWorkStore(options: WorkStoreOptions = {}): WorkStore {
       if (snapshot.status !== 'verified') {return false}
 
       if (!confirmed) {
-        publish({ message: 'The save returned, but its exact server record could not be confirmed. Nothing was automatically retried; refresh before deciding what to do next.' })
+        publish({ message: workCopy.presentation.exactRecordUnconfirmed })
 
         return false
       }
 
-      publish({ message: 'Saved and verified from the server.' })
+      publish({ message: workCopy.presentation.saved })
 
       return true
     } catch (error) {
       if (generation !== epoch || gateway !== client) {return false}
       ownerAuthorizationLost(error)
-      publish({ pending: false, status: 'error' })
+      publish({ pending: false })
 
       if (errorCode(error) === 4409) {
+        publish({ status: 'error' })
         await refresh()
-        publish({ message: 'This card changed or the decision is no longer valid. The latest revision was requested; review it before deciding again. Nothing was automatically retried.' })
+        publish({ message: workCopy.presentation.decisionChanged })
       } else if (errorCode(error) === 4403) {
-        publish({ message: UNAUTHORIZED_SOURCE_MESSAGE })
+        markProfileUnauthorized(current.profile)
+        publish({ ...projection(), status: aggregateStatus(), sources: sourceProjection(), message: UNAUTHORIZED_SOURCE_MESSAGE })
       } else {
-        publish({ message: 'Save could not be verified. Refresh before trying again; it may already have reached the server.' })
+        publish({ status: 'error', message: workCopy.presentation.saveUnverified })
       }
 
       return false

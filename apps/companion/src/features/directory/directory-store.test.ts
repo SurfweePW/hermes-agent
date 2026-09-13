@@ -292,7 +292,7 @@ describe('createDirectoryStore', () => {
     expect(store.getSnapshot().entityProjection).toMatchObject({
       status: 'error',
       complete: false,
-      message: 'Authorized Work and Needs Me could not be verified.'
+      message: 'Nie udało się zweryfikować autoryzowanej pracy i zadań wymagających uwagi.'
     })
   })
 
@@ -410,7 +410,7 @@ describe('createDirectoryStore', () => {
 
     await store.openSession(profile, 'one', 'spoofed-source')
 
-    expect(store.getSnapshot()).toMatchObject({ detailStatus: 'error', detailMessage: 'Session history could not be verified.' })
+    expect(store.getSnapshot()).toMatchObject({ detailStatus: 'error', detailMessage: 'Nie udało się zweryfikować historii rozmowy.' })
     expect(store.getSnapshot().selectedSession).toBeNull()
     expect(JSON.stringify(store.getSnapshot())).not.toContain('spoofed-source')
   })
@@ -428,6 +428,23 @@ describe('createDirectoryStore', () => {
 
     expect(store.getSnapshot().selectedProject?.sessions.map((item) => item.id)).toEqual(['one', 'two'])
     expect(client.getCompanionProject).toHaveBeenLastCalledWith(profile, project.id, 'next-page')
+  })
+
+  it('reports a Polish error when older project membership cannot be verified', async () => {
+    const client = gateway()
+    vi.mocked(client.getCompanionProject)
+      .mockResolvedValueOnce(projectDetail([session('one')], true))
+      .mockRejectedValueOnce(new Error('synthetic failure'))
+    const store = createDirectoryStore()
+    await store.attach(client, [profile])
+
+    await store.openProject(profile, project.id, source)
+    await store.loadOlderProjectSessions()
+
+    expect(store.getSnapshot()).toMatchObject({
+      detailStatus: 'error',
+      detailMessage: 'Nie udało się zweryfikować pełnego przypisania rozmów do projektu.'
+    })
   })
 
   it('keeps later-page project membership unknown until the matching project page loads', async () => {
@@ -545,6 +562,23 @@ describe('createDirectoryStore', () => {
     expect(store.getSnapshot().history?.entries.map((entry) => entry.id)).toEqual(['older', 'one-message'])
   })
 
+  it('reports a Polish error when older conversation history cannot be verified', async () => {
+    const client = gateway()
+    vi.mocked(client.getCompanionSessionHistory)
+      .mockResolvedValueOnce({ ...history('one'), has_more: true, next_cursor: 'history-2' })
+      .mockRejectedValueOnce(new Error('synthetic failure'))
+    const store = createDirectoryStore()
+    await store.attach(client, [profile])
+
+    await store.openSession(profile, 'one', source)
+    await store.loadOlderHistory()
+
+    expect(store.getSnapshot()).toMatchObject({
+      detailStatus: 'error',
+      detailMessage: 'Nie udało się zweryfikować starszej historii rozmowy.'
+    })
+  })
+
   it('ignores stale detail responses after a newer selection wins', async () => {
     const client = gateway()
     const first = deferred<CompanionSessionHistoryResult>()
@@ -585,7 +619,7 @@ describe('createDirectoryStore', () => {
     }))
 
     await store.openTopic(profile, topic.id, 'forged-source')
-    expect(store.getSnapshot()).toMatchObject({ detailStatus: 'error', detailMessage: 'Topic details could not be verified.' })
+    expect(store.getSnapshot()).toMatchObject({ detailStatus: 'error', detailMessage: 'Nie udało się zweryfikować szczegółów tematu.' })
     expect(store.getSnapshot().selectedTopic).toBeNull()
   })
 
@@ -706,8 +740,10 @@ describe('createDirectoryStore', () => {
     expect(snapshot.selectedTopic?.profile).toBe(profile)
     expect(snapshot.entityProjection?.status).toBe('ready')
     expect(snapshot.topicSourceDetails).toEqual([
-      expect.objectContaining({ status: 'ready', source: expect.objectContaining({ canonical_id: 'project:atlas' }) }),
-      expect.objectContaining({ status: 'error', detail: 'Ten profil nie jest autoryzowany w bieżącym połączeniu.', source: expect.objectContaining({ canonical_id: 'project:mentor' }) })
+      expect.objectContaining({ status: 'ready', source: expect.objectContaining({ canonical_id: 'project:atlas' }) })
+    ])
+    expect(snapshot.selectedTopic?.sources.items).toEqual([
+      expect.objectContaining({ canonical_id: 'project:atlas' })
     ])
     expect(snapshot.sessions.some((item) => item.profile === otherProfile)).toBe(false)
     expect(snapshot.projects.some((item) => item.profile === otherProfile)).toBe(false)

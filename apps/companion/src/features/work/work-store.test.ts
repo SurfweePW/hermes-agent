@@ -1,7 +1,10 @@
+import { render } from '@testing-library/react'
+import { createElement } from 'react'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { WorkCard, WorkGateway } from '../../gateway/work-types'
 
+import { WorkInbox } from './work-inbox'
 import { canonicalDecisionCount, createWorkStore, distinctRuntimeAttention, verifiedWorkProfiles } from './work-store'
 
 const card: WorkCard = {
@@ -142,20 +145,29 @@ describe('verified work store', () => {
     await store.open('atlas', 'fixture-review')
     expect(store.getSnapshot().selected?.decisionHistory?.[0]).toMatchObject({ revision: 1, action: 'request_changes' })
     await store.decide({ action: 'approve_preparation' })
-    expect(store.getSnapshot().selected).toMatchObject({ id: 'fixture-review', bucket: 'in_progress', preparationStatus: 'Preparation approved — awaiting execution tracker task link', actionable: false })
+    expect(store.getSnapshot().selected).toMatchObject({ id: 'fixture-review', bucket: 'in_progress', preparationStatus: 'Przygotowanie zatwierdzone — oczekiwanie na powiązanie zadania w rejestrze wykonania', actionable: false })
     expect(store.getSnapshot().selected?.decisionHistory).toHaveLength(2)
     expect(store.getSnapshot().selected?.executionAcknowledgedAt).toBeUndefined()
     await store.refresh()
     expect(store.getSnapshot().selected?.id).toBe('fixture-review')
   })
-  it('locks the mutation on an unauthorized source and keeps verified work visible', async () => {
+  it('locks the mutation and removes work from an unauthorized source', async () => {
     const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
     vi.mocked(gateway.decideWork).mockRejectedValue({ code: 4403 })
     expect(await store.decide({ action: 'approve_preparation' })).toBe(false)
     expect(store.getSnapshot().status).toBe('error')
-    expect(store.getSnapshot().message).toBe('This source is not authorized.')
-    expect(store.getSnapshot().selected?.id).toBe('stable-id')
-    expect(store.getSnapshot().items.map((item) => item.id)).toContain('stable-id')
+    expect(store.getSnapshot().message).toBe('Ten profil nie jest autoryzowany w bieżącym połączeniu.')
+    expect(store.getSnapshot().selected).toBeNull()
+    expect(store.getSnapshot().items.map((item) => item.id)).not.toContain('stable-id')
+
+    const view = render(createElement(WorkInbox, {
+      ...store.getSnapshot(),
+      onRefresh: vi.fn(), onGroupBy: vi.fn(), onOpen: vi.fn(), onOpenArtifact: vi.fn(), onClose: vi.fn(),
+      onDecision: vi.fn(async () => false), onComment: vi.fn(async () => false), onPriority: vi.fn(async () => false), onRestorePriority: vi.fn(async () => false)
+    }))
+
+    expect(view.container.textContent).toContain('Ten profil nie jest autoryzowany w bieżącym połączeniu.')
+    expect(view.container.textContent).not.toContain('This source is not authorized.')
   })
 
   it('keeps verified work of every other source when one source is revoked', async () => {
@@ -174,11 +186,12 @@ describe('verified work store', () => {
 
     expect(store.getSnapshot().status).toBe('verified')
     expect(store.getSnapshot().sources).toEqual(expect.arrayContaining([
-      expect.objectContaining({ profile: 'cmo', status: 'error', message: 'This source is not authorized.' }),
+      expect.objectContaining({ profile: 'cmo', status: 'error', message: 'Ten profil nie jest autoryzowany w bieżącym połączeniu.' }),
       expect.objectContaining({ profile: 'atlas', status: 'verified' })
     ]))
-    expect(store.getSnapshot().items).toEqual(expect.arrayContaining([expect.objectContaining({ id: otherCard.id, profile: 'atlas' })]))
-    expect(store.getSnapshot().selected).toMatchObject({ id: 'stable-id', profile: 'cmo' })
+    expect(store.getSnapshot().items).toEqual([expect.objectContaining({ id: otherCard.id, profile: 'atlas' })])
+    expect(store.getSnapshot().items.some((item) => item.profile === 'cmo')).toBe(false)
+    expect(store.getSnapshot().selected).toBeNull()
   })
 
   it('signals owner authorization loss without removing verified work', async () => {
@@ -220,7 +233,7 @@ describe('verified work store', () => {
     vi.mocked(gateway.decideWork).mockImplementation(async () => {revise(); throw { code: 4409 }})
     expect(await store.decide({ action: 'approve_preparation' })).toBe(false)
     expect(store.getSnapshot().selected?.revision).toBe(3)
-    expect(store.getSnapshot().message).toMatch(/Nothing was automatically retried/)
+    expect(store.getSnapshot().message).toMatch(/Niczego nie ponowiono automatycznie/)
     expect(gateway.decideWork).toHaveBeenCalledTimes(1)
   })
   it('does not confirm a decision when readback omits the exact server record ID', async () => {
@@ -228,7 +241,7 @@ describe('verified work store', () => {
     vi.mocked(gateway.decideWork).mockImplementation(async (params) => ({ decision: { id: 'server-missing-from-readback', card_id: params.id, revision: params.revision, action: params.action, actor: 'human', reason: params.reason ?? '', snoozed_until: params.snoozed_until ?? null, created_at: '2026-09-01T00:01:00Z', scope: params.action === 'approve_preparation' ? 'preparation_only' : 'none' } }))
 
     expect(await store.decide({ action: 'approve_preparation' })).toBe(false)
-    expect(store.getSnapshot().message).toMatch(/could not be confirmed/i)
+    expect(store.getSnapshot().message).toMatch(/nie udało się potwierdzić/i)
     expect(gateway.decideWork).toHaveBeenCalledTimes(1)
   })
   it('rejects an idempotency key echoed as the record UUID even when readback repeats it', async () => {
@@ -243,7 +256,7 @@ describe('verified work store', () => {
     expect(await store.decide({ action: 'approve_preparation' })).toBe(false)
     expect(gateway.decideWork).toHaveBeenCalledTimes(1)
     expect(gateway.getWork).toHaveBeenCalledTimes(1)
-    expect(store.getSnapshot().message).toMatch(/could not be confirmed/i)
+    expect(store.getSnapshot().message).toMatch(/nie udało się potwierdzić/i)
   })
   it('does not retry an unconfirmed timeout automatically', async () => {
     const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
@@ -251,7 +264,7 @@ describe('verified work store', () => {
 
     expect(await store.decide({ action: 'approve_preparation' })).toBe(false)
     expect(gateway.decideWork).toHaveBeenCalledTimes(1)
-    expect(store.getSnapshot().message).toMatch(/may already have reached the server/i)
+    expect(store.getSnapshot().message).toMatch(/zapis mógł już dotrzeć do serwera/i)
   })
   it('keeps the exact mutation target locked until readback finishes', async () => {
     const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')

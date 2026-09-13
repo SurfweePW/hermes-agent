@@ -30,4 +30,14 @@ describe('buildProfileSelectorModel', () => {
       detail: 'Ten profil nie jest obsługiwany przez bieżący gateway. Zmień konfigurację gatewaya, aby używać go w aplikacji.'
     })
   })
+
+  it('allows profiles when an older gateway omits serviceability metadata', () => {
+    const teammates = [
+      { id: 'atlas', name: 'Atlas', initials: 'A', role: 'Chief of Staff', status: 'idle' as const, summary: '' }
+    ]
+
+    expect(buildProfileSelectorModel(teammates, [], [])).toEqual([
+      expect.objectContaining({ profile: 'atlas', servedByGateway: true, selectable: true, optionLabel: 'Atlas' })
+    ])
+  })
 })

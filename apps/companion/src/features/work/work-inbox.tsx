@@ -6,6 +6,8 @@ import { workCopy } from '../../copy/work'
 import type { NeedsMePriorityItem } from '../../gateway/organization-types'
 import type { TrackerEvidence, WorkDecisionOption } from '../../gateway/work-types'
 
+const workStateLabel = (status: string) => workCopy.itemState[status as keyof typeof workCopy.itemState] ?? workCopy.summary.unknownState
+
 /** Presentation model, deliberately independent of the gateway wire contract. */
 export interface WorkCardView {
   id: string
@@ -179,7 +181,7 @@ function WorkLinks({ links, profile, onOpenArtifact }: { links: WorkCardView['ev
 }
 
 function TrackerStatus({ evidence, heading, profile, onOpenArtifact }: { evidence: TrackerEvidence; heading?: string; profile: string; onOpenArtifact: WorkInboxProps['onOpenArtifact'] }) {
-  return <section className="work-tracker-status">{heading && <h4>{heading}</h4>}<p><strong>{evidence.state.replaceAll('_', ' ')}</strong> · {workCopy.tracker.observed} {evidence.observed_at}</p>{evidence.blocker && <p><strong>{workCopy.tracker.blocker}</strong> {evidence.blocker}</p>}{evidence.result_evidence?.length ? <p><strong>{workCopy.tracker.result}</strong> {evidence.result_evidence.map(safeArtifactLabel).join(' · ')}</p> : null}<WorkLinks links={evidence.evidence.map((label) => ({ label, url: label }))} onOpenArtifact={onOpenArtifact} profile={profile} /></section>
+  return <section className="work-tracker-status">{heading && <h4>{heading}</h4>}<p><strong>{workCopy.preparationStatus[evidence.state]}</strong> · {workCopy.tracker.observed} {evidence.observed_at}</p>{evidence.blocker && <p><strong>{workCopy.tracker.blocker}</strong> {evidence.blocker}</p>}{evidence.result_evidence?.length ? <p><strong>{workCopy.tracker.result}</strong> {evidence.result_evidence.map(safeArtifactLabel).join(' · ')}</p> : null}<WorkLinks links={evidence.evidence.map((label) => ({ label, url: label }))} onOpenArtifact={onOpenArtifact} profile={profile} /></section>
 }
 
 function WorkBrief({ value, profile, onOpenArtifact, showInference = true }: { value: string; profile: string; onOpenArtifact: WorkInboxProps['onOpenArtifact']; showInference?: boolean }) {
@@ -247,10 +249,10 @@ export function WorkInbox(props: WorkInboxProps) {
         {!history && filter === 'needs_me' && item.priority && (index === 0 || visible[index - 1]?.priority?.groupOrder !== item.priority.groupOrder) && <header className="work-topic-heading">
           <p className="kicker">{workCopy.group[item.priority.group.kind]}{item.priority.topicCollection ? ` · ${item.priority.topicCollection}` : ''}</p>
           <h3>{item.priority.topicName}</h3>
-          <p>{workCopy.summary.recommended} · {item.priority.eligibility.replaceAll('_', ' ')}</p>
+          <p>{workCopy.summary.recommended} · {workCopy.priorityEligibility[item.priority.eligibility]}</p>
         </header>}
         <button className="work-summary" disabled={props.status !== 'verified' || props.pending} onClick={() => props.onOpen(item.profile, item.id)} type="button">
-          <span className="label">{item.profile} · {item.status} · {workCopy.summary.revision} {item.revision}</span>
+          <span className="label">{item.profile} · {workStateLabel(item.status)} · {workCopy.summary.revision} {item.revision}</span>
           <strong>{item.title}</strong><span>{workBriefSummary(item.brief)}</span>
           {item.priority && <>
             <small><strong>{workCopy.summary.whyHere}</strong> {item.priority.why_here}</small>
@@ -295,7 +297,7 @@ function WorkDetail({ item, status, pending, priorityWritable, onClose, onDecisi
 
   return <article aria-labelledby="work-detail-title" className="work-detail">
     <button disabled={pending} onClick={onClose} type="button">{workCopy.chrome.back}</button>
-    <p className="label">{item.profile} · {item.status} · {workCopy.summary.revision} {item.revision}</p>
+    <p className="label">{item.profile} · {workStateLabel(item.status)} · {workCopy.summary.revision} {item.revision}</p>
     <h3 id="work-detail-title">{item.title}</h3>
     <section aria-labelledby="work-decision-request-title" className="work-decision-request"><p className="kicker">{workCopy.detail.businessDecision}</p><h4 id="work-decision-request-title">{workCopy.detail.needed}</h4><p>{item.nextAction || workCopy.detail.neededFallback}</p></section>
     <section><h4>{workCopy.detail.whyNow}</h4><p>{item.priority?.why_here ?? brief?.inference ?? workBriefSummary(item.brief)}</p></section>

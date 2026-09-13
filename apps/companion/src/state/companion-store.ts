@@ -1,4 +1,4 @@
-import { type ConnectionState, JsonRpcGatewayError } from '@hermes/shared'
+import { type ConnectionState, type GatewayClientOptions, JsonRpcGatewayError } from '@hermes/shared'
 
 import { stateCopy } from '../copy/state'
 import { createDirectoryStore, type DirectoryGateway, type DirectoryStore } from '../features/directory/directory-store'
@@ -150,7 +150,7 @@ export interface CompanionGateway extends Partial<WorkGateway>, Partial<Organiza
   respondToApproval(runtimeSessionId: string, requestId: string, choice: ApprovalChoice): Promise<ApprovalRespondResult>
 }
 
-export type CompanionGatewayFactory = () => CompanionGateway
+export type CompanionGatewayFactory = (options?: Pick<GatewayClientOptions, 'onSocketClose'>) => CompanionGateway
 
 export interface CompanionStorage {
   getItem(key: string): string | null
@@ -565,7 +565,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
   let handleOwnerAuthorizationLost = (_error: unknown) => undefined
   const work = createWorkStore({ onOwnerAuthorizationLost: (error) => handleOwnerAuthorizationLost(error) })
   const directory = createDirectoryStore({ onOwnerAuthorizationLost: (error) => handleOwnerAuthorizationLost(error) })
-  const gatewayFactory = options.gatewayFactory ?? (() => new CompanionClient())
+  const gatewayFactory = options.gatewayFactory ?? ((gatewayOptions?: GatewayClientOptions) => new CompanionClient(gatewayOptions))
   const storage = options.storage ?? browserStorage()
   const sessionDrafts = createSessionDraftStore(storage)
   const operationRetries = createSessionOperationRetryStore(storage)
@@ -1102,7 +1102,18 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     directory.disconnect()
     detachGateway()
     replaced?.close()
-    const client = gatewayFactory()
+    const client = gatewayFactory({
+      onSocketClose: (event) => {
+        if (event.code !== 4401 || connectionMode !== 'owner' || connectionGeneration !== generation) {return false}
+
+        handleOwnerAuthorizationLost(new JsonRpcGatewayError('Owner WebSocket authorization lost', {
+          closeCode: event.code,
+          closeReason: event.reason
+        }))
+
+        return true
+      }
+    })
     gateway = client
     attentionSupported = true
     pinsSupported = true
@@ -1188,7 +1199,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       idCounts.set(baseId, count)
       const id = count === 1 ? baseId : `${baseId}-${count}`
       nextProfileIds.set(id, profile.name)
-      profileServiceability.push({ teammateId: id, profile: profile.name, servedByGateway: profile.served_by_gateway === true })
+      profileServiceability.push({ teammateId: id, profile: profile.name, servedByGateway: profile.served_by_gateway !== false })
 
       return [{
         id,
@@ -2050,7 +2061,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
           })
 
           if (!isCurrentConnection(client, connectionOperation) || sessionGeneration !== sessionOperation) {
-            throw new Error('The saved conversation changed before reconciliation completed.')
+            throw new Error(stateCopy.errors.conversationChanged)
           }
 
           if (result.operation_status === 'claimed'
@@ -2063,7 +2074,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
           clearContinuityRetry(storage)
 
           if (result.operation_status !== 'completed') {
-            throw new Error('The previous continuation was not completed. Send again to start a new turn.')
+            throw new Error(stateCopy.errors.previousContinuationIncomplete)
           }
 
           const reconciledHistory = await client.getCompanionSessionHistory(
@@ -2146,7 +2157,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
         if (!isCurrentDraftSession()) {
           abandonUnsentRetry()
-          throw new Error('The saved conversation changed before continuation completed.')
+          throw new Error(stateCopy.errors.conversationChanged)
         }
 
         retry.messageSha256 = messageSha256
@@ -2163,7 +2174,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
         if (!isCurrentDraftSession()) {
           abandonUnsentRetry()
-          throw new Error('The saved conversation changed before continuation completed.')
+          throw new Error(stateCopy.errors.conversationChanged)
         }
 
         const preservedMessages = toPersistedMessages(history)
@@ -2187,7 +2198,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         if (result.status === 'uncertain') {throw new UncertainContinuationError()}
 
         if (!isCurrentConnection(client, connectionOperation) || sessionGeneration !== sessionOperation) {
-          throw new Error('The saved conversation changed before continuation completed.')
+          throw new Error(stateCopy.errors.conversationChanged)
         }
 
         if (!await applySession(client, result, connectionOperation, sessionOperation, preservedMessages, () => {
@@ -2206,7 +2217,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
           if (terminalEvent) {handleEvent(terminalEvent)}
         })) {
-          throw new Error('The saved conversation changed before continuation completed.')
+          throw new Error(stateCopy.errors.conversationChanged)
         }
       } catch (error) {
         if (!submitted) {abandonUnsentRetry()}
@@ -2343,7 +2354,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
       if (!gateway || !profile || !teammate || !ownerScope || !backendNamespace
         || connectionMode !== 'owner' || snapshot.phase !== 'ready' || !creationLock) {
-        publish({ error: 'Durable conversation creation is unavailable for this connection.' })
+        publish({ error: stateCopy.errors.durableCreationUnavailable })
 
         return false
       }
@@ -2355,7 +2366,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         sessionId: crypto.randomUUID(), sessionKind: 'local', revision: 1 }
       activePresentationIdentity = { kind: 'session', ...activeDraftIdentity }
       publish({ selectedTeammateId: teammateId, runtimeSessionId: null, storedSessionId: null,
-        activeSession: activeSessionPresentation(teammate, null, 'New conversation'), messages: [], pendingApproval: null,
+        activeSession: activeSessionPresentation(teammate, null, stateCopy.newConversationTitle), messages: [], pendingApproval: null,
         draft: sessionDrafts.get(activeDraftIdentity), turnStatus: 'idle', error: null })
 
       return true
@@ -2536,7 +2547,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
           pendingInterrupt = null
           publish({
             turnStatus: operation.previousTurnStatus,
-            error: 'Stop failed. The turn may still be running; try again.'
+            error: stateCopy.errors.stopFailed
           })
         }
       } finally {
@@ -2564,7 +2575,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
           publish({ pendingApproval: null })
           void loadAttention(client, connectionOperation).catch(() => undefined)
         } else if (isSameApproval) {
-          publish({ pendingApproval: { ...approval, responding: false }, error: 'The approval is still pending.' })
+          publish({ pendingApproval: { ...approval, responding: false }, error: stateCopy.errors.approvalStillPending })
         }
       } catch (error) {
         if (isCurrentConnection(client, connectionOperation)

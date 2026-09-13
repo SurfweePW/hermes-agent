@@ -32,12 +32,13 @@ export function buildProfileSelectorModel(
 
   return teammates.map((teammate) => {
     const service = serviceabilityById.get(teammate.id)
-    const served = service?.servedByGateway === true
-    const selectable = served && !hardError(coverageByProfile.get(service.profile))
+    const profile = service?.profile ?? teammate.id
+    const served = service?.servedByGateway !== false
+    const selectable = served && !hardError(coverageByProfile.get(profile))
 
     return {
       teammateId: teammate.id,
-      profile: service?.profile ?? teammate.id,
+      profile,
       name: teammate.name,
       servedByGateway: served,
       selectable,

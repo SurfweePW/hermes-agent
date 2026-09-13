@@ -1,11 +1,11 @@
-import { type ConnectionState, JsonRpcGatewayError } from '@hermes/shared'
+import { type ConnectionState, type GatewayClientOptions, JsonRpcGatewayError } from '@hermes/shared'
 import { describe, expect, it, vi } from 'vitest'
 
 import type { CompanionEvent, CompanionSessionHistoryResult, ContinueCompanionSessionResult, CreateCompanionSessionRequest, GatewaySessionSummary, ProfilesListResult, SessionInterruptResult, SessionResult } from '../gateway/types'
 import type { OwnerAuthBridge } from '../security/owner-auth'
 import type { SessionSecretStore } from '../security/secret-store'
 
-import { type CompanionGateway, type CompanionGatewayFactory, createCompanionStore } from './companion-store'
+import { type CompanionGateway, createCompanionStore } from './companion-store'
 
 class ControlledGateway implements CompanionGateway {
   connectionState: ConnectionState = 'idle'
@@ -37,6 +37,7 @@ class ControlledGateway implements CompanionGateway {
   pendingApprovalsResult: Promise<{ approvals: [] }> | null = null
   private eventHandlers = new Set<(event: CompanionEvent) => void>()
   private stateHandlers = new Set<(state: ConnectionState) => void>()
+  socketCloseHandler?: GatewayClientOptions['onSocketClose']
 
   async connect(url: string) {
     this.calls.push(['connect', url])
@@ -108,6 +109,11 @@ class ControlledGateway implements CompanionGateway {
  return this.approval
   }
   emit(event: CompanionEvent) { for (const handler of this.eventHandlers) {handler(event)} }
+  emitSocketClose(code: number, reason: string) {
+    const event = new CloseEvent('close', { code, reason })
+
+    if (!this.socketCloseHandler?.(event)) {this.setState('closed')}
+  }
   setState(state: ConnectionState) { this.connectionState = state;
 
  for (const handler of this.stateHandlers) {handler(state)} }
@@ -145,8 +151,9 @@ function harness(
 ) {
   const gateways: ControlledGateway[] = []
 
-  const factory: CompanionGatewayFactory = () => {
+  const factory = (gatewayOptions?: GatewayClientOptions): CompanionGateway => {
     const gateway = new ControlledGateway()
+    gateway.socketCloseHandler = gatewayOptions?.onSocketClose
 
     if (profiles) {gateway.profiles = profiles}
     prepareGateway?.(gateway, gateways.length)
@@ -179,6 +186,23 @@ function harness(
 }
 
 describe('CompanionStore setup and sessions', () => {
+  it('fails open when an older gateway omits served_by_gateway', async () => {
+    const { store } = harness(null, { profiles: [{ name: 'atlas' }] })
+
+    await store.configure({ baseUrl: 'https://gateway.test', token: 'shared-token' })
+
+    expect(store.getSnapshot().profileServiceability).toEqual([
+      { teammateId: 'atlas', profile: 'atlas', servedByGateway: true }
+    ])
+  })
+
+  it('publishes Polish copy when durable creation is unavailable', async () => {
+    const { store } = harness()
+
+    expect(await store.openBotChat()).toBe(false)
+    expect(store.getSnapshot().error).toBe('Trwałe tworzenie rozmowy jest niedostępne dla tego połączenia.')
+  })
+
   it('preserves unresolved creation metadata across sign-out and reuses the authenticated owner partition', async () => {
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })),
@@ -406,6 +430,25 @@ describe('CompanionStore setup and sessions', () => {
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
 
     expect(store.getSnapshot()).toMatchObject({ phase: 'setup', connectionMode: 'shared', teammates: [], error: 'Sesja właściciela wygasła. Zaloguj się ponownie.' })
+    expect(ownerAuth.ownerSignOut).not.toHaveBeenCalled()
+  })
+
+  it('routes a post-open WebSocket 4401 close through owner recovery', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket')
+    }
+    const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
+
+    await store.configureOwner({ baseUrl: 'https://gateway.test' })
+    store.setDraft('Zachowaj szkic po zamknięciu socketu')
+    gateways[0].emitSocketClose(4401, 'owner lease expired')
+
+    expect(store.getSnapshot()).toMatchObject({
+      phase: 'setup', connectionMode: 'shared', teammates: [],
+      draft: 'Zachowaj szkic po zamknięciu socketu',
+      error: 'Sesja właściciela wygasła. Zaloguj się ponownie.'
+    })
     expect(ownerAuth.ownerSignOut).not.toHaveBeenCalled()
   })
 
@@ -1608,7 +1651,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
     expect(store.getSnapshot()).toMatchObject({
       turnStatus: 'error',
-      error: 'Hermes reported an error while running this turn.'
+      error: 'Hermes zgłosił błąd podczas wykonywania tej tury.'
     })
     expect(JSON.stringify(store.getSnapshot())).not.toContain('synthetic-secret')
     expect(JSON.stringify(store.getSnapshot())).not.toContain('synthetic-cookie')
@@ -1767,7 +1810,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     await store.interrupt()
     expect(store.getSnapshot()).toMatchObject({
       turnStatus: 'streaming',
-      error: 'Stop failed. The turn may still be running; try again.'
+      error: 'Nie udało się zatrzymać tury. Może nadal trwać; spróbuj ponownie.'
     })
 
     gateways[0].interruptResult = Promise.resolve({ status: 'interrupted' })
@@ -1877,6 +1920,21 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
     expect(gateways[0].calls).toContainEqual(['respondToApproval', 'runtime-1', 'approval:7', 'once'])
     expect(store.getSnapshot().pendingApproval).toBeNull()
+  })
+
+  it('keeps an approval visible with Polish copy while it is still pending', async () => {
+    const { store, gateways } = harness()
+    await store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
+    await store.selectTeammate(store.getSnapshot().teammates[0].id)
+    gateways[0].emit({ type: 'approval.request', session_id: 'runtime-1', payload: { request_id: 'approval:pending', description: 'Publish?' } })
+    gateways[0].approval = Promise.resolve({ resolved: 0 })
+
+    await store.respondToApproval('once')
+
+    expect(store.getSnapshot()).toMatchObject({
+      pendingApproval: { requestId: 'approval:pending', responding: false },
+      error: 'Ta prośba nadal oczekuje na decyzję.'
+    })
   })
 
   it('does not let an old session approval response mutate a reused request ID', async () => {
@@ -2655,7 +2713,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     expect(store.getSnapshot()).toMatchObject({
       runtimeSessionId: 'runtime-large-error',
       turnStatus: 'error',
-      error: 'Hermes reported an error while running this turn.'
+      error: 'Hermes zgłosił błąd podczas wykonywania tej tury.'
     })
     expect(JSON.stringify(store.getSnapshot())).not.toContain('synthetic-secret')
     expect(JSON.stringify(store.getSnapshot())).not.toContain('synthetic-token')
@@ -2773,7 +2831,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
     expect(store.getSnapshot()).toMatchObject({
       runtimeSessionId: 'runtime-failed', turnStatus: 'error', streamingText: '',
-      error: 'Hermes reported an error while running this turn.'
+      error: 'Hermes zgłosił błąd podczas wykonywania tej tury.'
     })
     expect(store.getSnapshot().messages.at(-1)).toMatchObject({ role: 'user', text: 'Failing continuation' })
   })
@@ -3018,7 +3076,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       status: 'streaming'
     })
 
-    await expect(openingA).rejects.toThrow('The saved conversation changed before continuation completed.')
+    await expect(openingA).rejects.toThrow('Zapisana rozmowa zmieniła się przed zakończeniem operacji.')
     expect(store.getSnapshot()).toMatchObject({ draft: 'Draft for B', runtimeSessionId: null, turnStatus: 'idle' })
     store.activateSessionDraft(sessionA)
     expect(store.getSnapshot().draft).toBe('Draft for A')
@@ -3052,7 +3110,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       coverage: { complete: true, freshness: null, message: null }
     })
 
-    await expect(openingA).rejects.toThrow('The saved conversation changed before continuation completed.')
+    await expect(openingA).rejects.toThrow('Zapisana rozmowa zmieniła się przed zakończeniem operacji.')
     expect(gateways[0].calls.filter(([name]) => name === 'continueCompanionSession')).toHaveLength(0)
     expect(store.getSnapshot()).toMatchObject({ draft: 'Draft for B', messages: [], runtimeSessionId: null })
     expect(values.has('hermes.companion.continuityRetry.v1')).toBe(false)

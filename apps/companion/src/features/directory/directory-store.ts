@@ -581,7 +581,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
       complete,
       work,
       needsMe: work.filter((item) => item.detail?.item.state === 'needs_me'),
-      message: complete ? null : 'Some authorized relationship or source records could not be verified.',
+      message: complete ? null : directoryCopy.store.relationshipsUnverified,
       relatedTopics: [...relatedTopics.values()],
       relatedTopicsComplete: topicRelationshipsComplete
     }
@@ -591,20 +591,20 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
     const sources = detail.sources.items ?? []
 
     const settled = await Promise.allSettled(sources.map(async (source): Promise<TopicSourceDetail> => {
-      if (source.kind === 'namespace') { return { source, status: 'ready', title: source.namespace.profile, detail: `Authorized namespace · ${source.namespace.backend_id}` } }
+      if (source.kind === 'namespace') { return { source, status: 'ready', title: source.namespace.profile, detail: directoryCopy.sourceDetail.authorizedNamespace(source.namespace.backend_id) } }
 
       if (source.kind === 'project') {
         const value = await client.getCompanionProject(source.namespace.profile, source.source_id)
 
-        if (value.project.source !== source.namespace.backend_id) { throw new Error('Project source identity changed.') }
+        if (value.project.source !== source.namespace.backend_id) { throw new Error(directoryCopy.store.sourceChanged.projectDetails) }
 
-        return { source, status: 'ready', title: value.project.title, detail: `${value.project.type.replaceAll('_', ' ')} · ${value.project.archived ? 'archived' : 'current'}` }
+        return { source, status: 'ready', title: value.project.title, detail: directoryCopy.sourceDetail.project(directoryCopy.projectType[value.project.type], value.project.archived) }
       }
 
       const value = await client.getCompanionSessionHistory(source.namespace.profile, source.session.persisted_session_id, undefined, source.namespace.backend_id)
       const known = sessions.get(sourceKey(source.namespace.backend_id, source.namespace.profile, source.session.persisted_session_id))
 
-      return { source, status: 'ready', title: known?.title || source.session.persisted_session_id, detail: `${value.entries.length} messages loaded · ${value.coverage.complete ? 'complete history' : 'partial history'}` }
+      return { source, status: 'ready', title: known?.title || source.session.persisted_session_id, detail: directoryCopy.sourceDetail.history(value.entries.length, value.coverage.complete) }
     }))
 
     const details: TopicSourceDetail[] = []
@@ -664,7 +664,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
 
     const entityProjection = projectionResult.status === 'fulfilled'
       ? projectionResult.value
-      : { status: failureStatus(projectionResult.reason), complete: false, work: [], needsMe: [], message: unsupported(projectionResult.reason) ? 'Backend update required for authorized Work and Needs Me.' : 'Authorized Work and Needs Me could not be verified.' } satisfies EntityProjection
+      : { status: failureStatus(projectionResult.reason), complete: false, work: [], needsMe: [], message: directoryCopy.store.entityWorkFailure(unsupported(projectionResult.reason)) } satisfies EntityProjection
 
     const selectedProject = kind === 'project' && snapshot.selectedProject && projectionResult.status === 'fulfilled'
       ? {
@@ -672,11 +672,15 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
           topics: entityProjection.relatedTopics ?? [],
           organization_available: true,
           organization_complete: entityProjection.relatedTopicsComplete === true,
-          organization_message: entityProjection.relatedTopicsComplete === true ? null : 'Some authorized Topic relationships could not be verified.'
+          organization_message: entityProjection.relatedTopicsComplete === true ? null : directoryCopy.store.topicRelationshipsUnverified
         }
       : snapshot.selectedProject
 
-    publish({ selectedProject, entityProjection, topicSourceDetails: sourceResult.details })
+    publish({
+      selectedProject,
+      entityProjection,
+      topicSourceDetails: sourceResult.details.filter((item) => !sourceResult.unauthorizedProfiles.includes(item.source.namespace.profile))
+    })
   }
 
   const openProject = async (profile: string, id: string, source?: string, preserve = false) => {
@@ -692,7 +696,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
 
       if (generation !== epoch || gateway !== client) {return}
 
-      if (source && detail.project.source !== source) {throw new Error('Source identity changed while loading project details.')}
+      if (source && detail.project.source !== source) {throw new Error(directoryCopy.store.sourceChanged.projectDetails)}
       projects.set(sourceKey(detail.project.source, detail.project.profile, detail.project.id), detail.project)
       publish({ ...projection(), selectedProject: detail, selectedSession: null, selectedTopic: null, history: null, detailStatus: 'ready' })
       await publishSupplemental(client, generation, 'project', profile, id, detail.project.source)
@@ -707,7 +711,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
         }
 
         const isUnsupported = unsupported(error)
-        publish({ detailStatus: isUnsupported ? 'unsupported' : 'error', detailMessage: isUnsupported ? 'Backend update required for project details.' : 'Project details could not be verified.' })
+        publish({ detailStatus: isUnsupported ? 'unsupported' : 'error', detailMessage: directoryCopy.store.projectDetailsFailure(isUnsupported) })
       }
     }
   }
@@ -738,7 +742,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
         if (generation !== epoch || gateway !== client) {return}
         const matches = lookup.sessions.filter((item) => item.id === id && item.profile === profile && (!source || item.source === source))
 
-        if (matches.length !== 1) {throw new Error('Exact session identity could not be resolved.')}
+        if (matches.length !== 1) {throw new Error(directoryCopy.store.exactSessionUnresolved)}
         known = matches[0]
         sessions.set(sourceKey(known.source, known.profile, known.id), known)
         reconcileProjectMembership(profile, false)
@@ -750,7 +754,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
 
       if (generation !== epoch || gateway !== client) {return}
 
-      if (source && result.source !== source) {throw new Error('Source identity changed while loading session history.')}
+      if (source && result.source !== source) {throw new Error(directoryCopy.store.sourceChanged.sessionHistory)}
       const authoritative = known?.source === result.source ? known : null
       publish({ ...projection(), selectedSession: authoritative, history: result, detailStatus: 'ready' })
       await publishSupplemental(client, generation, 'session', profile, id, result.source)
@@ -765,7 +769,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
         }
 
         const isUnsupported = unsupported(error)
-        publish({ detailStatus: isUnsupported ? 'unsupported' : 'error', detailMessage: isUnsupported ? 'Backend update required for persisted session history.' : 'Session history could not be verified.' })
+        publish({ detailStatus: isUnsupported ? 'unsupported' : 'error', detailMessage: directoryCopy.store.sessionHistoryFailure(isUnsupported) })
       }
     }
   }
@@ -783,7 +787,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
 
       if (generation !== epoch || gateway !== client) {return}
 
-      if (source && detail.backend_namespace !== source) {throw new Error('Source identity changed while loading topic details.')}
+      if (source && detail.backend_namespace !== source) {throw new Error(directoryCopy.store.sourceChanged.topicDetails)}
       topics.set(`${profile}\0${detail.backend_namespace}\0${detail.topic.id}`, { ...detail.topic, profile, source: detail.backend_namespace })
       publish({ ...projection(), selectedTopic: detail, detailStatus: 'ready' })
       await publishSupplemental(client, generation, 'topic', profile, id, detail.backend_namespace, detail)
@@ -797,7 +801,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
           return
         }
 
-        publish({ detailStatus: failureStatus(error), detailMessage: unsupported(error) ? 'Backend update required for topic details.' : 'Topic details could not be verified.' })
+        publish({ detailStatus: failureStatus(error), detailMessage: directoryCopy.store.topicDetailsFailure(unsupported(error)) })
       }
     }
   }
@@ -937,7 +941,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
             return
           }
 
-          publish({ detailStatus: 'error', detailMessage: 'Older history could not be verified.' })
+          publish({ detailStatus: 'error', detailMessage: directoryCopy.store.olderHistoryUnverified })
         }
       }
     },
@@ -955,7 +959,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
 
         if (generation !== epoch || gateway !== client) {return}
 
-        if (selection.source && next.project.source !== selection.source) {throw new Error('Source identity changed while loading project membership.')}
+        if (selection.source && next.project.source !== selection.source) {throw new Error(directoryCopy.store.sourceChanged.projectMembership)}
         const seen = new Set(current.sessions.map((session) => sourceKey(session.source, session.profile, session.id)))
         publish({
           selectedProject: {
@@ -979,7 +983,7 @@ export function createDirectoryStore(options: DirectoryStoreOptions = {}): Direc
             return
           }
 
-          publish({ detailStatus: 'error', detailMessage: 'Complete project membership could not be verified.' })
+          publish({ detailStatus: 'error', detailMessage: directoryCopy.store.completeProjectMembershipUnverified })
         }
       }
     },
