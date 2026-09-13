@@ -1,4 +1,5 @@
 import type { GatewaySessionSummary } from '../../gateway/types'
+import { PersistedConversationList } from '../conversation/persisted-conversation-list'
 
 import type { Teammate } from './roster'
 
@@ -23,8 +24,8 @@ export function TeammateDetails({ teammate, sessions, sessionsLoading, onMessage
       </header>
       <div className="section-heading session-heading"><div><p className="kicker">Conversation history</p><h3>Recent sessions</h3></div><span>Click a session to open it</span></div>
       {sessionsLoading && <p role="status">Loading sessions…</p>}
-      <div className="session-list">
-        {sessions.map((session, index) => {
+      <PersistedConversationList className="session-list" emptyCopy="Brak zapisanych rozmów dla tego profilu." emptyTitle="Brak rozmów" itemKey={(session) => session.id} items={sessions} renderItem={(session) => {
+          const index = sessions.indexOf(session)
           const title = session.title || 'Untitled session'
           const slug = session.id.toLocaleLowerCase().normalize('NFKD').replace(/[^a-z0-9_-]+/g, '-').replace(/^-+|-+$/g, '') || 'session'
           const titleId = `session-title-${slug}-${index}`
@@ -43,9 +44,7 @@ export function TeammateDetails({ teammate, sessions, sessionsLoading, onMessage
               <button aria-label={`${session.pinned ? 'Unpin' : 'Pin'} ${title}`} className="session-pin" onClick={() => onPin(session.id, !session.pinned)} title={session.pinned ? 'Unpin session' : 'Pin session'} type="button">{session.pinned ? '★' : '☆'}</button>
             </article>
           )
-        })}
-      </div>
-      {!sessionsLoading && sessions.length === 0 && <p>No recent visible sessions for this profile.</p>}
+        }} showEmpty={!sessionsLoading} />
     </section>
   )
 }

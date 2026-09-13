@@ -176,7 +176,9 @@ describe('Topics directory', () => {
     expect((screen.getByLabelText('Topic sort') as HTMLSelectElement).value).toBe('name')
     expect(screen.getByText('1 of 2 topics loaded')).toBeTruthy()
     expect(screen.getByLabelText('Active topic filters').textContent).toContain('Collection: operations')
-    expect(screen.getByRole('button', { name: /Companion launch/ }).textContent).toContain('Backend: organization-db · Profile: atlas')
+    expect(screen.getByRole('button', { name: /Companion launch/ }).textContent).toContain('Profil: atlas')
+    expect(screen.getByRole('button', { name: /Companion launch/ }).textContent).not.toContain('organization-db')
+    expect(screen.getAllByText('Szczegóły techniczne').some((summary) => summary.closest('details')?.textContent?.includes('organization-db'))).toBe(true)
     expect(screen.getByRole('button', { name: 'Clear filters' })).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: /Companion launch/ }))
@@ -207,7 +209,10 @@ describe('Topics directory', () => {
     const { rerender } = render(<WorkDirectory {...focused} />)
 
     expect(screen.getByText('Read-only organization detail')).toBeTruthy()
-    expect(screen.getByText(/Backend: organization-db · Profile: atlas/)).toBeTruthy()
+    const technical = screen.getByText('Szczegóły techniczne').closest('details')
+    expect(technical?.hasAttribute('open')).toBe(false)
+    expect(technical?.textContent).toContain('organization-db')
+    expect(screen.getByText(/Profil: atlas/)).toBeTruthy()
     expect(screen.getByRole('tab', { name: 'Needs Me' }).getAttribute('aria-selected')).toBe('true')
 
     for (const name of ['Overview', 'Needs Me', 'Work', 'Files', 'Sources']) {

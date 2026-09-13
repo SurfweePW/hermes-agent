@@ -1,4 +1,4 @@
-import { type FormEvent, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
 import { NeedsMe } from './features/attention/needs-me'
 import { Conversation } from './features/conversation/conversation'
@@ -15,18 +15,18 @@ import { WorkInbox } from './features/work/work-inbox'
 import { canonicalDecisionCount, distinctRuntimeAttention, verifiedWorkProfiles } from './features/work/work-store'
 import { createFakeWorkGateway } from './fixtures/fake-work-gateway'
 import { hasOriginalRouteCapability, openOriginalRoute } from './gateway/original-route'
-import { type CompanionStore, type ConversationCreationResult, createCompanionStore } from './state/companion-store'
-import { buildProfileSelectorModel, type ProfileSelectorOption } from './state/profile-selector'
+import { type CompanionStore, createCompanionStore } from './state/companion-store'
+import { buildProfileSelectorModel } from './state/profile-selector'
 import { useCompanion } from './state/use-companion'
 
-type Screen = 'needs' | 'work' | 'library' | 'teammates' | 'conversation' | 'details' | 'recovery'
+type Screen = 'needs' | 'work' | 'library' | 'conversation' | 'details' | 'recovery'
 const primaryScreens = new Set<Screen>(['needs', 'work', 'library'])
 
 const fixtureMode = import.meta.env.VITE_COMPANION_FIXTURE === 'true'
 const defaultStore = createCompanionStore(fixtureMode ? { gatewayFactory: createFakeWorkGateway } : {})
 
 const screenTitles: Record<Screen, string> = {
-  needs: 'Decyzje', work: 'Rozmowy', library: 'Pliki', teammates: 'Teammates', conversation: 'Conversation', details: 'Teammate Details', recovery: 'Recovery'
+  needs: 'Decyzje', work: 'Rozmowy', library: 'Pliki', conversation: 'Conversation', details: 'Profil', recovery: 'Recovery'
 }
 
 function initialScreen(): Screen {
@@ -58,8 +58,9 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
   const restoredLibraryRelationship = useRef('')
   const selected = companion.teammates.find((teammate) => teammate.id === companion.selectedTeammateId)
   const authoritativeWorkProfiles = verifiedWorkProfiles(work)
-  const runtimeAttention = companion.phase === 'ready' ? distinctRuntimeAttention(work.items, companion.attentionItems, authoritativeWorkProfiles) : []
-  const attentionCount = canonicalDecisionCount(work.items, runtimeAttention, authoritativeWorkProfiles)
+  const runtimeAttention = companion.phase === 'ready' ? companion.attentionItems : []
+  const canonicalRuntimeAttention = distinctRuntimeAttention(work.items, runtimeAttention, authoritativeWorkProfiles)
+  const attentionCount = canonicalDecisionCount(work.items, canonicalRuntimeAttention, authoritativeWorkProfiles)
   const profileOptions = useMemo(() => buildProfileSelectorModel(companion.teammates, companion.profileServiceability, directory.coverage),
     [companion.profileServiceability, companion.teammates, directory.coverage])
 
@@ -301,16 +302,16 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
               window.history.pushState({}, '', `${window.location.pathname}?${params.toString()}`)
               setLocationSearch(window.location.search)
               setScreen('work')
-            } else {setScreen('details')}
-          }} onDraftChange={store.setDraft} onInterrupt={() => void store.interrupt()} onSubmit={() => void store.submitDraft().catch(() => undefined)} projectLabel={projectLabel} sessionKey={transcriptSessionKey(companion.activeSession?.target?.backend_namespace ?? '', companion.activeSession?.target?.profile ?? selected.id, companion.activeSession?.target?.stored_session_id ?? companion.storedSessionId ?? 'canonical')} sessionTitle={companion.activeSession?.title ?? 'Conversation title unavailable'} streamingText={companion.streamingText} teammate={selected} turnStatus={companion.turnStatus} />
-        : <ChooseTeammate onBack={() => setScreen('teammates')} />
+            } else {navigate('work')}
+          }} onDraftChange={store.setDraft} onInterrupt={() => void store.interrupt()} onSubmit={() => void store.submitDraft().catch(() => undefined)} projectLabel={projectLabel} sessionKey={transcriptSessionKey(companion.activeSession?.target?.backend_namespace ?? '', companion.activeSession?.target?.profile ?? selected.id, companion.activeSession?.target?.stored_session_id ?? companion.storedSessionId ?? 'canonical')} sessionTitle={companion.activeSession?.title} streamingText={companion.streamingText} teammate={selected} turnStatus={companion.turnStatus} />
+        : <ChooseTeammate onBack={() => navigate('work')} />
     }
 
     if (screen === 'needs') {return <>
       {companion.phase !== 'ready' && <button className="button reconnect-button" disabled={companion.phase === 'recovering'} onClick={() => void store.recover()} type="button">Reconnect to verify work</button>}
       <OwnerSignIn baseUrl={companion.baseUrl} onOwnerConnect={store.connectOwner} onOwnerSignOut={store.signOutOwner} ownerConnected={companion.connectionMode === 'owner' && companion.phase === 'ready'} />
       <WorkInbox {...work} onClose={store.work.close} onComment={store.work.comment} onDecision={store.work.decide} onGroupBy={(groupBy) => void store.work.setGroupBy(groupBy)} onOpen={(profile, id) => void store.work.open(profile, id)} onOpenArtifact={(profile, reference) => navigate('library', libraryAssetParams(profile, reference))} onOpenProject={(project) => navigate('work', new URLSearchParams({ view: 'work', section: 'projects', focus: project.source_id, focusProfile: project.profile, focusSource: project.backend_namespace }))} onOpenSourceSession={(source) => navigate('work', new URLSearchParams({ view: 'work', section: 'sessions', focus: source.id, focusProfile: source.profile, focusSource: source.backend }))} onPriority={store.work.setPriority} onRefresh={() => void store.work.refresh()} onRestorePriority={store.work.restoreRecommended} />
-      <NeedsMe items={runtimeAttention} onOpen={(item) => { if (companion.phase === 'ready') {void store.openAttention(item).then(() => setScreen('conversation'))} }} onRefresh={() => void store.refreshAttention()} scope={companion.attentionScope} />
+      <NeedsMe items={canonicalRuntimeAttention} onOpen={(item) => { if (companion.phase === 'ready') { const params = new URLSearchParams(locationSearch); params.set('view', 'needs'); params.set('request', item.id); params.set('runtimeSession', item.runtime_session_id); window.history.pushState({}, '', `${window.location.pathname}?${params.toString()}`); setLocationSearch(window.location.search); void store.openAttention(item).then(() => setScreen('conversation')) } }} onRefresh={() => void store.refreshAttention()} scope={companion.attentionScope} />
     </>}
 
     if (screen === 'work') {
@@ -332,14 +333,14 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
         return <WorkDirectory {...directoryProps} />
       }
 
-      return <ChatsDirectory {...directoryProps} draft={companion.draft} onActivateSessionDraft={store.activateSessionDraft} onDraftChange={store.setDraft} onOpenSession={(item) => { store.activateSessionDraft({ backend_namespace: item.source, profile: item.profile, stored_session_id: item.id }); params.set('view', 'work'); params.set('chat', item.id); params.set('chatProfile', item.profile); params.set('chatSource', item.source); params.set('chatScroll', String(mainRef.current?.scrollTop ?? 0)); navigateParams(params) }} profileOptions={profileOptions} {...(companion.connectionMode === 'owner' ? { onCreateConversation: async (teammateId: string, text: string) => { const result = await store.submitQuickTask(teammateId, text); if (result.status === 'admitted') {setScreen('conversation')} return result }, onSubmitSession: async (item, text) => { await store.openPersistedSession({ backend_namespace: item.source, profile: item.profile, stored_session_id: item.id }, text, item.title); setScreen('conversation') } } : {})} />
+      return <ChatsDirectory {...directoryProps} draft={companion.draft} onActivateSessionDraft={store.activateSessionDraft} onDraftChange={store.setDraft} onOpenSession={(item) => { store.activateSessionDraft({ backend_namespace: item.source, profile: item.profile, stored_session_id: item.id }); params.set('view', 'work'); params.set('chat', item.id); params.set('chatProfile', item.profile); params.set('chatSource', item.source); params.set('chatScroll', String(window.innerWidth <= 780 ? window.scrollY : mainRef.current?.scrollTop ?? 0)); navigateParams(params) }} profileOptions={profileOptions} {...(companion.connectionMode === 'owner' ? { onCreateConversation: async (teammateId: string, text: string) => { const result = await store.submitQuickTask(teammateId, text); if (result.status === 'admitted') {setScreen('conversation')} return result }, onSubmitSession: async (item, text) => { await store.openPersistedSession({ backend_namespace: item.source, profile: item.profile, stored_session_id: item.id }, text, item.title); setScreen('conversation') } } : {})} />
     }
 
     if (screen === 'library') {return <Library gateway={store.library} onNavigate={navigateParams} params={new URLSearchParams(locationSearch)} refreshToken={libraryRefreshToken} relationshipContext={libraryRelationshipContext} />}
 
-    if (screen === 'details' && selected) {return <TeammateDetails onBack={() => setScreen('teammates')} onMessage={() => setScreen('conversation')} onOpenSession={(id) => { void store.selectTeammate(selected.id, id).then(() => setScreen('conversation')) }} onPin={(id, pinned) => void store.setSessionPinned(id, pinned)} sessions={companion.recentSessions} sessionsLoading={companion.sessionsLoading} teammate={selected} />}
+    if (screen === 'details' && selected) {return <TeammateDetails onBack={() => navigate('work')} onMessage={() => setScreen('conversation')} onOpenSession={(id) => { void store.selectTeammate(selected.id, id).then(() => setScreen('conversation')) }} onPin={(id, pinned) => void store.setSessionPinned(id, pinned)} sessions={companion.recentSessions} sessionsLoading={companion.sessionsLoading} teammate={selected} />}
 
-    return <TeammatesHome attentionCount={attentionCount} draft={companion.draft} onDraftChange={store.setDraft} onNeedsMe={() => navigate('needs')} onQuickTask={async (teammateId, text) => { const result = await store.submitQuickTask(teammateId, text); if (result.status === 'admitted') {setScreen('conversation')} return result }} onSelect={openTeammate} profileOptions={profileOptions} teammates={companion.teammates} />
+    return <ChooseTeammate onBack={() => navigate('work')} />
   })()
 
   return (
@@ -388,29 +389,4 @@ interface NavButtonProps { active: boolean; icon: string; label: string; onClick
 
 function NavButton({ active, icon, label, onClick, badge }: NavButtonProps) { return <button aria-current={active ? 'page' : undefined} aria-label={badge ? `${label}, ${badge} items` : undefined} className={`nav-button${active ? ' nav-button--active' : ''}`} onClick={onClick} type="button"><span aria-hidden="true" className="nav-button__icon">{icon}</span><span>{label}</span>{badge && <span aria-hidden="true" className="nav-badge">{badge}</span>}</button> }
 
-function TeammatesHome({ teammates, profileOptions, attentionCount, draft, onDraftChange, onSelect, onNeedsMe, onQuickTask }: { teammates: readonly Teammate[]; profileOptions: readonly ProfileSelectorOption[]; attentionCount: number; draft: string; onDraftChange(draft: string): void; onSelect: (teammate: Teammate) => void; onNeedsMe: () => void; onQuickTask: (teammateId: string, text: string) => Promise<ConversationCreationResult> }) {
-  const atlasId = profileOptions.find((option) => option.teammateId === 'atlas' && option.selectable)?.teammateId
-    ?? profileOptions.find((option) => option.selectable)?.teammateId ?? ''
-  const [target, setTarget] = useState(atlasId)
-  const [error, setError] = useState<string | null>(null)
-  const availableTeammates = teammates.filter((teammate) => profileOptions.some((option) => option.teammateId === teammate.id && option.selectable))
-  const unavailableOptions = profileOptions.filter((option) => !option.selectable)
-
-  const handleQuickTaskSubmit = async (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault()
-    if (!draft.trim() || !profileOptions.some((option) => option.teammateId === target && option.selectable)) {return}
-
-    setError(null)
-    const result = await onQuickTask(target, draft)
-
-    if (result.status === 'refused') {
-      setError('Nie można teraz utworzyć rozmowy z tym profilem. Wybierz dostępny profil lub odśwież połączenie.')
-    } else if (result.status === 'unknown') {
-      setError('Nie można potwierdzić utworzenia rozmowy. Wiadomość została zachowana; odśwież połączenie, aby sprawdzić wynik.')
-    }
-  }
-
-  return <section aria-labelledby="teammates-title" className="teammates-home"><div className="hero-copy"><p className="kicker">Your team at a glance</p><h2 id="teammates-title">Your team is ready.</h2><p className="screen-lede">Send a quick text task or open a teammate.</p></div><form aria-label="Quick task" className="quick-task" onSubmit={(event) => void handleQuickTaskSubmit(event)}><div className="quick-task__heading"><div><p className="kicker">Quick task</p><h3>Delegate something now</h3></div><span aria-hidden="true">↗</span></div><label htmlFor="quick-task-target">Rozmawiaj z</label><select id="quick-task-target" onChange={(event) => setTarget(event.target.value)} value={target}>{!atlasId && <option value="">Wybierz profil</option>}{profileOptions.map((option) => <option disabled={!option.selectable} key={option.teammateId} value={option.teammateId}>{option.optionLabel}</option>)}</select><label htmlFor="quick-task-text">Task</label><textarea id="quick-task-text" onChange={(event) => onDraftChange(event.target.value)} placeholder="What should Hermes do?" rows={3} value={draft} /><button className="primary-button" disabled={!draft.trim() || !profileOptions.some((option) => option.teammateId === target && option.selectable)} type="submit">Send task</button>{error && <p role="alert">{error}</p>}</form>{attentionCount > 0 && <button className="attention-banner" onClick={onNeedsMe} type="button"><span className="attention-banner__count">{attentionCount}</span><span><strong>Needs your judgment</strong><small>Review work decisions and runtime attention</small></span><span aria-hidden="true">→</span></button>}<div className="section-heading"><div><p className="kicker">Rozmawiaj z</p><h3>Teammates</h3></div><span>{availableTeammates.length} dostępnych</span></div><Roster onSelect={onSelect} teammates={availableTeammates} />{unavailableOptions.map((option) => <div className="roster-card" key={option.teammateId}><strong>{option.name}</strong><span>{option.statusLabel}</span>{!option.servedByGateway && <small>{option.detail}</small>}</div>)}</section>
-}
-
-function ChooseTeammate({ onBack }: { onBack: () => void }) { return <section className="search-empty"><h2>Choose a teammate first</h2><p>Select a teammate to create a conversation.</p><button className="primary-button" onClick={onBack} type="button">View teammates</button></section> }
+function ChooseTeammate({ onBack }: { onBack: () => void }) { return <section className="search-empty"><h2>Wybierz profil</h2><p>Otwórz profil z listy bocznej.</p><button className="primary-button" onClick={onBack} type="button">Wróć do rozmów</button></section> }

@@ -42,6 +42,20 @@ describe('Conversation', () => {
     expect(screen.getByText(metadata)).toBeTruthy()
   })
 
+  it.each([
+    ['null', null, 'Nazwa rozmowy niedostępna'],
+    ['empty', '', 'Nazwa rozmowy niedostępna'],
+    ['blank', '   ', 'Nazwa rozmowy niedostępna'],
+    ['short', 'Plan', 'Plan'],
+    ['long', `Bardzo długa nazwa rozmowy ${'x'.repeat(160)}`, `Bardzo długa nazwa rozmowy ${'x'.repeat(160)}`]
+  ])('renders a readable %s session title at phone width', (_kind, value, expected) => {
+    vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(390)
+    render(<Conversation {...baseProps} sessionTitle={value} />)
+    const heading = screen.getByRole('heading', { name: expected })
+
+    expect(heading.getAttribute('title')).toBe(expected)
+  })
+
   it('only follows streamed content while the reader remains near the bottom', () => {
     let scrollHeight = 1_200
     const { rerender } = render(<Conversation {...baseProps} messages={[{ id: 'm1', role: 'assistant', text: 'Older work' }]} sessionKey="stream-near" />)

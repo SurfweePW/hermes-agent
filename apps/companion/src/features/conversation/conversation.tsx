@@ -22,7 +22,7 @@ interface ConversationProps {
   onSubmit: () => void
   onInterrupt: () => void
   onApproval: (decision: ApprovalChoice) => void
-  sessionTitle?: string
+  sessionTitle?: string | null
   projectLabel?: string
   onBackToSessions?: () => void
   sessionKey?: string
@@ -40,7 +40,7 @@ export function Conversation({
   onSubmit,
   onInterrupt,
   onApproval,
-  sessionTitle = 'Conversation title unavailable',
+  sessionTitle,
   projectLabel = 'Projekt nieznany',
   onBackToSessions,
   sessionKey = teammate.id
@@ -48,6 +48,7 @@ export function Conversation({
   const sending = turnStatus === 'sending' || turnStatus === 'submitting'
   const working = sending || turnStatus === 'streaming' || turnStatus === 'stopping'
   const stopping = turnStatus === 'stopping'
+  const visibleSessionTitle = sessionTitle && sessionTitle.trim() ? sessionTitle : 'Nazwa rozmowy niedostępna'
   const contentVersion = useMemo(() => [
     ...messages.map((message) => `${message.id}:${message.kind ?? 'message'}:${message.toolStatus ?? ''}:${message.label ?? ''}:${message.text}`),
     `stream:${streamingText}`,
@@ -61,7 +62,7 @@ export function Conversation({
       <header className="conversation-head">
         {onBackToSessions && <button aria-label={`Back to ${teammate.name} sessions`} className="conversation-back" onClick={onBackToSessions} type="button">←</button>}
         <div aria-hidden="true" className={`avatar avatar--${teammate.id}`}>{teammate.initials}</div>
-        <div className="conversation-head__title"><h2 id="conversation-title">{sessionTitle}</h2><p className="kicker">{teammate.name} · {projectLabel}</p></div>
+        <div className="conversation-head__title"><h2 id="conversation-title" title={visibleSessionTitle}>{visibleSessionTitle}</h2><p className="kicker">{teammate.name} · {projectLabel}</p></div>
         <span className="presence"><span aria-hidden="true">●</span> {connected ? 'Online' : 'Offline'}</span>
       </header>
       <div className="message-list" onScroll={transcriptScroll.onScroll} ref={transcriptScroll.viewportRef}>

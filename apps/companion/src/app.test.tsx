@@ -78,7 +78,7 @@ describe('App', () => {
 
   beforeEach(() => window.history.replaceState({}, '', '/'))
   afterEach(() => {vi.useRealTimers(); vi.restoreAllMocks()})
-  it('keeps durable work in Needs Me, shows the old-server boundary and preserves runtime attention', async () => {
+  it('keeps durable work in Needs Me and shows the old-server boundary without an empty runtime list', async () => {
     const gateway = createFakeWorkGateway()
     gateway.listWork = async () => {throw Object.assign(new Error('Method not found'), { code: -32601 })}
     const store = await readyStore(gateway)
@@ -86,7 +86,7 @@ describe('App', () => {
     fireEvent.click(screen.getAllByRole('button', { name: /^Decyzje/ })[0])
     expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
     expect(screen.getByText(/does not support the durable work inbox/)).toBeTruthy()
-    expect(screen.getByText('Runtime-local attention')).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: /Akcje w aktywnych rozmowach/ })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Kanban' })).toBeNull()
   })
 
@@ -107,6 +107,33 @@ describe('App', () => {
     render(<App store={store} />)
 
     expect(screen.getAllByRole('button', { name: 'Decyzje, 1 items' })).toHaveLength(2)
+    fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje, 1 items' })[0])
+    expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
+    expect(screen.queryByRole('heading', { name: /Akcje w aktywnych rozmowach/ })).toBeNull()
+    expect(screen.getAllByRole('button', { name: 'Decyzje, 1 items' })).toHaveLength(2)
+  })
+
+  it('labels distinct durable and runtime decisions, preserves their badge count, and deep-links the runtime request', async () => {
+    const gateway = new FakeWorkGateway()
+    vi.spyOn(gateway, 'listAttention').mockResolvedValue({
+      items: [{
+        id: 'runtime-only-review', kind: 'approval', profile: 'atlas', runtime_session_id: 'runtime-review',
+        stored_session_id: 'synthetic-session-1', title: 'Live approval', detail: 'Only in the active conversation',
+        occurred_at: 1, actionable: true, resolution: 'approval'
+      }],
+      scope: 'This gateway runtime only'
+    })
+    const store = createCompanionStore({ gatewayFactory: () => gateway, storage: { getItem: () => null, setItem: () => undefined } })
+    await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
+
+    render(<App store={store} />)
+
+    expect(screen.getAllByRole('button', { name: 'Decyzje, 2 items' })).toHaveLength(2)
+    fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje, 2 items' })[0])
+    expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: /^Akcje w aktywnych rozmowach/ })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: /Live approval.*Only in the active conversation/ }))
+    await waitFor(() => expect(Object.fromEntries(new URLSearchParams(window.location.search))).toMatchObject({ request: 'runtime-only-review', runtimeSession: 'runtime-review' }))
   })
 
   it('routes an authoritative project priority through the existing directory contract', async () => {
@@ -388,45 +415,28 @@ describe('App', () => {
     expect(screen.queryByRole('button', { name: 'Search' })).toBeNull()
   })
 
-  it('renders quick task as a labelled stacked composer', async () => {
-    render(<App store={await readyStore()} />)
-    fireEvent.click(screen.getAllByRole('button', { name: /Atlas/ })[0])
-    fireEvent.click(await screen.findByRole('button', { name: '← Back' }))
-    const form = screen.getByRole('form', { name: 'Quick task' })
-    expect(form.classList.contains('quick-task')).toBe(true)
-    expect(screen.getByLabelText('Rozmawiaj z').tagName).toBe('SELECT')
-    expect(screen.getByLabelText('Task').tagName).toBe('TEXTAREA')
-    expect(screen.getByRole('button', { name: 'Send task' })).toBeTruthy()
+  it.each([
+    ['/?view=work', 'Rozmowy', null],
+    ['/?view=needs', 'Decyzje', null],
+    ['/?view=library', 'Pliki', null]
+  ])('reaches constructible route %s', async (url, mainLabel, selectedTab) => {
+    window.history.replaceState({}, '', url)
+    render(<App store={await readyDirectoryStore()} />)
+
+    expect(screen.getByRole('main').getAttribute('aria-label')).toBe(mainLabel)
+    if (selectedTab) {expect(screen.getByRole('tab', { name: selectedTab }).getAttribute('aria-selected')).toBe('true')}
   })
 
-  it('keeps an unserved profile visible but prevents quick-task submission', async () => {
-    const gateway = createFakeWorkGateway()
-    const listProfiles = gateway.listProfiles.bind(gateway)
-    gateway.listProfiles = async () => {
-      const result = await listProfiles()
-
-      return { ...result, profiles: result.profiles.map((profile) => ({ ...profile, served_by_gateway: profile.name !== 'mentor' })) }
-    }
-    const createSession = vi.spyOn(gateway, 'createSession')
-    const store = createCompanionStore({ gatewayFactory: () => gateway, storage: { getItem: () => null, setItem: () => undefined } })
-    await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
-
-    render(<App store={store} />)
+  it('has one reachable teammate details surface and no legacy panel', async () => {
+    render(<App store={await readyStore()} />)
     fireEvent.click(screen.getAllByRole('button', { name: /Atlas/ })[0])
-    fireEvent.click(await screen.findByRole('button', { name: '← Back' }))
 
-    const selector = screen.getByLabelText('Rozmawiaj z') as HTMLSelectElement
-    const mentor = screen.getByRole('option', { name: 'Mentor — niedostępny' }) as HTMLOptionElement
-    createSession.mockClear()
-    expect(mentor.disabled).toBe(true)
-    expect(screen.getByText('Niedostępny w tym połączeniu')).toBeTruthy()
-    expect(screen.getByText(/Ten profil nie jest obsługiwany przez bieżący gateway/)).toBeTruthy()
+    expect(await screen.findByRole('heading', { name: 'Atlas' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Open conversation' })).toBeTruthy()
 
-    fireEvent.change(selector, { target: { value: 'mentor' } })
-    fireEvent.change(screen.getByLabelText('Task'), { target: { value: 'Nie wysyłaj' } })
-    expect((screen.getByRole('button', { name: 'Send task' }) as HTMLButtonElement).disabled).toBe(true)
-    fireEvent.submit(screen.getByRole('form', { name: 'Quick task' }))
-    expect(createSession).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: '← Back' }))
+    expect(await screen.findByRole('heading', { name: 'Rozmowy' })).toBeTruthy()
+    expect(screen.queryByRole('form', { name: 'Quick task' })).toBeNull()
   })
 
   it('submits a mobile new conversation through durable companion creation', async () => {
@@ -540,6 +550,32 @@ describe('App', () => {
     expect(screen.getByRole('button', { name: /Companion project/ }).getAttribute('aria-expanded')).toBe('true')
     expect(new URLSearchParams(window.location.search).get('chat')).toBeNull()
     await waitFor(() => expect(main.scrollTop).toBe(240))
+  })
+
+  it.each([
+    ['phone', 390, true],
+    ['desktop', 1024, false]
+  ])('round-trips list scroll through chatScroll on %s', async (_layout, width, mobile) => {
+    vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(width)
+    const scrollWindow = vi.spyOn(window, 'scrollTo').mockImplementation(() => undefined)
+    Object.defineProperty(window, 'scrollY', { configurable: true, value: mobile ? 240 : 0 })
+    const { store } = await readyOwnerDirectoryStore()
+    render(<App store={store} />)
+    const main = screen.getByRole('main')
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie' }))
+    const sessionButton = await screen.findByRole('button', { name: /Desktop research session/ })
+    if (mobile) {Object.defineProperty(window, 'scrollY', { configurable: true, value: 240 })} else {main.scrollTop = 240}
+    fireEvent.click(sessionButton)
+
+    expect(new URLSearchParams(window.location.search).get('chatScroll')).toBe('240')
+    fireEvent.click(await screen.findByRole('button', { name: 'Wróć do rozmów' }))
+
+    if (mobile) {
+      await waitFor(() => expect(scrollWindow).toHaveBeenCalledWith({ top: 240 }))
+    } else {
+      await waitFor(() => expect(main.scrollTop).toBe(240))
+    }
   })
 
   it('forwards the Rozmowy chat query to the authoritative session search', async () => {

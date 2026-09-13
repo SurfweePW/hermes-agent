@@ -311,7 +311,7 @@ describe('WorkDirectory', () => {
     const { rerender } = render(<WorkDirectory {...unsupported} />)
 
     expect(screen.queryByRole('button', { name: 'Open original' })).toBeNull()
-    expect(screen.getByText('desktop-db / atlas / session-1')).toBeTruthy()
+    expect(screen.getByText('Szczegóły techniczne').closest('details')?.hasAttribute('open')).toBe(false)
     expect(screen.getByText(/Continue this conversation in its existing client/)).toBeTruthy()
     expect(screen.getByText('Please research launch timing.')).toBeTruthy()
 
@@ -339,7 +339,7 @@ describe('WorkDirectory', () => {
     render(<WorkDirectory {...routed} onOpenOriginal={undefined} />)
 
     expect(screen.queryByRole('button', { name: 'Open original' })).toBeNull()
-    expect(screen.getByText('desktop-db / atlas / session-1')).toBeTruthy()
+    expect(screen.getByText('Szczegóły techniczne').closest('details')?.hasAttribute('open')).toBe(false)
   })
 
   it('awaits native handoff and shows a safe fallback when it fails', async () => {
@@ -363,7 +363,7 @@ describe('WorkDirectory', () => {
 
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/could not open/i))
     expect(document.body.textContent).not.toContain('secret native detail')
-    expect(screen.getByText('desktop-db / atlas / session-1')).toBeTruthy()
+    expect(screen.getByText('Szczegóły techniczne').closest('details')?.hasAttribute('open')).toBe(false)
   })
 
   it('uses verified entity projections and Library relationship routes in project and session details', () => {
@@ -429,7 +429,7 @@ describe('WorkDirectory', () => {
 
     render(<WorkDirectory {...props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=history', { selectedSession: session, history: compressed, detailStatus: 'ready' })} />)
 
-    const disclosure = screen.getByRole('group')
+    const disclosure = screen.getAllByRole('group')[1]
     expect(screen.getByText('Compression summary')).toBeTruthy()
     expect(document.body.textContent).not.toContain('CONTEXT SUMMARY')
     fireEvent.click(screen.getByText('Compression summary'))
