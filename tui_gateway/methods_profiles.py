@@ -237,14 +237,29 @@ def _profile_ui_meta_fields(row: dict, profile_dir) -> None:
 @_profile_handler("profiles.list", 5061)
 def _(rid, params: dict) -> dict:
     """List Hermes profiles. ``include_sessions`` (default true) adds ``last_session`` /
-    ``worker_session`` / ``canonical_session`` so a roster paints previews without N calls."""
+    ``worker_session`` / ``canonical_session`` so a roster paints previews without N calls.
+    ``served_by_gateway`` is static routing capability, not live profile health."""
     from hermes_cli.profiles import list_profiles
+    from tui_gateway import server as gateway_server
+    from tui_gateway.companion_sessions import (
+        CompanionSessionsError,
+        _owner_authorized_profiles,
+    )
+
     include_sessions = is_truthy_value(params.get("include_sessions", True))
+    try:
+        served_profiles = _owner_authorized_profiles(gateway_server)
+    except CompanionSessionsError:
+        # A broken served-profile policy must not take the roster down: every client (desktop
+        # switcher, companion setup) lists profiles through this call. Unverifiable routing
+        # capability is reported as "not served" rather than assumed usable.
+        served_profiles = frozenset()
     out = []
     for p in list_profiles():
         row = {"name": p.name, "path": str(p.path), "is_default": bool(p.is_default), "model": p.model,
                "provider": p.provider, "description": p.description or "",
-               "display_name": p.display_name or "", "skill_count": p.skill_count or 0}
+               "display_name": p.display_name or "", "skill_count": p.skill_count or 0,
+               "served_by_gateway": p.name in served_profiles}
         if include_sessions:
             _profile_session_fields(row, p.path)
         _profile_ui_meta_fields(row, Path(str(p.path)))
