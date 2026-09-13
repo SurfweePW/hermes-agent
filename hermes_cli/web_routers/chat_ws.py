@@ -576,7 +576,7 @@ async def _accept_channel_ws(ws: WebSocket) -> Optional[str]:
         return None
     channel = _channel_or_close_code(ws)
     if not channel:
-        await ws.close(code=4400)
+        await _accept_and_close(ws, code=4400)
         return None
     await ws.accept()
     return channel
