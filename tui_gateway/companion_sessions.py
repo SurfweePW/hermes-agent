@@ -103,6 +103,7 @@ def _require_owner(owner_authorization: Any) -> str:
 
 def _owner_authorized_profiles(server) -> frozenset[str]:
     """Return the profiles explicitly served by this gateway."""
+    from gateway.config import GatewayConfig
     from hermes_cli.profiles import profiles_to_serve
 
     try:
@@ -119,24 +120,17 @@ def _owner_authorized_profiles(server) -> frozenset[str]:
         )
         if type(multiplex) is not bool:
             raise ValueError
-        allowlist = config.get(
-            "multiplex_profile_allowlist",
-            gateway.get("multiplex_profile_allowlist"),
-        )
-        if allowlist is not None and (
-            not isinstance(allowlist, list)
-            or any(not isinstance(value, str) for value in allowlist)
-        ):
-            raise ValueError
-        return frozenset(
-            name
-            for name, _home in profiles_to_serve(
-                multiplex=multiplex,
-                profile_allowlist=allowlist,
-            )
-        )
-    except Exception as exc:
+        resolved = GatewayConfig.from_dict(dict(config))
+    except (TypeError, ValueError) as exc:
         raise CompanionSessionsError("session profile unavailable", 4403) from exc
+
+    return frozenset(
+        name
+        for name, _home in profiles_to_serve(
+            multiplex=resolved.multiplex_profiles,
+            profile_allowlist=resolved.multiplex_profile_allowlist,
+        )
+    )
 
 
 def _as_of() -> str:

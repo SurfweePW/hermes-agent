@@ -23,6 +23,10 @@ from hermes_cli.companion_organization import (
 )
 from tui_gateway.companion_errors import OWNER_AUTHORIZATION_REQUIRED_CODE
 from tui_gateway.companion_projects import _backend_namespace
+from tui_gateway.companion_sessions import (
+    CompanionSessionsError,
+    _owner_authorized_profiles as _session_owner_authorized_profiles,
+)
 
 DEFAULT_PAGE_SIZE = 100
 MAX_PAGE_SIZE = 500
@@ -57,40 +61,10 @@ def _require_owner(owner_authorization) -> str:
 
 
 def _owner_authorized_profiles(server) -> frozenset[str]:
-    """Return the gateway's explicit profile scope without probing a request."""
-    from hermes_cli.profiles import profiles_to_serve
-
+    """Translate the shared served-profile policy into the Topics boundary."""
     try:
-        config = server._load_cfg()
-        if not isinstance(config, Mapping):
-            raise ValueError
-        gateway = config.get("gateway", {})
-        if gateway is None:
-            gateway = {}
-        if not isinstance(gateway, Mapping):
-            raise ValueError
-        multiplex = config.get(
-            "multiplex_profiles", gateway.get("multiplex_profiles", False)
-        )
-        if type(multiplex) is not bool:
-            raise ValueError
-        allowlist = config.get(
-            "multiplex_profile_allowlist",
-            gateway.get("multiplex_profile_allowlist"),
-        )
-        if allowlist is not None and (
-            not isinstance(allowlist, list)
-            or any(not isinstance(value, str) for value in allowlist)
-        ):
-            raise ValueError
-        return frozenset(
-            name
-            for name, _home in profiles_to_serve(
-                multiplex=multiplex,
-                profile_allowlist=allowlist,
-            )
-        )
-    except Exception as exc:
+        return _session_owner_authorized_profiles(server)
+    except CompanionSessionsError as exc:
         raise CompanionTopicsError("topics profile unavailable", 4403) from exc
 
 
