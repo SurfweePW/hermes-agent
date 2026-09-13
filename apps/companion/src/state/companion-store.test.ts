@@ -452,6 +452,33 @@ describe('CompanionStore setup and sessions', () => {
     expect(ownerAuth.ownerSignOut).not.toHaveBeenCalled()
   })
 
+  it('routes a 4401 close that arrives before the owner roster finishes loading', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket')
+    }
+    const roster = deferred<ProfilesListResult>()
+    const { store, gateways } = harness(null, undefined, undefined, ownerAuth, (gateway) => {
+      Object.assign(gateway, {
+        listProfiles: () => {
+          gateway.calls.push(['listProfiles'])
+
+          return roster.promise
+        }
+      })
+    })
+
+    void store.configureOwner({ baseUrl: 'https://gateway.test' })
+    await vi.waitFor(() => expect(gateways[0].calls).toContainEqual(['listProfiles']))
+
+    gateways[0].emitSocketClose(4401, 'owner lease expired')
+
+    expect(store.getSnapshot()).toMatchObject({
+      phase: 'setup', connectionMode: 'shared', teammates: [],
+      error: 'Sesja właściciela wygasła. Zaloguj się ponownie.'
+    })
+  })
+
   it('keeps a 4403 directory rejection profile-scoped without signing the owner out', async () => {
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),

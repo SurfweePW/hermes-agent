@@ -33,13 +33,24 @@ describe('Conversation', () => {
   })
 
   it.each([
-    ['Launch plan', 'Atlas · Launch plan'],
-    ['Bez projektu', 'Atlas · Bez projektu'],
-    ['Projekt nieznany', 'Atlas · Projekt nieznany']
-  ])('uses the session title as the semantic heading with agent and %s metadata', (projectLabel, metadata) => {
+    ['Launch plan'],
+    ['Bez projektu'],
+    ['Projekt nieznany']
+  ])('uses the session title as the semantic heading with agent and %s technical metadata', (projectLabel) => {
     render(<Conversation {...baseProps} projectLabel={projectLabel} sessionTitle="Named logical session" />)
     expect(screen.getByRole('heading', { name: 'Named logical session' })).toBeTruthy()
-    expect(screen.getByText(metadata)).toBeTruthy()
+    const details = screen.getByText('Szczegóły techniczne').closest('details')!
+    expect(details.hasAttribute('open')).toBe(false)
+    expect(screen.getByText('Atlas')).toBeTruthy()
+    expect(screen.getByText(projectLabel)).toBeTruthy()
+  })
+
+  it('shows a truthful working state and refresh time in the compact header', () => {
+    render(<Conversation {...baseProps} refreshedAt={new Date(2026, 8, 14, 12, 34).getTime()} sessionTitle="Bardzo długa nazwa rozmowy" turnStatus="streaming" />)
+
+    expect(screen.getByText('Pracuje…').className).toContain('conversation-state--working')
+    expect(screen.getByText('Zaktualizowano 12:34')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Bardzo długa nazwa rozmowy' }).closest('.conversation-head')).toBeTruthy()
   })
 
   it.each([
@@ -282,7 +293,7 @@ describe('Conversation', () => {
 
     expect(screen.getByText('terminal')).toBeTruthy()
     expect(screen.getByText('W toku')).toBeTruthy()
-    expect(screen.getAllByRole('group')).toHaveLength(3)
+    expect(screen.getAllByRole('group')).toHaveLength(4)
     expect(document.body.textContent).not.toContain('onerror=alert')
 
     fireEvent.click(screen.getByText('terminal'))

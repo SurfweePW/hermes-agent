@@ -106,11 +106,11 @@ describe('App', () => {
 
     render(<App store={store} />)
 
-    expect(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 1' })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 1' })).toHaveLength(1)
     fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 1' })[0])
     expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: /Akcje w aktywnych rozmowach/ })).toBeNull()
-    expect(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 1' })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 1' })).toHaveLength(1)
   })
 
   it('labels distinct durable and runtime decisions, preserves their badge count, and deep-links the runtime request', async () => {
@@ -128,7 +128,7 @@ describe('App', () => {
 
     render(<App store={store} />)
 
-    expect(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 2' })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 2' })).toHaveLength(1)
     fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 2' })[0])
     expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /^Akcje w aktywnych rozmowach/ })).toBeTruthy()
@@ -209,34 +209,34 @@ describe('App', () => {
     expect(store.work.getSnapshot().sources.find((source) => source.profile === 'atlas')?.status).toBe('error')
   })
 
-  it('refreshes an open directory on foreground return without duplicating work refreshes', async () => {
+  it('refreshes only the visible directory on foreground return', async () => {
     const store = await readyDirectoryStore()
     window.history.replaceState({}, '', '/?view=work')
     const workRefresh = vi.spyOn(store.work, 'refresh')
     const directoryRefresh = vi.spyOn(store.directory, 'refresh')
     render(<App store={store} />)
     fireEvent(document, new Event('visibilitychange'))
-    expect(workRefresh).toHaveBeenCalledOnce()
-    expect(directoryRefresh).toHaveBeenCalledOnce()
+    await waitFor(() => expect(directoryRefresh).toHaveBeenCalledOnce())
+    expect(workRefresh).not.toHaveBeenCalled()
   })
 
-  it('refreshes an open directory within thirty seconds and not while hidden', async () => {
+  it('refreshes an idle open directory within twenty seconds and not while hidden', async () => {
     vi.useFakeTimers()
     const store = await readyDirectoryStore()
     window.history.replaceState({}, '', '/?view=work')
     const directoryRefresh = vi.spyOn(store.directory, 'refresh')
     render(<App store={store} />)
 
-    vi.advanceTimersByTime(30_000)
-    expect(directoryRefresh).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(directoryRefresh).toHaveBeenCalledTimes(2)
     const visibility = vi.spyOn(document, 'visibilityState', 'get').mockReturnValue('hidden')
-    vi.advanceTimersByTime(30_000)
-    expect(directoryRefresh).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(directoryRefresh).toHaveBeenCalledTimes(2)
     visibility.mockRestore()
     vi.useRealTimers()
   })
 
-  it('refreshes every persisted catalog without moving keyboard focus', async () => {
+  it('refreshes the visible persisted catalog without moving keyboard focus', async () => {
     vi.useFakeTimers()
     const store = await readyDirectoryStore()
     const workRefresh = vi.spyOn(store.work, 'refresh')
@@ -246,10 +246,10 @@ describe('App', () => {
     const navigation = screen.getAllByRole('button', { name: 'Rozmowy' })[0]
     navigation.focus()
 
-    vi.advanceTimersByTime(30_000)
-    expect(workRefresh).toHaveBeenCalledOnce()
-    expect(directoryRefresh).toHaveBeenCalledOnce()
-    expect(attentionRefresh).toHaveBeenCalledOnce()
+    await vi.advanceTimersByTimeAsync(20_000)
+    expect(workRefresh).not.toHaveBeenCalled()
+    expect(directoryRefresh).toHaveBeenCalledTimes(2)
+    expect(attentionRefresh).not.toHaveBeenCalled()
     expect(document.activeElement).toBe(navigation)
     vi.useRealTimers()
   })
@@ -411,8 +411,8 @@ describe('App', () => {
     expect(screen.getByRole('heading', { name: 'Hermes Companion' })).toBeTruthy()
     expect(screen.getAllByText('Atlas').length).toBeGreaterThan(0)
     expect(screen.getByRole('navigation', { name: 'Główna nawigacja' })).toBeTruthy()
-    expect(screen.getByRole('navigation', { name: 'Nawigacja mobilna' })).toBeTruthy()
-    expect(screen.getAllByLabelText('Profil: użytkownik Companiona')).toHaveLength(2)
+    expect(screen.queryByRole('navigation', { name: 'Nawigacja mobilna' })).toBeNull()
+    expect(screen.getAllByLabelText('Profil: użytkownik Companiona')).toHaveLength(1)
     expect(screen.getByText('Profile')).toBeTruthy()
     expect(screen.getByText('Companion gotowy')).toBeTruthy()
     expect(screen.getByText(/Profile: 4/)).toBeTruthy()
@@ -421,6 +421,25 @@ describe('App', () => {
     expect(document.querySelector('.activity-rail')).toBeNull()
     expect(document.querySelector('.app-shell')?.classList.contains('app-shell--two-column')).toBe(true)
     expect(screen.queryByRole('button', { name: 'Search' })).toBeNull()
+  })
+
+  it('opens an overlay drawer, closes it with Escape, and restores menu focus', async () => {
+    render(<App store={await readyDirectoryStore()} />)
+    const menu = screen.getByRole('button', { name: 'Otwórz menu' })
+
+    fireEvent.click(menu)
+    const drawer = screen.getByRole('dialog', { name: 'Menu aplikacji' })
+    expect(drawer).toBeTruthy()
+    await waitFor(() => expect(drawer.querySelector('button')).toBe(document.activeElement))
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(screen.queryByRole('dialog', { name: 'Menu aplikacji' })).toBeNull()
+    await waitFor(() => expect(menu).toBe(document.activeElement))
+
+    fireEvent.click(menu)
+    fireEvent.click(screen.getByRole('button', { name: 'Ustawienia' }))
+    expect(screen.queryByRole('dialog', { name: 'Menu aplikacji' })).toBeNull()
+    expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Ustawienia')
   })
 
   it.each([
@@ -503,8 +522,8 @@ describe('App', () => {
     const focusMain = vi.spyOn(HTMLElement.prototype, 'focus')
     render(<App store={await readyDirectoryStore()} />)
     const chatsButtons = screen.getAllByRole('button', { name: 'Rozmowy' })
-    expect(screen.getAllByRole('button', { name: /^Decyzje/ })).toHaveLength(2)
-    expect(screen.getAllByRole('button', { name: 'Pliki' })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: /^Decyzje/ })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Pliki' })).toHaveLength(1)
     expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Rozmowy')
     expect(chatsButtons[0].getAttribute('aria-current')).toBe('page')
     scrollWindow.mockClear()
@@ -575,13 +594,13 @@ describe('App', () => {
     render(<App store={store} />)
     const main = screen.getByRole('main')
 
-    fireEvent.click(screen.getByRole('tab', { name: 'ostatnie' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie rozmowy' }))
     const sessionButton = await screen.findByRole('button', { name: /Desktop research session/ })
     if (mobile) {Object.defineProperty(window, 'scrollY', { configurable: true, value: 240 })} else {main.scrollTop = 240}
     fireEvent.click(sessionButton)
 
     expect(new URLSearchParams(window.location.search).get('chatScroll')).toBe('240')
-    fireEvent.click(await screen.findByRole('button', { name: 'Wróć do rozmów' }))
+    fireEvent.click(await screen.findByRole('button', { name: /Wróć do rozmów/ }))
 
     if (mobile) {
       await waitFor(() => expect(scrollWindow).toHaveBeenCalledWith({ top: 240 }))
@@ -738,7 +757,7 @@ describe('App', () => {
     const continuation = vi.spyOn(gateway, 'continueCompanionSession')
     render(<App store={store} />)
 
-    fireEvent.click(screen.getByRole('tab', { name: 'ostatnie' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie rozmowy' }))
     fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
     expect(await screen.findByText('Synthetic request for read-only QA.')).toBeTruthy()
     expect(history).toHaveBeenCalledWith('atlas', 'synthetic-session-1', undefined, 'fixture-mac-mini')
@@ -760,7 +779,7 @@ describe('App', () => {
     const continuation = vi.spyOn(gateway, 'continueCompanionSession').mockRejectedValueOnce(new Error('gateway rejected API_KEY=synthetic-secret cookie=synthetic-cookie token=synthetic-token'))
     render(<App store={store} />)
 
-    fireEvent.click(screen.getByRole('tab', { name: 'ostatnie' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie rozmowy' }))
     fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
     fireEvent.change(screen.getByLabelText('Wiadomość do Atlas'), { target: { value: '  preserve this  ' } })
     fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
@@ -781,7 +800,7 @@ describe('App', () => {
     const continuation = vi.spyOn(gateway, 'continueCompanionSession')
     render(<App store={store} />)
 
-    fireEvent.click(screen.getByRole('tab', { name: 'ostatnie' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie rozmowy' }))
     fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
     fireEvent.change(screen.getByLabelText('Wiadomość do Atlas'), { target: { value: 'Pierwsza wiadomość' } })
     fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
@@ -802,11 +821,11 @@ describe('App', () => {
     const { store } = await readyOwnerDirectoryStore()
     render(<App store={store} />)
 
-    fireEvent.click(screen.getByRole('tab', { name: 'ostatnie' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie rozmowy' }))
     fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
     const composer = await screen.findByLabelText('Wiadomość do Atlas')
     fireEvent.change(composer, { target: { value: 'Nie wysyłaj jeszcze' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Wróć do rozmów' }))
+    fireEvent.click(screen.getByRole('button', { name: /Wróć do rozmów/ }))
     fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
 
     expect((await screen.findByLabelText('Wiadomość do Atlas') as HTMLTextAreaElement).value).toBe('Nie wysyłaj jeszcze')

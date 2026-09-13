@@ -186,7 +186,7 @@ describe('WorkDirectory', () => {
     render(<ChatsDirectory {...listing} draft="unsent session draft" onDraftChange={onDraftChange} onOpenSession={vi.fn()} />)
 
     expect((screen.getByLabelText('Wiadomość do Atlas') as HTMLTextAreaElement).value).toBe('unsent session draft')
-    fireEvent.click(screen.getByRole('button', { name: 'Wróć do rozmów' }))
+    fireEvent.click(screen.getByRole('button', { name: /Wróć do rozmów/ }))
     expect(listing.onBack).toHaveBeenCalledOnce()
     expect(onDraftChange).not.toHaveBeenCalled()
   })
@@ -295,8 +295,10 @@ describe('WorkDirectory', () => {
     const listing = props('chatView=recent', { sessions: [untitled] })
     const view = render(<ChatsDirectory {...listing} onOpenSession={vi.fn()} />)
 
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Ostatnie rozmowy', 'Projekty'])
+    expect(screen.getByRole('tab', { name: 'Ostatnie rozmowy' }).getAttribute('aria-selected')).toBe('true')
     expect(screen.getByText('Istniejące zapisane rozmowy')).toBeTruthy()
-    expect(screen.getByRole('button', { name: /Nazwa rozmowy niedostępna/ }).textContent).toContain('Ukończona')
+    expect(screen.getByRole('button', { name: /Nazwa rozmowy niedostępna/ }).textContent).toContain('Zakończone')
     fireEvent.click(screen.getByRole('button', { name: /Nazwa rozmowy niedostępna/ }))
 
     view.rerender(<WorkDirectory {...props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db', { selectedSession: untitled, history, detailStatus: 'ready' })} />)
@@ -347,7 +349,7 @@ describe('WorkDirectory', () => {
     const { rerender } = render(<WorkDirectory {...unsupported} />)
 
     expect(screen.queryByRole('button', { name: 'Otwórz źródło' })).toBeNull()
-    expect(screen.getByText('Szczegóły techniczne').closest('details')?.hasAttribute('open')).toBe(false)
+    expect(screen.getAllByText('Szczegóły techniczne')[0].closest('details')?.hasAttribute('open')).toBe(false)
     expect(screen.getByText(/Kontynuuj tę rozmowę w dotychczasowym kliencie/)).toBeTruthy()
     expect(screen.getByText('Please research launch timing.')).toBeTruthy()
 
@@ -375,7 +377,7 @@ describe('WorkDirectory', () => {
     render(<WorkDirectory {...routed} onOpenOriginal={undefined} />)
 
     expect(screen.queryByRole('button', { name: 'Otwórz źródło' })).toBeNull()
-    expect(screen.getByText('Szczegóły techniczne').closest('details')?.hasAttribute('open')).toBe(false)
+    expect(screen.getAllByText('Szczegóły techniczne')[0].closest('details')?.hasAttribute('open')).toBe(false)
   })
 
   it('awaits native handoff and shows a safe fallback when it fails', async () => {
@@ -399,7 +401,7 @@ describe('WorkDirectory', () => {
 
     await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/nie mógł otworzyć/i))
     expect(document.body.textContent).not.toContain('secret native detail')
-    expect(screen.getByText('Szczegóły techniczne').closest('details')?.hasAttribute('open')).toBe(false)
+    expect(screen.getAllByText('Szczegóły techniczne')[0].closest('details')?.hasAttribute('open')).toBe(false)
   })
 
   it('uses verified entity projections and Library relationship routes in project and session details', () => {
@@ -465,7 +467,7 @@ describe('WorkDirectory', () => {
 
     render(<WorkDirectory {...props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=history', { selectedSession: session, history: compressed, detailStatus: 'ready' })} />)
 
-    const disclosure = screen.getAllByRole('group')[1]
+    const disclosure = screen.getAllByRole('group')[2]
     expect(screen.getByText('Compression summary')).toBeTruthy()
     expect(document.body.textContent).not.toContain('CONTEXT SUMMARY')
     fireEvent.click(screen.getByText('Compression summary'))
@@ -487,7 +489,7 @@ describe('WorkDirectory', () => {
 
     render(<ChatsDirectory {...props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', { selectedSession: session, history: unsafeHistory, detailStatus: 'ready' })} onOpenSession={vi.fn()} />)
 
-    expect(screen.getAllByRole('group')).toHaveLength(3)
+    expect(screen.getAllByRole('group')).toHaveLength(5)
     expect(document.body.textContent).not.toContain('<script>')
     expect(document.querySelector('img, script, svg')).toBeNull()
 

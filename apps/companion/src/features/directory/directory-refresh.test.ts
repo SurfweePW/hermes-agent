@@ -59,6 +59,43 @@ describe('installDirectoryRefreshLifecycle', () => {
     lifecycle.destroy()
   })
 
+  it('refreshes only the visible surface on reconnect and uses active and idle intervals without refreshing while typing', async () => {
+    vi.useFakeTimers()
+    let active = true
+    let typing = false
+    const refreshVisible = vi.fn().mockResolvedValue(undefined)
+    const onRefreshed = vi.fn()
+    const lifecycle = installDirectoryRefreshLifecycle({
+      isReady: () => true,
+      refreshWork: vi.fn(),
+      refreshDirectory: vi.fn(),
+      refreshAttention: vi.fn(),
+      refreshLibrary: vi.fn(),
+      refreshVisible,
+      shouldRefresh: () => !typing,
+      intervalMs: () => active ? 5_000 : 20_000,
+      onRefreshed
+    })
+
+    await vi.advanceTimersByTimeAsync(5_000)
+    expect(refreshVisible).toHaveBeenCalledOnce()
+    expect(onRefreshed).toHaveBeenCalledOnce()
+
+    typing = true
+    active = false
+    window.dispatchEvent(new Event('online'))
+    expect(refreshVisible).toHaveBeenCalledOnce()
+    vi.advanceTimersByTime(20_000)
+    expect(refreshVisible).toHaveBeenCalledOnce()
+
+    typing = false
+    window.dispatchEvent(new Event('online'))
+    await vi.runAllTicks()
+    await Promise.resolve()
+    expect(refreshVisible).toHaveBeenCalledTimes(2)
+    lifecycle.destroy()
+  })
+
   it('supports an awaited explicit refresh and records thirty-second freshness', async () => {
     vi.useFakeTimers()
     const refreshDirectory = vi.fn().mockResolvedValue(undefined)

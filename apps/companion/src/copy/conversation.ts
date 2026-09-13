@@ -19,6 +19,19 @@ export const conversationCopy = {
     connected: 'Połączono',
     disconnected: 'Rozłączono'
   },
+  state: {
+    working: 'Pracuje…',
+    waiting: 'Czeka na Ciebie',
+    completed: (time: string) => `Zakończone · ${time}`,
+    error: 'Błąd',
+    unknown: 'Stan nieznany',
+    updated: (time: string) => `Zaktualizowano ${time}`
+  },
+  technical: {
+    profile: 'Profil',
+    project: 'Projekt',
+    connection: 'Połączenie'
+  },
   backToSessions: (name: string) => `Wróć do rozmów: ${name}`,
   empty: (name: string) => `Rozpocznij rozmowę z ${name}.`,
   composer: {

@@ -47,6 +47,7 @@ export const appCopy = {
     needs: 'Decyzje',
     work: 'Rozmowy',
     library: 'Pliki',
+    settings: 'Ustawienia',
     conversation: 'Rozmowa',
     details: 'Profil',
     recovery: 'Odzyskiwanie'
@@ -54,9 +55,13 @@ export const appCopy = {
   navigation: {
     main: 'Główna nawigacja',
     mobile: 'Nawigacja mobilna',
+    drawer: 'Menu aplikacji',
+    openDrawer: 'Otwórz menu',
+    closeDrawer: 'Zamknij menu',
     conversations: 'Rozmowy',
     decisions: 'Decyzje',
     files: 'Pliki',
+    settings: 'Ustawienia',
     badgeLabel: (label: string, count: string) => `${label}, pozycji: ${count}`
   },
   profile: {
@@ -74,5 +79,10 @@ export const appCopy = {
     title: 'Wybierz profil',
     detail: 'Otwórz profil z listy bocznej.',
     back: 'Wróć do rozmów'
+  },
+  settings: {
+    kicker: 'Połączenie i konto',
+    title: 'Ustawienia',
+    detail: 'Zarządzaj logowaniem właściciela i bieżącym połączeniem z gatewayem.'
   }
 } as const

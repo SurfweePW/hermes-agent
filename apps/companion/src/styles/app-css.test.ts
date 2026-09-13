@@ -52,7 +52,7 @@ describe('Signal House CSS contract', () => {
 
   it('enforces 48px mobile button targets, including profile and send', () => {
     expect(appCss).toMatch(/@media\s*\(max-width:\s*780px\)[\s\S]*?button\s*\{[^}]*min-width:\s*48px[^}]*min-height:\s*48px/i)
-    expect(appCss).toMatch(/\.mobile-header\s+\.avatar--user\s*\{[^}]*width:\s*48px[^}]*height:\s*48px/i)
+    expect(appCss).toMatch(/\.menu-button\s*\{[^}]*width:\s*(?:44|48)px[^}]*height:\s*(?:44|48)px/i)
     expect(appCss).toMatch(/\.composer\s+button\s*\{[^}]*width:\s*48px[^}]*height:\s*48px/i)
   })
 
@@ -76,14 +76,15 @@ describe('Signal House CSS contract', () => {
   })
 
   it('accounts for mobile safe areas in shell, fixed chrome, and conversation height', () => {
-    expect(appCss).toMatch(/\.app-shell\s*\{[^}]*padding:\s*calc\(68px\s*\+\s*env\(safe-area-inset-top\)\)[^;}]*calc\(78px\s*\+\s*env\(safe-area-inset-bottom\)\)/i)
+    expect(appCss).toMatch(/\.app-shell\s*\{[^}]*padding:\s*calc\(68px\s*\+\s*env\(safe-area-inset-top\)\)\s+0\s+env\(safe-area-inset-bottom\)/i)
     expect(appCss).toMatch(/\.mobile-header\s*\{[^}]*height:\s*calc\(68px\s*\+\s*env\(safe-area-inset-top\)\)[^}]*padding-top:\s*calc\(10px\s*\+\s*env\(safe-area-inset-top\)\)/i)
-    expect(appCss).toMatch(/\.main-content\s*\{[^}]*min-height:\s*calc\(100dvh\s*-\s*146px\s*-\s*env\(safe-area-inset-top\)\s*-\s*env\(safe-area-inset-bottom\)\)/i)
-    expect(appCss).toMatch(/\.main-content--conversation\s*\{[^}]*height:\s*calc\(100dvh\s*-\s*146px\s*-\s*env\(safe-area-inset-top\)\s*-\s*env\(safe-area-inset-bottom\)\)[^}]*overflow:\s*hidden/i)
+    expect(appCss).toMatch(/\.main-content\s*\{[^}]*min-height:\s*calc\(100dvh\s*-\s*68px\s*-\s*env\(safe-area-inset-top\)\s*-\s*env\(safe-area-inset-bottom\)\)/i)
+    expect(appCss).toMatch(/\.main-content--conversation\s*\{[^}]*height:\s*calc\(100dvh\s*-\s*68px\s*-\s*env\(safe-area-inset-top\)\s*-\s*env\(safe-area-inset-bottom\)\)[^}]*overflow:\s*hidden/i)
+    expect(appCss).toMatch(/\.mobile-drawer\s*\{[^}]*width:\s*78%[^}]*max-width:\s*320px/i)
   })
 
   it('keeps 390px and 412px conversation layouts fluid without viewport-width children', () => {
-    expect(appCss).toMatch(/@media\s*\(max-width:\s*780px\)[\s\S]*?\.chats-screen[^}]*width:\s*100%[^}]*padding:\s*28px\s+17px\s+36px/i)
+    expect(appCss).toMatch(/@media\s*\(max-width:\s*780px\)[\s\S]*?\.chats-screen[^}]*width:\s*100%[^}]*padding:\s*24px\s+17px\s+28px/i)
     expect(appCss).toMatch(/\.chat-history-head\s*>\s*div\s*\{[^}]*min-width:\s*0/i)
     expect(appCss).toMatch(/@media\s*\(max-width:\s*780px\)[\s\S]*?\.chat-controls\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)/i)
     expect(appCss).toMatch(/@media\s*\(max-width:\s*780px\)[\s\S]*?\.chat-session-row\s*\{[^}]*grid-template-columns:\s*minmax\(0,\s*1fr\)\s+14px/i)

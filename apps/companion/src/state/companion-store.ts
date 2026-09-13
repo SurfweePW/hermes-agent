@@ -607,6 +607,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
   let pendingSavedToken: Promise<string | undefined> | null = null
   let secretMutationTail: Promise<void> = Promise.resolve()
   let connectionMode: CompanionConnectionMode = 'shared'
+  let connectionAttemptMode: CompanionConnectionMode = 'shared'
   let ownerScope: string | null = null
   let continuityRetry: ContinuityRetryMetadata | null = readContinuityRetry(storage)
   let persistedContinuationTarget: CompanionSessionTarget | null = null
@@ -1104,7 +1105,8 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     replaced?.close()
     const client = gatewayFactory({
       onSocketClose: (event) => {
-        if (event.code !== 4401 || connectionMode !== 'owner' || connectionGeneration !== generation) {return false}
+        if (event.code !== 4401 || connectionGeneration !== generation) {return false}
+        if (connectionMode !== 'owner' && connectionAttemptMode !== 'owner') {return false}
 
         handleOwnerAuthorizationLost(new JsonRpcGatewayError('Owner WebSocket authorization lost', {
           closeCode: event.code,
@@ -1367,6 +1369,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     }
 
     publish({ phase, error: null })
+    connectionAttemptMode = mode
 
     const wsUrl = mode === 'owner'
       ? await ownerAuth?.ownerWebSocketUrl({ baseUrl: snapshot.baseUrl })

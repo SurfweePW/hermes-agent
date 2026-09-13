@@ -4,7 +4,10 @@ export interface DirectoryRefreshLifecycleOptions {
   refreshDirectory(): Promise<unknown>
   refreshAttention(): Promise<unknown>
   refreshLibrary(): void
-  intervalMs?: number
+  refreshVisible?(): Promise<unknown> | unknown
+  shouldRefresh?(): boolean
+  intervalMs?: number | (() => number)
+  onRefreshed?(at: number): void
   onBackendUpdateRequired?(message: string): void
 }
 
@@ -26,7 +29,7 @@ const updateRequired = (error: unknown): boolean => {
   return error instanceof Error && /method not found|unknown method|-32601/i.test(error.message)
 }
 
-/** Install one visible-only refresh loop for every persisted Companion catalog. */
+/** Install one coalesced refresh loop for the currently visible Companion surface. */
 export function installDirectoryRefreshLifecycle({
   isReady,
   refreshWork,
@@ -34,27 +37,29 @@ export function installDirectoryRefreshLifecycle({
   refreshAttention,
   refreshLibrary,
   intervalMs = 30_000,
+  refreshVisible,
+  shouldRefresh = () => true,
+  onRefreshed,
   onBackendUpdateRequired
-}: DirectoryRefreshLifecycleOptions): { refresh(): Promise<RefreshResult>; isFresh(): boolean; destroy(): void } {
+}: DirectoryRefreshLifecycleOptions): { refresh(): Promise<RefreshResult>; reschedule(): void; isFresh(): boolean; destroy(): void } {
   let refreshInFlight: Promise<RefreshResult> | null = null
   let destroyed = false
   let lastDirectoryRefreshAt: number | null = null
   let updateNoticeSent = false
 
   const refresh = (): Promise<RefreshResult> => {
-    if (destroyed || document.visibilityState === 'hidden' || !isReady()) {return Promise.resolve('skipped')}
+    if (destroyed || document.visibilityState === 'hidden' || !isReady() || !shouldRefresh()) {return Promise.resolve('skipped')}
     if (refreshInFlight) {return refreshInFlight}
-    const operation = Promise.allSettled([
-      refreshWork(),
-      refreshDirectory(),
-      refreshAttention(),
-      Promise.resolve(refreshLibrary())
-    ]).then((results): RefreshResult => {
-      const directory = results[1]
+    const operations = refreshVisible
+      ? [Promise.resolve().then(refreshVisible)]
+      : [refreshWork(), refreshDirectory(), refreshAttention(), Promise.resolve(refreshLibrary())]
+    const operation = Promise.allSettled(operations).then((results): RefreshResult => {
+      const directory = refreshVisible ? results[0] : results[1]
 
       if (directory.status === 'fulfilled') {
         lastDirectoryRefreshAt = Date.now()
         updateNoticeSent = false
+        onRefreshed?.(lastDirectoryRefreshAt)
       } else if (updateRequired(directory.reason) && !updateNoticeSent) {
         updateNoticeSent = true
         onBackendUpdateRequired?.('Backend update required for the Companion directory.')
@@ -73,17 +78,27 @@ export function installDirectoryRefreshLifecycle({
   document.addEventListener('visibilitychange', refresh)
   window.addEventListener('online', refresh)
   window.addEventListener('focus', refresh)
-  const interval = window.setInterval(refresh, intervalMs)
+  let timer = 0
+  const schedule = () => {
+    if (destroyed) {return}
+    window.clearTimeout(timer)
+    const delay = typeof intervalMs === 'function' ? intervalMs() : intervalMs
+    timer = window.setTimeout(() => {
+      void refresh().finally(schedule)
+    }, delay)
+  }
+  schedule()
 
   return {
     refresh,
-    isFresh: () => lastDirectoryRefreshAt !== null && Date.now() - lastDirectoryRefreshAt <= intervalMs,
+    reschedule: schedule,
+    isFresh: () => lastDirectoryRefreshAt !== null && Date.now() - lastDirectoryRefreshAt <= (typeof intervalMs === 'function' ? intervalMs() : intervalMs),
     destroy() {
       destroyed = true
       document.removeEventListener('visibilitychange', refresh)
       window.removeEventListener('online', refresh)
       window.removeEventListener('focus', refresh)
-      window.clearInterval(interval)
+      window.clearTimeout(timer)
     }
   }
 }

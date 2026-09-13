@@ -51,6 +51,7 @@ export const directoryCopy = {
   profileFallback: 'Profil',
   countUnknown: (noun: string) => `Liczba (${noun}) nieznana`,
   chrome: {
+    recentConversations: 'Ostatnie rozmowy',
     kicker: 'Katalogi źródeł',
     title: 'Praca',
     lede: 'Przeglądaj zapisane rekordy źródłowe, także puste i niepowiązane. Samo przeglądanie nie aktywuje projektu ani nie wznawia rozmowy.',
@@ -158,6 +159,7 @@ export const directoryCopy = {
   details: {
     readOnly: 'Szczegóły źródła tylko do odczytu',
     membershipCoverage: 'Zakres przypisania',
+    historyCoverage: 'Zakres historii',
     overview: 'Przegląd',
     sessions: 'Rozmowy',
     topics: 'Tematy',

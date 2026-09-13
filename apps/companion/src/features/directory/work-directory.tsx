@@ -7,6 +7,7 @@ import type { CompanionOriginalRoute } from '../../gateway/original-route'
 import type { CompanionProject, CompanionSession, CompanionSessionTarget } from '../../gateway/types'
 import type { ConversationCreationResult } from '../../state/companion-store'
 import type { ProfileSelectorOption } from '../../state/profile-selector'
+import { deriveConversationState, formatConversationTime } from '../conversation/conversation-state'
 import { MessageComposer } from '../conversation/message-composer'
 import { MessageContent } from '../conversation/message-content'
 import { PersistedConversationList } from '../conversation/persisted-conversation-list'
@@ -44,6 +45,7 @@ const chatProfileStorageKey = 'hermes.companion.chats.profile'
 const chatKey = (source: string, profile: string, id: string) => JSON.stringify([source, profile, id])
 const profileLabel = (profile: string) => profile ? profile[0].toLocaleUpperCase() + profile.slice(1) : directoryCopy.profileFallback
 const tabLabel: Record<string, string> = {
+  recent: directoryCopy.chrome.recentConversations,
   topics: directoryCopy.chrome.topics,
   projects: directoryCopy.chrome.projects,
   sessions: directoryCopy.chrome.sessions,
@@ -153,7 +155,7 @@ export function ChatsDirectory(props: ChatsDirectoryProps) {
   const selectableProfiles = profileOptions.filter((option) => option.selectable).map((option) => option.profile)
   const requestedProfile = props.params.get('agent') ?? safeStoredChatProfile()
   const profile = requestedProfile && selectableProfiles.includes(requestedProfile) ? requestedProfile : 'all'
-  const mode = enumParam(props.params, 'chatView', ['projects', 'recent'] as const, 'projects')
+  const mode = enumParam(props.params, 'chatView', ['projects', 'recent'] as const, 'recent')
   const query = props.params.get('chatQ') ?? ''
   const legacySession = props.params.get('section') === 'sessions'
   const focusedId = props.params.get('chat') ?? (legacySession ? props.params.get('focus') : null)
@@ -257,11 +259,13 @@ export function ChatsDirectory(props: ChatsDirectoryProps) {
     const item = selectedMatches ? selectedSession : props.snapshot.sessions.find((session) => session.id === focusedId && session.profile === focusedProfile && session.source === focusedSource)
 
     const project = item?.project === null ? 'Bez projektu' : item?.project?.title ?? 'Projekt nieznany'
+    const state = deriveConversationState({ sessionStatus: item?.status, completedAt: item?.last_active })
+    const refreshedTime = formatConversationTime(props.snapshot.history?.coverage.freshness)
 
     return <section aria-labelledby="saved-conversation-title" className="chats-screen chats-screen--conversation" ref={rootRef}>
-      <header className="chat-history-head"><button aria-label="Wróć do rozmów" className="conversation-back" onClick={goBack} type="button">←</button><div><h2 id="saved-conversation-title" title={item?.title || conversationCopy.fallbackSessionTitle}>{item?.title || conversationCopy.fallbackSessionTitle}</h2><p className="kicker">{profileLabel(focusedProfile)} · {project}</p></div></header>
+      <header className="chat-history-head"><button aria-label={conversationCopy.backToSessions(profileLabel(focusedProfile))} className="conversation-back" onClick={goBack} type="button">←</button><div><h2 id="saved-conversation-title" title={item?.title || conversationCopy.fallbackSessionTitle}>{item?.title || conversationCopy.fallbackSessionTitle}</h2></div><span className={`conversation-state conversation-state--${state.kind}`}>{state.label}</span>{refreshedTime && <time className="conversation-updated" dateTime={props.snapshot.history?.coverage.freshness ?? undefined}>{conversationCopy.state.updated(refreshedTime)}</time>}</header>
       <div className="chat-history-body">
-        {props.snapshot.history ? <><DetailCoverage coverage={props.snapshot.history.coverage} label="Zakres historii" /><History onLoadOlder={props.onLoadOlderHistory} snapshot={props.snapshot} /></> : <Unavailable copy={props.snapshot.detailMessage ?? 'Pobieramy istniejącą historię z autorytatywnego źródła.'} title={props.snapshot.detailStatus === 'error' ? 'Nie udało się wczytać historii' : 'Ładowanie historii…'} />}
+        {props.snapshot.history ? <><TechnicalDetails><p>{profileLabel(focusedProfile)} · {project}</p><DetailCoverage coverage={props.snapshot.history.coverage} label={directoryCopy.details.historyCoverage} /></TechnicalDetails><History onLoadOlder={props.onLoadOlderHistory} snapshot={props.snapshot} /></> : <Unavailable copy={props.snapshot.detailMessage ?? 'Pobieramy istniejącą historię z autorytatywnego źródła.'} title={props.snapshot.detailStatus === 'error' ? 'Nie udało się wczytać historii' : 'Ładowanie historii…'} />}
       </div>
       <MessageComposer disabled={!props.onSubmitSession} draft={draft} hint="Enter dodaje nową linię · Ctrl/Cmd+Enter wysyła" id="chat-session-draft" label={`Wiadomość do ${profileLabel(focusedProfile)}`} onDraftChange={(value) => props.onDraftChange?.(value)} onSubmit={() => {if (item) {submitSession(item)}}} placeholder={`Wiadomość do ${profileLabel(focusedProfile)}…`} sendLabel="Wyślij wiadomość" submitting={submitting} />
       {submitError && <p className="chat-composer-status" role="alert">{submitError}</p>}
@@ -286,7 +290,7 @@ export function ChatsDirectory(props: ChatsDirectoryProps) {
     <div className="directory-heading"><div><p className="kicker">Istniejące zapisane rozmowy</p><h2 id="chats-title">Rozmowy</h2><p className="screen-lede">Otwórz historię bez tworzenia nowej rozmowy i bez wznawiania jej przy samym wejściu.</p></div><button className="button" onClick={props.onRefresh} type="button">Odśwież</button></div>
     {mobileLayout && props.onCreateConversation && <MobileConversationEntry draft={draft} onCreate={props.onCreateConversation} onDraftChange={(value) => props.onDraftChange?.(value)} profileOptions={profileOptions} />}
     <div className="chat-controls"><label>Rozmawiaj z<select aria-label="Rozmawiaj z" onChange={(event) => { const value = event.target.value; persistChatProfile(value); setParams({ agent: value === 'all' ? null : value }) }} value={profile}><option value="all">Wszystkie</option>{profileOptions.map((option) => <option disabled={!option.selectable} key={option.profile} value={option.profile}>{option.optionLabel}</option>)}</select></label><label className="chat-search">Szukaj rozmów<input aria-label="Szukaj rozmów" onChange={(event) => setParams({ chatQ: event.target.value || null })} placeholder="Nazwa rozmowy lub projektu" type="search" value={query} /></label></div>
-    <TabList className="chat-view-tabs" idPrefix="chat-view" label="Widok rozmów" onSelect={(value) => setParams({ chatView: value === 'projekty' ? 'projects' : 'recent' })} selected={mode === 'projects' ? 'projekty' : 'ostatnie'} tabs={['projekty', 'ostatnie']} />
+    <TabList className="chat-view-tabs segmented-tabs" idPrefix="chat-view" label="Widok rozmów" onSelect={(value) => setParams({ chatView: value })} selected={mode} tabs={['recent', 'projects']} />
     {mode === 'recent' ? <ChatSessionList allProfiles={profile === 'all'} emptyCopy={emptyCopy} emptyTitle={emptyTitle} items={matchingSessions} onOpen={openSession} /> : <div className="chat-project-list">
       {matchingProjects.map((project) => {
         const key = chatKey(project.source, project.profile, project.id)
@@ -308,8 +312,9 @@ export function ChatsDirectory(props: ChatsDirectoryProps) {
 
 function ChatSessionRow({ item, allProfiles, onOpen }: { item: CompanionSession; allProfiles: boolean; onOpen(): void }) {
   const preview = item.message_count === null ? 'Podgląd wiadomości niedostępny' : item.message_count === 0 ? 'Pusta zapisana rozmowa' : `${item.message_count} wiadomości · ${item.origin ?? 'źródło niezgłoszone'}`
+  const state = deriveConversationState({ sessionStatus: item.status, completedAt: item.last_active })
 
-  return <button className="chat-session-row" onClick={onOpen} type="button"><span><strong>{item.title || conversationCopy.fallbackSessionTitle}</strong><small>{preview}</small></span><span><small>{entityStatusLabel(item.status)}{allProfiles ? ` · ${item.profile}` : ''}</small><time dateTime={item.last_active ?? undefined}>{displayDate(item.last_active)}</time></span><b aria-hidden="true">→</b></button>
+  return <button className="chat-session-row" onClick={onOpen} type="button"><span><strong>{item.title || conversationCopy.fallbackSessionTitle}</strong><small>{preview}</small></span><span><span className={`conversation-state conversation-state--${state.kind}`}>{state.label}</span><small>{allProfiles ? item.profile : entityStatusLabel(item.status)}</small><time dateTime={item.last_active ?? undefined}>{displayDate(item.last_active)}</time></span><b aria-hidden="true">→</b></button>
 }
 
 function ChatSessionList({ items, allProfiles, onOpen, emptyTitle, emptyCopy }: { items: readonly CompanionSession[]; allProfiles: boolean; onOpen(item: CompanionSession): void; emptyTitle: string; emptyCopy: string }) {
@@ -352,7 +357,7 @@ export function WorkDirectory(props: DirectoryProps) {
 
   return <section aria-labelledby="work-directory-title" className="directory-screen">
     <div className="directory-heading"><div><p className="kicker">{directoryCopy.chrome.kicker}</p><h2 id="work-directory-title">{directoryCopy.chrome.title}</h2><p className="screen-lede">{directoryCopy.chrome.lede}</p></div><button className="button" onClick={props.onRefresh} type="button">{directoryCopy.chrome.refresh}</button></div>
-    <TabList className="directory-tabs" idPrefix="work-directory" label={directoryCopy.chrome.tabsLabel} onSelect={(item) => setParams({ section: item as WorkSection, focus: null, focusProfile: null, focusSource: null, tab: null })} selected={section} tabs={['topics', 'projects', 'sessions']} />
+    <TabList className="directory-tabs segmented-tabs" idPrefix="work-directory" label={directoryCopy.chrome.tabsLabel} onSelect={(item) => setParams({ section: item as WorkSection, focus: null, focusProfile: null, focusSource: null, tab: null })} selected={section} tabs={['topics', 'projects', 'sessions']} />
     {section !== 'topics' && <Coverage coverage={props.snapshot.coverage} />}
     {(['topics', 'projects', 'sessions'] as const).map((item) => <div aria-labelledby={tabId('work-directory', 'tab', item)} hidden={section !== item} id={tabId('work-directory', 'panel', item)} key={item} role="tabpanel">
       {section === item && (item === 'topics'
@@ -554,7 +559,7 @@ function FilesLibraryLink({ params, onNavigate }: { params: URLSearchParams; onN
 }
 
 function DetailTabs({ tabs, tab, onTab, idPrefix }: { tabs: readonly string[]; tab: string; onTab(tab: string): void; idPrefix: string }) {
-  return <TabList className="detail-tabs" idPrefix={idPrefix} onSelect={onTab} selected={tab} tabs={tabs.map((label) => label.toLocaleLowerCase())} />
+  return <TabList className="detail-tabs segmented-tabs" idPrefix={idPrefix} onSelect={onTab} selected={tab} tabs={tabs.map((label) => label.toLocaleLowerCase())} />
 }
 
 function TabList({ tabs, selected, onSelect, idPrefix, className, label }: { tabs: readonly string[]; selected: string; onSelect(tab: string): void; idPrefix: string; className: string; label?: string }) {
@@ -589,14 +594,14 @@ function History({ snapshot, onLoadOlder }: { snapshot: DirectorySnapshot; onLoa
   const transcriptScroll = useTranscriptScroll(identity, itemIds, contentVersion)
 
   if (!history) {return <DetailLoading snapshot={snapshot} />}
+  const technicalEntries = history.entries.filter((entry) => entry.kind !== 'message')
+  const messageEntries = history.entries.filter((entry) => entry.kind === 'message')
 
   return <div className="history-shell">
     <div className="history-transcript" onScroll={transcriptScroll.onScroll} ref={transcriptScroll.viewportRef}>
       {history.has_more && <button className="button history-load-older" onClick={onLoadOlder} type="button">Wczytaj starszą historię</button>}
-      <div className="history-flow">{history.entries.map((entry) => <div data-transcript-id={entry.id} key={entry.id}>{entry.kind !== 'message'
-        ? <StatusRow kind={entry.kind} label={entry.label} payload={entry.content} state={entry.kind === 'tool' ? 'Zarejestrowano' : null} />
-        : <article className={`history-message history-message--${entry.role ?? 'system'}`}><small>{directoryCopy.history.roles[entry.role ?? 'system']}</small><MessageContent role={entry.role ?? 'system'} text={entry.content} /></article>}
-      </div>)}</div>
+      <div className="history-flow">{messageEntries.map((entry) => <div data-transcript-id={entry.id} key={entry.id}><article className={`history-message history-message--${entry.role ?? 'system'}`}><small>{directoryCopy.history.roles[entry.role ?? 'system']}</small><MessageContent role={entry.role ?? 'system'} text={entry.content} /></article></div>)}</div>
+      {technicalEntries.length > 0 && <TechnicalDetails>{technicalEntries.map((entry) => <div data-transcript-id={entry.id} key={entry.id}><StatusRow kind={entry.kind === 'tool' ? 'tool' : entry.kind === 'compression' ? 'compression' : 'internal'} label={entry.label} payload={entry.content} state={entry.kind === 'tool' ? conversationCopy.statusRow.toolState.complete : null} /></div>)}</TechnicalDetails>}
       <div aria-hidden="true" ref={transcriptScroll.endRef} />
     </div>
     {transcriptScroll.showJumpToLatest && <button className="jump-to-latest jump-to-latest--history" onClick={transcriptScroll.jumpToLatest} type="button">{conversationCopy.transcript.newMessages}</button>}
