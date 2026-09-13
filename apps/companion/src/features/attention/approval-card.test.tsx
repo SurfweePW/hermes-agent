@@ -14,15 +14,22 @@ describe('ApprovalCard', () => {
   it('offers only server-provided approval scopes and denial callbacks', () => {
     const onDecision = vi.fn()
     render(<ApprovalCard approval={approval} onDecision={onDecision} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Approve once' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Approve for session' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Deny' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Zatwierdź raz' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Zatwierdź dla rozmowy' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Odmów' }))
     expect(onDecision.mock.calls).toEqual([['once'], ['session'], ['deny']])
-    expect(screen.getByRole('group', { name: 'Approval choices' })).toBeTruthy()
+    expect(screen.getByRole('group', { name: 'Opcje zatwierdzenia' })).toBeTruthy()
   })
 
   it('disables choices while the exact request is resolving', () => {
     render(<ApprovalCard approval={{ ...approval, responding: true }} onDecision={() => undefined} />)
-    expect((screen.getByRole('button', { name: 'Approve once' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Zatwierdź raz' }) as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('renders Polish approval chrome without translating request content', () => {
+    render(<ApprovalCard approval={approval} onDecision={() => undefined} />)
+    expect(screen.getByText('Twoja zgoda')).toBeTruthy()
+    expect(screen.getByText('Publish?')).toBeTruthy()
+    expect(screen.getByRole('group', { name: 'Opcje zatwierdzenia' })).toBeTruthy()
   })
 })

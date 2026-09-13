@@ -480,7 +480,7 @@ describe('CompanionStore setup and sessions', () => {
 
     const { store, gateways } = harness('https://gateway.test', undefined, undefined, ownerAuth)
 
-    await vi.waitFor(() => expect(store.getSnapshot().error).toBe('Companion could not reach the gateway. Check the connection and try again.'))
+    await vi.waitFor(() => expect(store.getSnapshot().error).toBe('Companion nie może połączyć się z gatewayem. Sprawdź połączenie i spróbuj ponownie.'))
     expect(store.getSnapshot().phase).toBe('setup')
     expect(ownerAuth.ownerSignIn).not.toHaveBeenCalled()
     expect(gateways).toHaveLength(0)
@@ -503,13 +503,13 @@ describe('CompanionStore setup and sessions', () => {
     expect(gateways).toHaveLength(0)
     expect(storage.setItem).not.toHaveBeenCalled()
     expect(store.getSnapshot()).toMatchObject({ phase: 'setup', connectionMode: 'shared' })
-    expect(store.getSnapshot().error).toBe('Companion could not reach the gateway. Check the connection and try again.')
+    expect(store.getSnapshot().error).toBe('Companion nie może połączyć się z gatewayem. Sprawdź połączenie i spróbuj ponownie.')
   })
 
   it.each([
-    ['URL validation', 'https://gateway.test/?ticket=do-not-accept', 'Companion could not reach the gateway'],
-    ['native sign-in', 'https://gateway.test/sign-in-failure', 'Companion could not reach the gateway'],
-    ['connection ticket', 'https://gateway.test/ticket-failure', 'Companion could not reach the gateway']
+    ['URL validation', 'https://gateway.test/?ticket=do-not-accept', 'Companion nie może połączyć się z gatewayem'],
+    ['native sign-in', 'https://gateway.test/sign-in-failure', 'Companion nie może połączyć się z gatewayem'],
+    ['connection ticket', 'https://gateway.test/ticket-failure', 'Companion nie może połączyć się z gatewayem']
   ])('keeps an owner %s failure visible while late hydration restores saved-token actions', async (_failure, baseUrl, expectedError) => {
     const token = deferred<string | undefined>()
     const secrets = tokenStore()
@@ -630,7 +630,7 @@ describe('CompanionStore setup and sessions', () => {
     const { store, gateways } = harness(null, undefined, undefined, ownerAuth)
 
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
-    expect(store.getSnapshot()).toMatchObject({ phase: 'setup', error: 'Companion could not reach the gateway. Check the connection and try again.' })
+    expect(store.getSnapshot()).toMatchObject({ phase: 'setup', error: 'Companion nie może połączyć się z gatewayem. Sprawdź połączenie i spróbuj ponownie.' })
 
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     expect(ownerAuth.ownerSignIn).toHaveBeenCalledTimes(2)
@@ -647,7 +647,7 @@ describe('CompanionStore setup and sessions', () => {
     await configuring
 
     expect(store.getSnapshot()).toMatchObject({
-      phase: 'ready', attentionItems: [], attentionScope: 'Unavailable on this gateway version'
+      phase: 'ready', attentionItems: [], attentionScope: 'Niedostępne w tej wersji gatewaya'
     })
   })
 
@@ -661,7 +661,7 @@ describe('CompanionStore setup and sessions', () => {
     await configuring
 
     expect(store.getSnapshot()).toMatchObject({
-      phase: 'ready', attentionItems: [], attentionScope: 'Unavailable on this gateway version'
+      phase: 'ready', attentionItems: [], attentionScope: 'Niedostępne w tej wersji gatewaya'
     })
     expect(gateways[0].calls).not.toContainEqual(['close'])
   })
@@ -792,7 +792,7 @@ describe('CompanionStore setup and sessions', () => {
     expect(store.getSnapshot()).toMatchObject({
       phase: 'setup', baseUrl: 'https://current-owner.gateway.test', connectionMode: 'shared'
     })
-    expect(store.getSnapshot().error).toContain('could not reach the gateway')
+    expect(store.getSnapshot().error).toContain('nie może połączyć się z gatewayem')
     expect(storage.setItem).toHaveBeenCalledWith(
       'hermes.companion.gatewayBaseUrl', 'https://current-owner.gateway.test'
     )
@@ -847,7 +847,7 @@ describe('CompanionStore setup and sessions', () => {
       phase: 'setup',
       hasSavedToken: false,
       canForgetSavedToken: true,
-      error: 'Companion could not access encrypted token storage. Forget the saved token or try again.'
+      error: 'Companion nie może uzyskać dostępu do zaszyfrowanego magazynu tokenu. Usuń zapisany token lub spróbuj ponownie.'
     })
     expect(JSON.stringify(store.getSnapshot())).not.toContain('/Users/private')
     await expect(store.configure({ baseUrl: 'http://localhost:8642', token: '' })).resolves.toBeUndefined()
@@ -1060,7 +1060,7 @@ describe('CompanionStore setup and sessions', () => {
 
     expect(teammates).toHaveLength(2)
     expect(teammates[0]).toMatchObject({ id: 'atlas', name: 'Atlas' })
-    expect(teammates[1]).toMatchObject({ id: 'teammate-2', name: 'Hermes Teammate 2' })
+    expect(teammates[1]).toMatchObject({ id: 'teammate-2', name: 'Profil Hermes 2' })
     expect(JSON.stringify(teammates)).not.toContain('/Users/operator')
     expect(JSON.stringify(teammates)).not.toContain('ops_internal')
 
@@ -1127,7 +1127,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
     const tools = store.getSnapshot().messages.filter((message) => message.kind === 'tool')
     expect(tools).toHaveLength(1)
-    expect(tools[0]).toMatchObject({ toolId: 'call-1', label: 'terminal', toolStatus: 'complete' })
+    expect(tools[0]).toMatchObject({ toolId: 'call-1', label: 'Aktywność narzędzia', toolStatus: 'complete' })
     expect(tools[0].text).toContain('done')
   })
 
@@ -1195,7 +1195,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     expect(() => store.setDraft('memory-only draft')).not.toThrow()
     expect(store.getSnapshot()).toMatchObject({
       draft: 'memory-only draft',
-      error: 'Companion could not save drafts securely on this device. The current draft is available only until the app closes.'
+      error: 'Companion nie może bezpiecznie zapisać wersji roboczej na tym urządzeniu. Będzie dostępna tylko do zamknięcia aplikacji.'
     })
 
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
@@ -1222,7 +1222,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     store.activateSessionDraft({ backend_namespace: 'desktop-a', profile: 'atlas', stored_session_id: 'logical-a' })
     store.setDraft('memory-only draft')
     expect(store.getSnapshot().error).toBe(
-      'Companion could not save drafts securely on this device. The current draft is available only until the app closes.'
+      'Companion nie może bezpiecznie zapisać wersji roboczej na tym urządzeniu. Będzie dostępna tylko do zamknięcia aplikacji.'
     )
 
     blockDraftStorage = false
@@ -1266,7 +1266,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
     expect(ownerAuth.ownerSignOut).toHaveBeenCalledTimes(1)
     expect(store.getSnapshot().error).toBe(
-      'Companion could not save drafts securely on this device. The current draft is available only until the app closes.'
+      'Companion nie może bezpiecznie zapisać wersji roboczej na tym urządzeniu. Będzie dostępna tylko do zamknięcia aplikacji.'
     )
 
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
@@ -1274,7 +1274,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     expect(ownerAuth.ownerSignIn).toHaveBeenCalledTimes(1)
     expect(store.getSnapshot()).toMatchObject({
       phase: 'setup', connectionMode: 'shared',
-      error: 'Companion could not save drafts securely on this device. The current draft is available only until the app closes.'
+      error: 'Companion nie może bezpiecznie zapisać wersji roboczej na tym urządzeniu. Będzie dostępna tylko do zamknięcia aplikacji.'
     })
   })
 
@@ -1367,7 +1367,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       phase: 'disconnected', connectionMode: 'shared', teammates: [], selectedTeammateId: null,
       runtimeSessionId: null, storedSessionId: null, activeSession: null, messages: [],
       streamingText: '', pendingApproval: null, attentionItems: [],
-      attentionScope: 'This gateway runtime only', recentSessions: [], sessionsLoading: false,
+      attentionScope: 'Tylko bieżące środowisko gatewaya', recentSessions: [], sessionsLoading: false,
       draft: '', turnStatus: 'idle', error: null
     })
     expect(JSON.stringify(store.getSnapshot())).not.toContain('Private')
@@ -1419,7 +1419,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       phase: 'connecting', connectionMode: 'shared', teammates: [], selectedTeammateId: null,
       runtimeSessionId: null, storedSessionId: null, activeSession: null, messages: [],
       streamingText: '', pendingApproval: null, attentionItems: [],
-      attentionScope: 'This gateway runtime only', recentSessions: [], sessionsLoading: false,
+      attentionScope: 'Tylko bieżące środowisko gatewaya', recentSessions: [], sessionsLoading: false,
       draft: '', turnStatus: 'idle', error: null
     })
     expect(JSON.stringify(store.getSnapshot())).not.toContain('Private')
@@ -1546,7 +1546,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     const { store, gateways } = harness()
     await store.configure({ baseUrl: 'http://localhost:8642', token: 'token' })
     const atlas = store.getSnapshot().teammates[0]
-    expect(atlas).toMatchObject({ status: 'idle', summary: 'No local activity observed.' })
+    expect(atlas).toMatchObject({ status: 'idle', summary: 'Brak lokalnej aktywności.' })
 
     await store.selectTeammate(atlas.id)
     expect(store.getSnapshot().teammates[0]).toMatchObject({ status: 'idle' })
@@ -1554,24 +1554,24 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     gateways[0].submit = pending.promise
     store.setDraft('Observe this turn')
     const submitting = store.submitDraft()
-    expect(store.getSnapshot().teammates[0]).toMatchObject({ status: 'working', summary: 'Conversation in progress.' })
+    expect(store.getSnapshot().teammates[0]).toMatchObject({ status: 'working', summary: 'Rozmowa w toku.' })
 
     gateways[0].emit({
       type: 'approval.request',
       session_id: 'runtime-1',
       payload: { request_id: 'approval:local', description: 'Continue?' }
     })
-    expect(store.getSnapshot().teammates[0]).toMatchObject({ status: 'needs-approval', summary: 'Waiting for your approval.' })
+    expect(store.getSnapshot().teammates[0]).toMatchObject({ status: 'needs-approval', summary: 'Czeka na Twoją zgodę.' })
     await store.respondToApproval('once')
     gateways[0].emit({ type: 'message.complete', session_id: 'runtime-1', payload: { text: 'Done locally.' } })
     pending.resolve({ status: 'streaming' })
     await submitting
-    expect(store.getSnapshot().teammates[0]).toMatchObject({ status: 'completed', summary: 'Turn completed.' })
+    expect(store.getSnapshot().teammates[0]).toMatchObject({ status: 'completed', summary: 'Odpowiedź zakończona.' })
 
     gateways[0].setState('closed')
-    expect(store.getSnapshot().teammates[0]).toMatchObject({ status: 'blocked', summary: 'Connection interrupted.' })
+    expect(store.getSnapshot().teammates[0]).toMatchObject({ status: 'blocked', summary: 'Połączenie przerwane.' })
     await store.recover()
-    expect(store.getSnapshot().teammates[0]).toMatchObject({ status: 'idle', summary: 'No local activity observed.' })
+    expect(store.getSnapshot().teammates[0]).toMatchObject({ status: 'idle', summary: 'Brak lokalnej aktywności.' })
   })
 
   it('streams only events for the runtime session and finalizes the assistant message', async () => {
@@ -2898,7 +2898,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const target = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-exact' }
     gateways[0].continuationResults.push(Promise.resolve({ ...target, status: 'uncertain', reconciled: true }))
-    await expect(store.openPersistedSession(target, 'Older accepted message')).rejects.toThrow(/may have accepted/i)
+    await expect(store.openPersistedSession(target, 'Older accepted message')).rejects.toThrow(/mogła przyjąć/i)
     const reconciliation = deferred<Awaited<ReturnType<CompanionGateway['reconcileCompanionSession']>>>()
     gateways[0].reconciliationResults.push(reconciliation.promise)
 
@@ -2977,7 +2977,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
       expect(store.getSnapshot()).toMatchObject({
         draft: expectedRawDraft,
         turnStatus: 'idle',
-        error: 'Companion could not reach the gateway. Check the connection and try again.'
+        error: 'Companion nie może połączyć się z gatewayem. Sprawdź połączenie i spróbuj ponownie.'
       })
       expect(gateways[0].calls.filter(([name]) => name === 'continueCompanionSession')).toHaveLength(previousContinuationCalls)
       expect(values.has('hermes.companion.continuityRetry.v1')).toBe(false)
@@ -3120,7 +3120,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     const target = { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'stored-exact' }
     gateways[0].continuationResults.push(Promise.resolve({ ...target, status: 'uncertain', reconciled: true }))
-    await expect(store.openPersistedSession(target, 'Older accepted message')).rejects.toThrow(/may have accepted/i)
+    await expect(store.openPersistedSession(target, 'Older accepted message')).rejects.toThrow(/mogła przyjąć/i)
     const requestId = (gateways[0].calls.find(([name]) => name === 'continueCompanionSession')?.[1] as { client_request_id: string }).client_request_id
     gateways[0].reconciliationResults.push(Promise.resolve({
       ...target, client_request_id: requestId, status: 'reconciled', reconciled: true, operation_status: 'completed'
@@ -3148,7 +3148,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     gateways[0].continuationResults.push(Promise.resolve({ ...target, status: 'uncertain', reconciled: true }))
-    await expect(store.openPersistedSession(target, 'Accepted during owner session', 'Exact owner title')).rejects.toThrow(/may have accepted/i)
+    await expect(store.openPersistedSession(target, 'Accepted during owner session', 'Exact owner title')).rejects.toThrow(/mogła przyjąć/i)
     const activeSession = store.getSnapshot().activeSession
     const requestId = (gateways[0].calls.find(([name]) => name === 'continueCompanionSession')?.[1] as { client_request_id: string }).client_request_id
 
@@ -3179,7 +3179,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     const { store, gateways, values } = harness(null, undefined, undefined, ownerAuth)
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     gateways[0].continuationResults.push(Promise.resolve({ ...target, status: 'uncertain', reconciled: true }))
-    await expect(store.openPersistedSession(target, 'Accepted during owner setup')).rejects.toThrow(/may have accepted/i)
+    await expect(store.openPersistedSession(target, 'Accepted during owner setup')).rejects.toThrow(/mogła przyjąć/i)
     store.setDraft('Private draft from old owner')
     expect(values.has('hermes.companion.continuityRetry.v1')).toBe(true)
     expect(values.get('hermes.companion.sessionDrafts.v1')).toContain('Private draft from old owner')
@@ -3213,7 +3213,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     await store.configureOwner({ baseUrl: 'https://gateway.test' })
     gateways[0].continuationResults.push(Promise.resolve({ ...target, status: 'uncertain', reconciled: true }))
 
-    await expect(store.openPersistedSession(target, 'Accepted exactly once', 'Durable title')).rejects.toThrow(/may have accepted/i)
+    await expect(store.openPersistedSession(target, 'Accepted exactly once', 'Durable title')).rejects.toThrow(/mogła przyjąć/i)
     const beforeReconnect = store.getSnapshot().activeSession
     requestId = (gateways[0].calls.find(([name]) => name === 'continueCompanionSession')?.[1] as { client_request_id: string }).client_request_id
     gateways[0].setState('closed')
@@ -3284,7 +3284,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     gateways[0].continuationResults.push(Promise.resolve({ ...target, status: 'uncertain', reconciled: true }))
 
     const sensitiveText = 'Reconcile after restart with secret sk-live-sensitive'
-    await expect(firstStore.openPersistedSession(target, sensitiveText)).rejects.toThrow(/may have accepted/i)
+    await expect(firstStore.openPersistedSession(target, sensitiveText)).rejects.toThrow(/mogła przyjąć/i)
     const firstCall = gateways[0].calls.find(([name]) => name === 'continueCompanionSession')?.[1] as { client_request_id: string }
     const persistedRetry = values.get('hermes.companion.continuityRetry.v1')
     expect(persistedRetry).toContain(firstCall.client_request_id)
@@ -3345,7 +3345,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
 
     await firstStore.configureOwner({ baseUrl: 'https://gateway.test' })
     gateways[0].continuationResults.push(Promise.resolve({ ...target, status: 'uncertain', reconciled: true }))
-    await expect(firstStore.openPersistedSession(target, 'Older accepted message')).rejects.toThrow(/may have accepted/i)
+    await expect(firstStore.openPersistedSession(target, 'Older accepted message')).rejects.toThrow(/mogła przyjąć/i)
     const requestId = (gateways[0].calls.find(([name]) => name === 'continueCompanionSession')?.[1] as { client_request_id: string }).client_request_id
     firstStore.setDraft('Newer durable draft')
     firstStore.destroy()
@@ -3424,7 +3424,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     await firstStore.configureOwner({ baseUrl: 'https://gateway.test' })
     gateways[0].continuationResults.push(Promise.resolve({ ...target, status: 'uncertain', reconciled: true }))
 
-    await expect(firstStore.openPersistedSession(target, 'Original retry text')).rejects.toThrow(/may have accepted/i)
+    await expect(firstStore.openPersistedSession(target, 'Original retry text')).rejects.toThrow(/mogła przyjąć/i)
     firstStore.destroy()
 
     const freshStore = createCompanionStore({
@@ -3447,7 +3447,7 @@ describe('CompanionStore prompts, approvals, and recovery', () => {
     })
 
     await vi.waitFor(() => expect(freshStore.getSnapshot().phase).toBe('ready'))
-    await expect(freshStore.openPersistedSession(retryTarget, retryText)).rejects.toThrow(/may have accepted/i)
+    await expect(freshStore.openPersistedSession(retryTarget, retryText)).rejects.toThrow(/mogła przyjąć/i)
     expect(gateways[1].calls.filter(([name]) => name === 'continueCompanionSession')).toHaveLength(0)
     expect(gateways[1].calls.filter(([name]) => name === 'reconcileCompanionSession')).toHaveLength(_kind === 'message' ? 2 : 1)
     expect(values.has('hermes.companion.continuityRetry.v1')).toBe(true)

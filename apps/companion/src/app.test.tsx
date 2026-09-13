@@ -85,7 +85,7 @@ describe('App', () => {
     render(<App store={store} />)
     fireEvent.click(screen.getAllByRole('button', { name: /^Decyzje/ })[0])
     expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
-    expect(screen.getByText(/does not support the durable work inbox/)).toBeTruthy()
+    expect(screen.getByText(/nie obsługuje trwałej skrzynki pracy/)).toBeTruthy()
     expect(screen.queryByRole('heading', { name: /Akcje w aktywnych rozmowach/ })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Kanban' })).toBeNull()
   })
@@ -106,11 +106,11 @@ describe('App', () => {
 
     render(<App store={store} />)
 
-    expect(screen.getAllByRole('button', { name: 'Decyzje, 1 items' })).toHaveLength(2)
-    fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje, 1 items' })[0])
+    expect(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 1' })).toHaveLength(2)
+    fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 1' })[0])
     expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: /Akcje w aktywnych rozmowach/ })).toBeNull()
-    expect(screen.getAllByRole('button', { name: 'Decyzje, 1 items' })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 1' })).toHaveLength(2)
   })
 
   it('labels distinct durable and runtime decisions, preserves their badge count, and deep-links the runtime request', async () => {
@@ -128,8 +128,8 @@ describe('App', () => {
 
     render(<App store={store} />)
 
-    expect(screen.getAllByRole('button', { name: 'Decyzje, 2 items' })).toHaveLength(2)
-    fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje, 2 items' })[0])
+    expect(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 2' })).toHaveLength(2)
+    fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 2' })[0])
     expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /^Akcje w aktywnych rozmowach/ })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: /Live approval.*Only in the active conversation/ }))
@@ -176,14 +176,14 @@ describe('App', () => {
     const store = createCompanionStore({ gatewayFactory: () => gateway, storage: { getItem: () => null, setItem: () => undefined } })
     await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
     render(<App store={store} />)
-    fireEvent.click((await screen.findAllByRole('button', { name: 'Decyzje, 1 items' }))[0])
+    fireEvent.click((await screen.findAllByRole('button', { name: 'Decyzje, pozycji: 1' }))[0])
     expect(screen.getByText('Approve this runtime request')).toBeTruthy()
 
     gateway.close()
 
     await waitFor(() => expect(store.getSnapshot().phase).toBe('disconnected'))
     expect(screen.queryByText('Approve this runtime request')).toBeNull()
-    expect(screen.queryByRole('button', { name: /Decyzje, 1 items/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Decyzje, pozycji: 1/ })).toBeNull()
   })
 
   it('shows fresh runtime attention when a retained Work source fails to refresh', async () => {
@@ -203,7 +203,7 @@ describe('App', () => {
 
     await store.work.refresh()
     await store.refreshAttention()
-    fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje, 1 items' })[0])
+    fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 1' })[0])
 
     expect(await screen.findByText('Visible after the Work-only outage')).toBeTruthy()
     expect(store.work.getSnapshot().sources.find((source) => source.profile === 'atlas')?.status).toBe('error')
@@ -257,8 +257,8 @@ describe('App', () => {
   it('renders first-run gateway setup without exposing a token as text', () => {
     const store = createCompanionStore({ gatewayFactory: createFakeGateway, storage: { getItem: () => null, setItem: () => undefined } })
     render(<App store={store} />)
-    expect(screen.getByRole('heading', { name: 'Connect Hermes Companion' })).toBeTruthy()
-    expect(screen.getByLabelText('Session token').getAttribute('type')).toBe('password')
+    expect(screen.getByRole('heading', { name: 'Połącz z Hermes Companion' })).toBeTruthy()
+    expect(screen.getByLabelText('Token sesji').getAttribute('type')).toBe('password')
     expect(document.body.textContent).not.toContain('test-token')
   })
 
@@ -277,13 +277,13 @@ describe('App', () => {
     })
 
     render(<App store={store} />)
-    fireEvent.change(screen.getByLabelText('Gateway base URL'), { target: { value: 'https://fixture.invalid/' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in with Google' }))
+    fireEvent.change(screen.getByLabelText('Adres bazowy gatewaya'), { target: { value: 'https://fixture.invalid/' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Zaloguj się przez Google' }))
 
     await waitFor(() => expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner' }))
     expect(ownerAuth.ownerSignIn).toHaveBeenCalledWith({ baseUrl: 'https://fixture.invalid' })
     expect(document.body.textContent).not.toContain('native-owner-secret')
-    expect(screen.getByText('Companion is ready')).toBeTruthy()
+    expect(screen.getByText('Companion gotowy')).toBeTruthy()
   })
 
   it('describes owner bootstrap without claiming it is Android-only', () => {
@@ -302,7 +302,7 @@ describe('App', () => {
 
     render(<App store={store} />)
 
-    expect(screen.getByText(/native app.*system browser.*single-use connection ticket/i)).toBeTruthy()
+    expect(screen.getByText(/aplikacji natywnej.*przeglądarki systemowej.*jednorazowego biletu połączenia/i)).toBeTruthy()
     expect(document.body.textContent).not.toMatch(/Android browser flow/i)
   })
 
@@ -311,8 +311,8 @@ describe('App', () => {
 
     render(<App store={store} />)
 
-    expect(screen.queryByRole('button', { name: 'Sign in with Google' })).toBeNull()
-    expect(screen.getByText(/Google owner sign-in requires a trusted native app bridge.*Browser setup requires a session token/i)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Zaloguj się przez Google' })).toBeNull()
+    expect(screen.getByText(/Logowanie właściciela przez Google wymaga zaufanego mostu aplikacji natywnej.*Konfiguracja w przeglądarce wymaga tokenu sesji/i)).toBeTruthy()
     expect(document.body.textContent).not.toMatch(/only in the native Android app/i)
   })
 
@@ -331,9 +331,9 @@ describe('App', () => {
     const store = createCompanionStore({ gatewayFactory: createFakeGateway, secretStore, storage: { getItem: () => 'http://fixture.invalid', setItem: () => undefined } })
     render(<App store={store} />)
 
-    expect(screen.getByText(/native app stores the token encrypted/i)).toBeTruthy()
-    expect(screen.getByLabelText('Session token').hasAttribute('required')).toBe(false)
-    fireEvent.click(screen.getByRole('button', { name: /use saved token/i }))
+    expect(screen.getByText(/Aplikacja natywna przechowuje token zaszyfrowany/i)).toBeTruthy()
+    expect(screen.getByLabelText('Token sesji').hasAttribute('required')).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: /Użyj zapisanego tokenu/i }))
     await waitFor(() => expect(store.getSnapshot().phase).toBe('ready'))
     expect(document.body.textContent).not.toContain('saved-native-token')
   })
@@ -352,12 +352,12 @@ describe('App', () => {
 
     const store = createCompanionStore({ gatewayFactory: createFakeGateway, secretStore, storage: { getItem: () => null, setItem: () => undefined } })
     const { unmount } = render(<App store={store} />)
-    fireEvent.click(screen.getByRole('button', { name: /forget saved token/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Usuń zapisany token/i }))
     await waitFor(() => expect(token).toBeUndefined())
     unmount()
 
     render(<App store={createCompanionStore({ gatewayFactory: createFakeGateway, storage: { getItem: () => null, setItem: () => undefined } })} />)
-    expect(screen.getByText(/browser keeps the token for this session only/i)).toBeTruthy()
+    expect(screen.getByText(/Przeglądarka przechowuje token tylko na czas tej sesji/i)).toBeTruthy()
   })
 
   it('offers a working reset when encrypted token storage cannot be read', async () => {
@@ -374,7 +374,7 @@ describe('App', () => {
 
     render(<App store={store} />)
 
-    fireEvent.click(screen.getByRole('button', { name: /forget saved token/i }))
+    fireEvent.click(screen.getByRole('button', { name: /Usuń zapisany token/i }))
     await waitFor(() => expect(secretStore.delete).toHaveBeenCalledWith('gateway-token'))
     expect(store.getSnapshot()).toMatchObject({ canForgetSavedToken: false, error: null })
   })
@@ -398,7 +398,7 @@ describe('App', () => {
     await store.signOutOwner()
 
     render(<App store={store} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Clear saved owner sign-in' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Usuń zapisane logowanie właściciela' }))
 
     await waitFor(() => expect(ownerAuth.ownerSignOut).toHaveBeenCalledTimes(2))
 
@@ -410,6 +410,14 @@ describe('App', () => {
     expect(screen.getByRole('main')).toBeTruthy()
     expect(screen.getByRole('heading', { name: 'Hermes Companion' })).toBeTruthy()
     expect(screen.getAllByText('Atlas').length).toBeGreaterThan(0)
+    expect(screen.getByRole('navigation', { name: 'Główna nawigacja' })).toBeTruthy()
+    expect(screen.getByRole('navigation', { name: 'Nawigacja mobilna' })).toBeTruthy()
+    expect(screen.getAllByLabelText('Profil: użytkownik Companiona')).toHaveLength(2)
+    expect(screen.getByText('Profile')).toBeTruthy()
+    expect(screen.getByText('Companion gotowy')).toBeTruthy()
+    expect(screen.getByText(/Profile: 4/)).toBeTruthy()
+    expect(document.body.textContent).not.toContain('Teammates')
+    expect(document.body.textContent).not.toContain('Companion is ready')
     expect(document.querySelector('.activity-rail')).toBeNull()
     expect(document.querySelector('.app-shell')?.classList.contains('app-shell--two-column')).toBe(true)
     expect(screen.queryByRole('button', { name: 'Search' })).toBeNull()
@@ -432,9 +440,9 @@ describe('App', () => {
     fireEvent.click(screen.getAllByRole('button', { name: /Atlas/ })[0])
 
     expect(await screen.findByRole('heading', { name: 'Atlas' })).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Open conversation' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Otwórz rozmowę' })).toBeTruthy()
 
-    fireEvent.click(screen.getByRole('button', { name: '← Back' }))
+    fireEvent.click(screen.getByRole('button', { name: '← Wróć' }))
     expect(await screen.findByRole('heading', { name: 'Rozmowy' })).toBeTruthy()
     expect(screen.queryByRole('form', { name: 'Quick task' })).toBeNull()
   })
@@ -481,9 +489,9 @@ describe('App', () => {
   it('marks active navigation and focuses the newly selected screen context', async () => {
     render(<App store={await readyStore()} />)
     fireEvent.click(screen.getAllByRole('button', { name: /Atlas/ })[0])
-    fireEvent.click(await screen.findByRole('button', { name: 'Open conversation' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Otwórz rozmowę' }))
     await waitFor(() => expect(screen.getByRole('main')).toBe(document.activeElement))
-    expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Conversation')
+    expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Rozmowa')
     expect(screen.getByRole('main').classList.contains('main-content--conversation')).toBe(true)
     expect(document.querySelector('.desktop-topbar')).toBeNull()
     expect(screen.queryByRole('button', { name: /Conversation|Chat/ })).toBeNull()
@@ -523,7 +531,11 @@ describe('App', () => {
     expect(setBrowseQuery).toHaveBeenCalledWith(expect.objectContaining({ archive: 'all' }))
     expect(screen.getByText('Synthetic request for read-only QA.')).toBeTruthy()
     expect(screen.getByText(/Atlas · \[SYNTHETIC QA\] Companion project/)).toBeTruthy()
-    expect(screen.queryByLabelText('Message Atlas')).toBeNull()
+    // Read-only history: the composer may stay on screen (a typed draft is preserved) but it cannot send,
+    // and the page says why. The old assertion asked for an English label that never existed, so it passed
+    // without testing anything.
+    expect((screen.getByRole('button', { name: 'Wyślij wiadomość' }) as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByText(/Historia jest aktywna do odczytu/)).toBeTruthy()
   })
 
   it('returns from a catalog live chat to the exact Chats directory state', async () => {
@@ -543,8 +555,8 @@ describe('App', () => {
     main.scrollTop = 240
     fireEvent.change(screen.getByLabelText('Wiadomość do Atlas'), { target: { value: 'Continue safely' } })
     fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
-    expect(await screen.findByRole('button', { name: 'Back to Atlas sessions' })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Back to Atlas sessions' }))
+    expect(await screen.findByRole('button', { name: 'Wróć do rozmów: Atlas' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Wróć do rozmów: Atlas' }))
 
     expect((await screen.findByRole('searchbox', { name: 'Szukaj rozmów' }) as HTMLInputElement).value).toBe('synthetic')
     expect(screen.getByRole('button', { name: /Companion project/ }).getAttribute('aria-expanded')).toBe('true')
@@ -563,7 +575,7 @@ describe('App', () => {
     render(<App store={store} />)
     const main = screen.getByRole('main')
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'ostatnie' }))
     const sessionButton = await screen.findByRole('button', { name: /Desktop research session/ })
     if (mobile) {Object.defineProperty(window, 'scrollY', { configurable: true, value: 240 })} else {main.scrollTop = 240}
     fireEvent.click(sessionButton)
@@ -626,8 +638,8 @@ describe('App', () => {
   })
 
   it.each([
-    ['project', 'projects', 'synthetic-project-1', 'fixture-mac-mini', '[SYNTHETIC QA] Companion project', 'Read-only source detail'],
-    ['topic', 'topics', 'synthetic-topic-1', 'fixture-organization-db', '[SYNTHETIC QA] Companion launch', 'Read-only organization detail']
+    ['project', 'projects', 'synthetic-project-1', 'fixture-mac-mini', '[SYNTHETIC QA] Companion project', 'Szczegóły źródła tylko do odczytu'],
+    ['topic', 'topics', 'synthetic-topic-1', 'fixture-organization-db', '[SYNTHETIC QA] Companion launch', 'Szczegóły organizacji tylko do odczytu']
   ])('renders the legacy Work %s deep-link target instead of the Chats directory', async (_kind, section, focus, source, title, note) => {
     window.history.replaceState({}, '', `/?view=work&section=${section}&focus=${focus}&focusProfile=atlas&focusSource=${source}&tab=overview`)
     const store = await readyDirectoryStore()
@@ -689,8 +701,8 @@ describe('App', () => {
     await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
     render(<App store={store} />)
 
-    fireEvent.click(await screen.findByRole('button', { name: 'Load safe preview' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Mark previewed version reviewed' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Oznacz podglądaną wersję jako zatwierdzoną' }))
 
     await waitFor(() => expect(pin).toHaveBeenCalledWith(expect.objectContaining({ relationships })))
   })
@@ -703,19 +715,19 @@ describe('App', () => {
     await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
     render(<App store={store} />)
 
-    expect((await screen.findByRole('alert')).textContent).toMatch(/relationship.*could not be verified/i)
-    fireEvent.click(await screen.findByRole('button', { name: 'Load safe preview' }))
-    expect((await screen.findByRole('button', { name: 'Mark previewed version reviewed' })).hasAttribute('disabled')).toBe(true)
+    expect((await screen.findByRole('alert')).textContent).toMatch(/nie udało się zweryfikować wskazanego powiązania pliku/i)
+    fireEvent.click(await screen.findByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
+    expect((await screen.findByRole('button', { name: 'Oznacz podglądaną wersję jako zatwierdzoną' })).hasAttribute('disabled')).toBe(true)
     expect(pin).not.toHaveBeenCalled()
   })
 
   it('creates a selected teammate session and operates the fixture conversation', async () => {
     render(<App store={await readyStore()} />)
     fireEvent.click(screen.getAllByRole('button', { name: /Atlas/ })[0])
-    fireEvent.click(await screen.findByRole('button', { name: 'Open conversation' }))
-    const input = await screen.findByLabelText('Message Atlas')
+    fireEvent.click(await screen.findByRole('button', { name: 'Otwórz rozmowę' }))
+    const input = await screen.findByLabelText('Wiadomość do Atlas')
     fireEvent.change(input, { target: { value: 'Check this' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
     await waitFor(() => expect(screen.getAllByText(/I received: “Check this”/).length).toBeGreaterThan(0))
   })
 
@@ -726,7 +738,7 @@ describe('App', () => {
     const continuation = vi.spyOn(gateway, 'continueCompanionSession')
     render(<App store={store} />)
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'ostatnie' }))
     fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
     expect(await screen.findByText('Synthetic request for read-only QA.')).toBeTruthy()
     expect(history).toHaveBeenCalledWith('atlas', 'synthetic-session-1', undefined, 'fixture-mac-mini')
@@ -735,7 +747,7 @@ describe('App', () => {
     fireEvent.change(screen.getByLabelText('Wiadomość do Atlas'), { target: { value: 'Kontynuuj dokładnie tutaj' } })
     fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
 
-    await waitFor(() => expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Conversation'))
+    await waitFor(() => expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Rozmowa'))
     expect(continuation).toHaveBeenCalledOnce()
     expect(continuation).toHaveBeenCalledWith(expect.objectContaining({
       backend_namespace: 'fixture-mac-mini', profile: 'atlas', stored_session_id: 'synthetic-session-1', text: 'Kontynuuj dokładnie tutaj'
@@ -748,7 +760,7 @@ describe('App', () => {
     const continuation = vi.spyOn(gateway, 'continueCompanionSession').mockRejectedValueOnce(new Error('gateway rejected API_KEY=synthetic-secret cookie=synthetic-cookie token=synthetic-token'))
     render(<App store={store} />)
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'ostatnie' }))
     fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
     fireEvent.change(screen.getByLabelText('Wiadomość do Atlas'), { target: { value: '  preserve this  ' } })
     fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
@@ -769,19 +781,19 @@ describe('App', () => {
     const continuation = vi.spyOn(gateway, 'continueCompanionSession')
     render(<App store={store} />)
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'ostatnie' }))
     fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
     fireEvent.change(screen.getByLabelText('Wiadomość do Atlas'), { target: { value: 'Pierwsza wiadomość' } })
     fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
-    await waitFor(() => expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Conversation'))
+    await waitFor(() => expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Rozmowa'))
     await waitFor(() => expect(continuation).toHaveBeenCalledOnce())
 
     continuation.mockRejectedValueOnce(new Error('secret continuation detail'))
-    fireEvent.change(screen.getByLabelText('Message Atlas'), { target: { value: 'Nie wysyłaj ponownie' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+    fireEvent.change(screen.getByLabelText('Wiadomość do Atlas'), { target: { value: 'Nie wysyłaj ponownie' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Wyślij wiadomość' }))
 
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/could not reach the gateway/i))
-    expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Conversation')
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/nie może połączyć się z gatewayem/i))
+    expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Rozmowa')
     expect(continuation).toHaveBeenCalledTimes(2)
     expect(document.body.textContent).not.toContain('secret continuation detail')
   })
@@ -790,7 +802,7 @@ describe('App', () => {
     const { store } = await readyOwnerDirectoryStore()
     render(<App store={store} />)
 
-    fireEvent.click(screen.getByRole('tab', { name: 'Ostatnie' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'ostatnie' }))
     fireEvent.click(await screen.findByRole('button', { name: /Desktop research session/ }))
     const composer = await screen.findByLabelText('Wiadomość do Atlas')
     fireEvent.change(composer, { target: { value: 'Nie wysyłaj jeszcze' } })

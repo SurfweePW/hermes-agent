@@ -9,8 +9,8 @@ describe('native owner sign-in entry', () => {
   it('never replaces unavailable native owner auth with a shared-token approval', () => {
     delete window.hermesCompanion
     render(<OwnerSignIn baseUrl="https://example.org" onOwnerConnect={vi.fn()} onOwnerSignOut={vi.fn()} ownerConnected={false} />)
-    expect(screen.queryByRole('button', { name: 'Sign in to make decisions' })).toBeNull()
-    expect(screen.getByText(/no token-based approval bypass/)).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Zaloguj się, aby podejmować decyzje' })).toBeNull()
+    expect(screen.getByText(/obejście zatwierdzania za pomocą tokenu nie jest dostępne/)).toBeTruthy()
   })
   it('passes only baseUrl, ignores native return data, and rechecks connection', async () => {
     const ownerSignIn = vi.fn(async () => ({ opaque: 'not rendered' }))
@@ -23,10 +23,10 @@ describe('native owner sign-in entry', () => {
     }
     const connectOwner = vi.fn(async () => undefined)
     render(<OwnerSignIn baseUrl="https://example.org" onOwnerConnect={connectOwner} onOwnerSignOut={vi.fn()} ownerConnected={false} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in to make decisions' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Zaloguj się, aby podejmować decyzje' }))
     await waitFor(() => expect(connectOwner).toHaveBeenCalledTimes(1))
     expect(ownerSignIn).toHaveBeenCalledWith({ baseUrl: 'https://example.org' })
-    expect(screen.getByText(/refreshed server capability/)).toBeTruthy()
+    expect(screen.getByText(/odświeżona funkcja serwera/)).toBeTruthy()
     expect(document.body.textContent).not.toContain('not rendered')
   })
   it('keeps native errors and secrets out of renderer messages', async () => {
@@ -39,8 +39,8 @@ describe('native owner sign-in entry', () => {
     }
     const connectOwner = vi.fn()
     render(<OwnerSignIn baseUrl="https://example.org" onOwnerConnect={connectOwner} onOwnerSignOut={vi.fn()} ownerConnected={false} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in to make decisions' }))
-    await screen.findByText(/Owner sign-in or reconnection could not be verified/)
+    fireEvent.click(screen.getByRole('button', { name: 'Zaloguj się, aby podejmować decyzje' }))
+    await screen.findByText(/Nie udało się zweryfikować logowania właściciela ani ponownego połączenia/)
     expect(connectOwner).not.toHaveBeenCalled()
     expect(document.body.textContent).not.toContain('secret-ticket')
   })
@@ -56,10 +56,10 @@ describe('native owner sign-in entry', () => {
     const connectOwner = vi.fn(async () => {throw new Error('one-use-ticket-secret')})
     render(<OwnerSignIn baseUrl="https://example.org" onOwnerConnect={connectOwner} onOwnerSignOut={vi.fn()} ownerConnected={false} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sign in to make decisions' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Zaloguj się, aby podejmować decyzje' }))
 
-    await screen.findByText(/Owner sign-in or reconnection could not be verified/)
-    expect(screen.queryByText(/refreshed server capability/)).toBeNull()
+    await screen.findByText(/Nie udało się zweryfikować logowania właściciela ani ponownego połączenia/)
+    expect(screen.queryByText(/odświeżona funkcja serwera/)).toBeNull()
     expect(document.body.textContent).not.toContain('one-use-ticket-secret')
   })
 
@@ -75,7 +75,7 @@ describe('native owner sign-in entry', () => {
     const signOut = vi.fn(async () => undefined)
     render(<OwnerSignIn baseUrl="https://example.org" onOwnerConnect={vi.fn()} onOwnerSignOut={signOut} ownerConnected />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Sign out of decision access' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Wyloguj z dostępu do decyzji' }))
     await waitFor(() => expect(signOut).toHaveBeenCalledTimes(1))
     expect(ownerSignOut).not.toHaveBeenCalled()
   })
@@ -91,9 +91,18 @@ describe('native owner sign-in entry', () => {
     const signOut = vi.fn(async () => undefined)
     render(<OwnerSignIn baseUrl="https://example.org" onOwnerConnect={vi.fn()} onOwnerSignOut={signOut} ownerConnected={false} />)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Clear saved owner sign-in' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Usuń zapisane logowanie właściciela' }))
 
     await waitFor(() => expect(signOut).toHaveBeenCalledTimes(1))
-    expect(screen.getByText(/credentials were cleared/)).toBeTruthy()
+    expect(screen.getByText(/Zapisane dane uwierzytelniające właściciela do decyzji zostały usunięte/)).toBeTruthy()
+  })
+  it('renders Polish owner sign-in chrome', () => {
+    window.hermesCompanion = {
+      gatewayToken: { get: vi.fn(), set: vi.fn(), reset: vi.fn() },
+      ownerSignIn: vi.fn(), ownerStatus: vi.fn(), ownerSignOut: vi.fn(), ownerWebSocketUrl: vi.fn()
+    }
+    render(<OwnerSignIn baseUrl="https://example.org" onOwnerConnect={vi.fn()} onOwnerSignOut={vi.fn()} ownerConnected={false} />)
+    expect(screen.getByRole('region', { name: 'Dostęp właściciela do decyzji' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Zaloguj się, aby podejmować decyzje' })).toBeTruthy()
   })
 })

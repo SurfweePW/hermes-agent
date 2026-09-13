@@ -53,7 +53,7 @@ describe('Library', () => {
     const listLibrary = vi.fn().mockResolvedValue(complete([item, { ...item, artifact_id: `art_${'f'.repeat(64)}` }]))
     render(<Library gateway={gateway({ listLibrary, resolveLibraryReference: vi.fn().mockResolvedValue({ available: false, profile: 'atlas', backend_namespace: 'test' }) })} onNavigate={onNavigate} params={new URLSearchParams('libraryProfile=atlas&libraryOpen=library%3Adocs%2Fmissing%2Freport.md')} />)
 
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('unavailable'))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toContain('niedostępny'))
     expect(onNavigate).not.toHaveBeenCalled()
   })
 
@@ -67,7 +67,7 @@ describe('Library', () => {
     const view = render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams()} refreshToken={0} />)
     await waitFor(() => expect(listLibrary).toHaveBeenCalledTimes(1))
 
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh Library' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Odśwież pliki' }))
     await waitFor(() => expect(listLibrary).toHaveBeenCalledTimes(2))
     view.rerender(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams()} refreshToken={1} />)
     await waitFor(() => expect(listLibrary).toHaveBeenCalledTimes(3))
@@ -77,9 +77,9 @@ describe('Library', () => {
     const fake = gateway({ listLibrary: vi.fn().mockResolvedValue({ ...complete([]), collections: [], coverage: { configured: false, status: 'unconfigured', collections: {} }, warnings: ['No Companion Library collections are configured for this profile; no roots were scanned.'] }) })
     render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams()} />)
 
-    expect(await screen.findByText('Library is not configured')).toBeTruthy()
+    expect(await screen.findByText('Pliki nie są skonfigurowane')).toBeTruthy()
     expect(screen.getByText(/no roots were scanned/i)).toBeTruthy()
-    expect(screen.queryByText('The configured Library is empty.')).toBeNull()
+    expect(screen.queryByText('Skonfigurowane pliki są puste.')).toBeNull()
   })
 
   it('queries every backend page with server-side search and canonical filters', async () => {
@@ -92,16 +92,16 @@ describe('Library', () => {
     const fake = gateway({ listLibrary })
     render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams('libraryQ=report&libraryType=markdown&libraryCollection=docs&libraryStatus=reviewed')} />)
 
-    expect(await screen.findByText('2 artifacts across all available pages.')).toBeTruthy()
+    expect(await screen.findByText('2 artefaktów na wszystkich dostępnych stronach.')).toBeTruthy()
     expect(screen.getByText('report-2.md')).toBeTruthy()
     expect(listLibrary).toHaveBeenNthCalledWith(1, expect.objectContaining({ search: 'report', type: 'markdown', collection: 'docs', reviewed: true, limit: 2 }))
     expect(listLibrary).toHaveBeenNthCalledWith(2, expect.objectContaining({ cursor: 'page-2', search: 'report', limit: 2 }))
     expect(screen.getAllByText('Kolekcja: Documents · Profil: atlas')).toHaveLength(2)
     expect(screen.getAllByText('Wersja zatwierdzona · 8 B')).toHaveLength(2)
     expect(document.body.textContent).not.toContain(versionId)
-    expect((screen.getByLabelText('Project') as HTMLInputElement).disabled).toBe(false)
-    expect((screen.getByLabelText('Topic') as HTMLInputElement).disabled).toBe(false)
-    expect((screen.getByLabelText('Session') as HTMLInputElement).disabled).toBe(false)
+    expect((screen.getByLabelText('Projekt') as HTMLInputElement).disabled).toBe(false)
+    expect((screen.getByLabelText('Temat') as HTMLInputElement).disabled).toBe(false)
+    expect((screen.getByLabelText('Rozmowa') as HTMLInputElement).disabled).toBe(false)
   })
 
   it('keeps detail routing while selecting a retained version', async () => {
@@ -113,10 +113,10 @@ describe('Library', () => {
     expect(technical?.querySelector('summary')?.getAttribute('aria-expanded')).toBe('false')
     expect(technical?.textContent).toContain(artifactId)
     expect(screen.queryByRole('option', { name: versionId })).toBeNull()
-    expect(screen.getByRole('button', { name: 'Load safe preview' }).closest('details')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }).closest('details')).toBeNull()
     fireEvent.click(screen.getByText('Szczegóły techniczne'))
     expect(technical?.querySelector('summary')?.getAttribute('aria-expanded')).toBe('true')
-    fireEvent.change(screen.getByLabelText('Version'), { target: { value: versionId } })
+    fireEvent.change(screen.getByLabelText('Wersja'), { target: { value: versionId } })
     const next = navigate.mock.calls.at(-1)?.[0] as URLSearchParams
     expect(next.get('libraryArtifact')).toBe(artifactId)
     expect(next.get('libraryProfile')).toBe('atlas')
@@ -129,10 +129,10 @@ describe('Library', () => {
     const downloadLibraryArtifact = vi.fn()
     render(<Library gateway={gateway({ previewLibraryArtifact, downloadLibraryArtifact })} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas&libraryVersion=${missingVersion}`)} />)
 
-    expect((await screen.findByRole('alert')).textContent).toContain(`Requested retained version ${missingVersion} is unavailable.`)
-    expect(screen.getByText(missingVersion)).toBeTruthy()
-    expect(screen.queryByText(/Latest live version/)).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Load safe preview' })).toBeNull()
+    expect((await screen.findByRole('alert')).textContent).toContain(`Wskazana zachowana wersja ${missingVersion} jest niedostępna.`)
+    expect(screen.getByRole('alert').textContent).toBe(`Wskazana zachowana wersja ${missingVersion} jest niedostępna.`)
+    expect(screen.queryByText(/Najnowsza bieżąca wersja/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Wczytaj bezpieczny podgląd' })).toBeNull()
     expect(previewLibraryArtifact).not.toHaveBeenCalled()
     expect(downloadLibraryArtifact).not.toHaveBeenCalled()
   })
@@ -150,7 +150,7 @@ describe('Library', () => {
     await screen.findByText(item.filename)
 
     view.rerender(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${nextArtifactId}&libraryProfile=beta`)} />)
-    const staleLoadAction = screen.queryByRole('button', { name: 'Load safe preview' })
+    const staleLoadAction = screen.queryByRole('button', { name: 'Wczytaj bezpieczny podgląd' })
 
     if (staleLoadAction) {fireEvent.click(staleLoadAction)}
 
@@ -159,7 +159,7 @@ describe('Library', () => {
     expect(previewLibraryArtifact).not.toHaveBeenCalled()
     expect(screen.queryByText(item.filename)).toBeNull()
     expect(screen.queryByText('stale preview')).toBeNull()
-    expect(screen.queryByRole('button', { name: 'Mark previewed version reviewed' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Oznacz podglądaną wersję jako zatwierdzoną' })).toBeNull()
 
     resolveNextDetail(nextDetail)
     expect(await screen.findByText(nextItem.filename)).toBeTruthy()
@@ -179,7 +179,7 @@ describe('Library', () => {
 
     const view = render(<Harness params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas`)} />)
     await screen.findByText(item.filename)
-    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
     expect(await screen.findByText('# report')).toBeTruthy()
 
     view.rerender(<Harness params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas&libraryVersion=${versionId}`)} />)
@@ -199,16 +199,16 @@ describe('Library', () => {
     const revokeObjectURL = vi.spyOn(URL, 'revokeObjectURL').mockImplementation(() => undefined)
     const view = render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas`)} />)
     await screen.findByText('preview.png')
-    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
-    expect((await screen.findByAltText('Preview of preview.png')).getAttribute('src')).toBe('blob:latest')
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
+    expect((await screen.findByAltText('Podgląd preview.png')).getAttribute('src')).toBe('blob:latest')
 
     view.rerender(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas&libraryVersion=${retainedVersionId}`)} />)
-    expect(screen.queryByAltText('Preview of preview.png')).toBeNull()
+    expect(screen.queryByAltText('Podgląd preview.png')).toBeNull()
     await waitFor(() => expect(revokeObjectURL).toHaveBeenCalledWith('blob:latest'))
     expect(revokeObjectURL.mock.calls.filter(([url]) => url === 'blob:latest')).toHaveLength(1)
 
-    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
-    expect((await screen.findByAltText('Preview of preview.png')).getAttribute('src')).toBe('blob:retained')
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
+    expect((await screen.findByAltText('Podgląd preview.png')).getAttribute('src')).toBe('blob:retained')
     view.unmount()
 
     expect(revokeObjectURL.mock.calls.filter(([url]) => url === 'blob:latest')).toHaveLength(1)
@@ -229,16 +229,16 @@ describe('Library', () => {
     const fake = gateway({ getLibraryArtifact: vi.fn().mockResolvedValue(versionedDetail), previewLibraryArtifact })
     const view = render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas`)} />)
     await screen.findByText(item.filename)
-    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
-    expect(await screen.findByRole('button', { name: 'Loading preview…' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
+    expect(await screen.findByRole('button', { name: 'Wczytywanie podglądu…' })).toBeTruthy()
 
     view.rerender(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas&libraryVersion=${retainedVersionId}`)} />)
-    await waitFor(() => expect((screen.getByRole('button', { name: 'Load safe preview' }) as HTMLButtonElement).disabled).toBe(false))
-    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    await waitFor(() => expect((screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }) as HTMLButtonElement).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
     resolveLatest({ artifact_id: artifactId, version_id: versionId, data_base64: encoded('stale'), offset: 0, next_offset: 5, eof: true, size: 5, sha256: item.sha256, filename: item.filename, mime_type: item.mime_type, descriptor: 'latest-transfer', preview: item.preview })
 
     await waitFor(() => expect(previewLibraryArtifact).toHaveBeenCalledTimes(2))
-    expect(screen.getByRole('button', { name: 'Loading preview…' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Wczytywanie podglądu…' })).toBeTruthy()
     expect(screen.queryByText('stale')).toBeNull()
 
     resolveRetained({ artifact_id: artifactId, version_id: retainedVersionId, data_base64: encoded('retained'), offset: 0, next_offset: 8, eof: true, size: 8, sha256: item.sha256, filename: item.filename, mime_type: item.mime_type, descriptor: 'retained-transfer', preview: item.preview })
@@ -251,8 +251,8 @@ describe('Library', () => {
     const fake = gateway({ pinReviewedLibraryArtifact })
     render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas`)} />)
     await screen.findByText(item.filename)
-    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Mark previewed version reviewed' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Oznacz podglądaną wersję jako zatwierdzoną' }))
     await waitFor(() => expect(pinReviewedLibraryArtifact).toHaveBeenCalledWith(expect.objectContaining({ profile: 'atlas', artifact_id: artifactId, reviewed_descriptor: 'signed-transfer' })))
   })
 
@@ -267,8 +267,8 @@ describe('Library', () => {
     const params = new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas&${routeKey}=${linkedId}`)
     render(<Library gateway={fake} onNavigate={vi.fn()} params={params} relationshipContext={relationships} />)
     await screen.findByText(item.filename)
-    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Mark previewed version reviewed' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Oznacz podglądaną wersję jako zatwierdzoną' }))
     await waitFor(() => expect(pinReviewedLibraryArtifact).toHaveBeenCalledWith(expect.objectContaining({ relationships })))
   })
 
@@ -277,8 +277,8 @@ describe('Library', () => {
     const fake = gateway({ pinReviewedLibraryArtifact })
     render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}&libraryProfile=atlas`)} />)
     await screen.findByText(item.filename)
-    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
-    fireEvent.click(await screen.findByRole('button', { name: 'Mark previewed version reviewed' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
+    fireEvent.click(await screen.findByRole('button', { name: 'Oznacz podglądaną wersję jako zatwierdzoną' }))
     await waitFor(() => expect(pinReviewedLibraryArtifact.mock.calls[0][0]).not.toHaveProperty('relationships'))
   })
 
@@ -296,9 +296,9 @@ describe('Library', () => {
 
     render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}`)} />)
     await screen.findByText('safe.html')
-    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
 
-    const frame = await screen.findByTitle('Static preview of safe.html')
+    const frame = await screen.findByTitle('Statyczny podgląd safe.html')
     expect(frame.getAttribute('sandbox')).toBe('')
     expect(frame.getAttribute('srcdoc')).toContain("default-src 'none'")
     expect(document.body.textContent).not.toContain('safe</p>')
@@ -321,9 +321,9 @@ describe('Library', () => {
     const view = render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}`)} />)
 
     await screen.findByText(pdfDetail.filename)
-    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
 
-    const frame = await screen.findByTitle(`PDF preview of ${pdfDetail.filename}`)
+    const frame = await screen.findByTitle(`Podgląd PDF ${pdfDetail.filename}`)
     expect(frame.getAttribute('src')).toBe('blob:verified-pdf')
     expect(frame.getAttribute('sandbox')).toBe('')
     expect(digest).toHaveBeenCalledOnce()
@@ -347,9 +347,9 @@ describe('Library', () => {
 
     render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}`)} />)
     await screen.findByText('receipt.json')
-    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
 
-    expect(await screen.findByText('JSON is shown as inert plain text; no embedded content is executed.')).toBeTruthy()
+    expect(await screen.findByText('JSON jest wyświetlany jako nieaktywny zwykły tekst; osadzona zawartość nie jest wykonywana.')).toBeTruthy()
     expect(screen.getByText(json)).toBeTruthy()
     expect(document.querySelector('.library-preview img')).toBeNull()
   })
@@ -360,9 +360,9 @@ describe('Library', () => {
     const fake = gateway({ libraryCapabilities: vi.fn().mockResolvedValue(capabilities(1024)), getLibraryArtifact: vi.fn().mockResolvedValue(htmlDetail), previewLibraryArtifact: vi.fn().mockResolvedValue({ artifact_id: artifactId, data_base64: encoded(unsafeHtml), offset: 0, next_offset: unsafeHtml.length, eof: true, size: unsafeHtml.length, sha256: item.sha256, filename: 'unsafe.html', mime_type: 'text/html', descriptor: 'signed-transfer', preview: htmlDetail.latest.preview, sandbox: 'allow-scripts', scripts: true, network: false }) })
     render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}`)} />)
     await screen.findByText('unsafe.html')
-    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
-    expect((await screen.findByRole('alert')).textContent).toContain('did not satisfy the static sandbox contract')
-    expect(screen.queryByTitle(/Static preview/)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
+    expect((await screen.findByRole('alert')).textContent).toContain('nie spełnia wymagań statycznego sandboxa')
+    expect(screen.queryByTitle(/Statyczny podgląd/)).toBeNull()
   })
 
   it('assembles an authenticated original download from bounded base64 chunks', async () => {
@@ -431,7 +431,7 @@ describe('Library', () => {
     const createObjectURL = vi.spyOn(URL, 'createObjectURL')
     createObjectURL.mockClear()
 
-    await expect(downloadOriginal(fake, artifactId)).rejects.toThrow('failed integrity verification')
+    await expect(downloadOriginal(fake, artifactId)).rejects.toThrow('Oryginalny artefakt nie przeszedł weryfikacji integralności.')
     expect(createObjectURL).not.toHaveBeenCalled()
     createObjectURL.mockRestore()
   })
@@ -446,17 +446,24 @@ describe('Library', () => {
     const unsupported = gateway({ getLibraryArtifact: vi.fn().mockResolvedValue(unsupportedDetail), previewLibraryArtifact: vi.fn().mockResolvedValue({ artifact_id: artifactId, available: false, preview: unsupportedDetail.latest.preview }) })
     render(<Library gateway={unsupported} onNavigate={vi.fn()} params={new URLSearchParams(`libraryArtifact=${artifactId}`)} />)
     await screen.findByText(item.filename)
-    fireEvent.click(screen.getByRole('button', { name: 'Load safe preview' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj bezpieczny podgląd' }))
     expect(await screen.findByText('No browser-safe preview exists.')).toBeTruthy()
   })
 
   it('falls back to canonical select values for untrusted URL enums', async () => {
     render(<Library gateway={gateway()} onNavigate={vi.fn()} params={new URLSearchParams('libraryType=forged&libraryDate=never&libraryStatus=hacked')} />)
-    await waitFor(() => expect(screen.queryByText('Loading the complete Library…')).toBeNull())
-    expect((screen.getByLabelText('Type') as HTMLSelectElement).value).toBe('all')
-    expect((screen.getByLabelText('Date') as HTMLSelectElement).value).toBe('any')
+    await waitFor(() => expect(screen.queryByText('Wczytywanie pełnej listy plików…')).toBeNull())
+    expect((screen.getByLabelText('Typ') as HTMLSelectElement).value).toBe('all')
+    expect((screen.getByLabelText('Data') as HTMLSelectElement).value).toBe('any')
     expect((screen.getByLabelText('Status') as HTMLSelectElement).value).toBe('all')
-    expect(screen.queryByText('Filters active')).toBeNull()
+    expect(screen.queryByText('Filtry aktywne')).toBeNull()
+  })
+
+  it('renders Polish Library chrome', async () => {
+    render(<Library gateway={gateway()} onNavigate={vi.fn()} params={new URLSearchParams()} />)
+    expect(await screen.findByRole('heading', { name: 'Pliki' })).toBeTruthy()
+    expect(screen.getByLabelText('Szukaj nazw i metadanych')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Odśwież pliki' })).toBeTruthy()
   })
 
   it.each([

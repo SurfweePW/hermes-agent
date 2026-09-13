@@ -28,7 +28,7 @@ describe('durable work inbox', () => {
     expect(screen.getByText((_text, element) => element?.tagName === 'P' && element.textContent?.includes(priority.next_step) === true)).toBeTruthy()
     expect(screen.getByText('Which audience?')).toBeTruthy()
     expect(screen.getByRole('link', { name: /Research/ })).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Otwórz sesję źródłową' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Otwórz rozmowę źródłową' }))
     expect(onOpenSourceSession).toHaveBeenCalledWith(sourceSession)
   })
 
@@ -52,10 +52,10 @@ describe('durable work inbox', () => {
       decisionHistory: [{ id: 'd1', revision: 1, action: 'request_changes', actor: 'human', reason: 'Narrow earlier scope', createdAt: '2026-01-01T00:00:00Z', scope: 'none', snoozedUntil: null }]
     } })} />)
     expect(screen.getByText('Preparation approved — awaiting execution tracker task link')).toBeTruthy()
-    expect(screen.getByText('request changes · Revision 1')).toBeTruthy()
+    expect(screen.getByText('request changes · Rewizja 1')).toBeTruthy()
     expect(screen.getByText('Narrow earlier scope')).toBeTruthy()
-    expect(screen.getByText(/shared-token and agent connections remain read-only/)).toBeTruthy()
-    expect(screen.getByRole('group', { name: 'Decision for revision 2' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByText(/połączenia przez współdzielony token i połączenia agentów pozostają tylko do odczytu/)).toBeTruthy()
+    expect(screen.getByRole('group', { name: 'Decyzja dla rewizji 2' }).hasAttribute('disabled')).toBe(true)
   })
   it('switching filters leaves detail and never retargets a pending decision', () => {
     const p = props(); const { rerender } = render(<WorkInbox {...p} />)
@@ -69,12 +69,12 @@ describe('durable work inbox', () => {
   it('renders revision, evidence, scope, owner and persisted discussion without active unsafe previews', () => {
     render(<WorkInbox {...props()} />)
     expect(screen.getByRole('heading', { name: card.title })).toBeTruthy()
-    expect(screen.getByText('CMO Exact · needs_me · Revision 2')).toBeTruthy()
+    expect(screen.getByText('CMO Exact · needs_me · Rewizja 2')).toBeTruthy()
 
     for (const text of ['Draft copy', 'Publish', 'Pawel', 'Which audience?']) {expect(screen.getByText(text)).toBeTruthy()}
     expect(screen.getByRole('link', { name: /Research/ }).getAttribute('rel')).toBe('noopener noreferrer')
     expect(screen.queryByRole('link', { name: /Unsafe preview/ })).toBeNull()
-    expect(screen.queryByRole('button', { name: /Always approve/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Zawsze zatwierdzaj/ })).toBeNull()
   })
   it('turns a structured producer brief into an understandable decision summary', () => {
     const brief = JSON.stringify({
@@ -90,10 +90,10 @@ describe('durable work inbox', () => {
     const structuredCard = { ...card, brief }
     const view = render(<WorkInbox {...props({ items: [structuredCard], selected: structuredCard })} />)
 
-    expect(screen.getByRole('heading', { name: 'What this is about' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'O co chodzi' })).toBeTruthy()
     expect(screen.getByText('Two creative cells are ready for a controlled draft.')).toBeTruthy()
     expect(screen.getByText('A local paused draft can now be prepared safely.')).toBeTruthy()
-    expect(screen.getByText((_text, element) => element?.tagName === 'P' && element.textContent === 'Decision scope: preparation')).toBeTruthy()
+    expect(screen.getByText((_text, element) => element?.tagName === 'P' && element.textContent === 'Zakres decyzji: preparation')).toBeTruthy()
     expect(screen.getByText('No spend is authorized. A later test is capped at 500 PLN.')).toBeTruthy()
     expect(screen.getByText('Local draft preparation only. No activation or publication.')).toBeTruthy()
     expect(screen.getByText('SHA-256: ' + 'a'.repeat(64))).toBeTruthy()
@@ -109,7 +109,7 @@ describe('durable work inbox', () => {
 
     render(<WorkInbox {...props({ onOpenArtifact, selected: { ...card, evidence: unsafe.map((reference) => ({ label: reference, url: reference })) } })} />)
 
-    expect(screen.queryByRole('button', { name: /in Library/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: /w plikach/ })).toBeNull()
     expect(onOpenArtifact).not.toHaveBeenCalled()
     for (const reference of unsafe) {expect(document.body.textContent).not.toContain(reference)}
   })
@@ -118,7 +118,7 @@ describe('durable work inbox', () => {
     const reference = 'library:campaigns/autumn/brief-v1.pdf'
 
     render(<WorkInbox {...props({ onOpenArtifact, selected: { ...card, evidence: [{ label: reference, url: reference }] } })} />)
-    fireEvent.click(screen.getByRole('button', { name: `Open ${reference} in Library` }))
+    fireEvent.click(screen.getByRole('button', { name: `Otwórz ${reference} w plikach` }))
 
     expect(onOpenArtifact).toHaveBeenCalledWith('CMO Exact', reference)
     expect(document.body.textContent).not.toContain('/Users/')
@@ -128,7 +128,7 @@ describe('durable work inbox', () => {
     const structured = { ...card, brief: JSON.stringify({ artifacts: [{ path: 'library:campaigns/autumn/brief-v1.pdf' }] }) }
 
     render(<WorkInbox {...props({ onOpenArtifact, selected: structured })} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Open library:campaigns/autumn/brief-v1.pdf in Library' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Otwórz library:campaigns/autumn/brief-v1.pdf w plikach' }))
 
     expect(onOpenArtifact).toHaveBeenCalledWith('CMO Exact', 'library:campaigns/autumn/brief-v1.pdf')
   })
@@ -146,14 +146,14 @@ describe('durable work inbox', () => {
       completionEvidence: ['final artifact'],
       trackerStatusHistory: [{ state: 'blocked', observed_at: '2026-09-06T10:00:00Z', evidence: ['block event'], blocker: 'Legal review' }]
     } })} />)
-    expect(screen.getByText(/Observed 2026-09-06T11:00:00Z/)).toBeTruthy()
-    expect(screen.getByText(/Result:/)).toBeTruthy()
-    expect(screen.getByText(/Blocker:/)).toBeTruthy()
+    expect(screen.getByText(/Zaobserwowano 2026-09-06T11:00:00Z/)).toBeTruthy()
+    expect(screen.getByText(/Wynik:/)).toBeTruthy()
+    expect(screen.getByText(/Blokada:/)).toBeTruthy()
     expect(screen.getByText('final artifact')).toBeTruthy()
   })
   it('switches Topic, Session and Project grouping through the control', () => {
     const p = props({ selected: null }); render(<WorkInbox {...p} />)
-    fireEvent.change(screen.getByLabelText('Group by'), { target: { value: 'session' } })
+    fireEvent.change(screen.getByLabelText('Grupuj według'), { target: { value: 'session' } })
     expect(p.onGroupBy).toHaveBeenCalledWith('session')
   })
   it('keeps detailed source errors behind progressive disclosure', () => {
@@ -161,7 +161,7 @@ describe('durable work inbox', () => {
       { profile: 'atlas', status: 'verified', incomplete: false, lastSuccess: '2026-09-07T10:00:00Z', message: null },
       { profile: 'offline', status: 'error', incomplete: true, lastSuccess: null, message: 'Refresh failed' }
     ] })} />)
-    const summary = screen.getByText('1 of 2 work sources incomplete')
+    const summary = screen.getByText('1 z 2 źródeł pracy jest niepełnych')
     const details = summary.closest('details') as HTMLDetailsElement
     expect(details.open).toBe(false)
     fireEvent.click(summary)
@@ -169,46 +169,46 @@ describe('durable work inbox', () => {
   })
   it.each(['offline', 'error', 'unsupported', 'loading'] as const)('disables decision and comment on %s', (status) => {
     render(<WorkInbox {...props({ status })} />)
-    expect(screen.getByRole('group', { name: 'Decision for revision 2' }).hasAttribute('disabled')).toBe(true)
-    expect(screen.getByRole('button', { name: 'Add comment' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('group', { name: 'Decyzja dla rewizji 2' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('button', { name: 'Dodaj komentarz' }).hasAttribute('disabled')).toBe(true)
   })
   it('does not pretend unsupported is an empty inbox', () => {
     render(<WorkInbox {...props({ selected: null, items: [], status: 'unsupported' })} />)
-    expect(screen.getByText(/does not support the durable work inbox/)).toBeTruthy()
-    expect(screen.queryByText(/No work in this view/)).toBeNull()
+    expect(screen.getByText(/nie obsługuje trwałej skrzynki pracy/)).toBeTruthy()
+    expect(screen.queryByText(/Brak pracy w tym widoku/)).toBeNull()
   })
   it('exposes exactly three bounded actions and marks the authoritative recommendation', () => {
     render(<WorkInbox {...props()} />)
-    const group = screen.getByRole('group', { name: 'Decision for revision 2' })
+    const group = screen.getByRole('group', { name: 'Decyzja dla rewizji 2' })
     const actions = Array.from(group.querySelectorAll('button'))
 
-    expect(actions.map((button) => button.textContent?.replace(' · Recommended', ''))).toEqual(['Approve', 'Request changes', 'Remind in 2 hours'])
-    expect(actions.filter((button) => button.textContent?.includes('Recommended'))).toHaveLength(1)
-    expect(actions[0]?.textContent).toBe('Approve · Recommended')
+    expect(actions.map((button) => button.textContent?.replace(' · Rekomendowane', ''))).toEqual(['Zatwierdź', 'Poproś o poprawki', 'Przypomnij za 2 godziny'])
+    expect(actions.filter((button) => button.textContent?.includes('Rekomendowane'))).toHaveLength(1)
+    expect(actions[0]?.textContent).toBe('Zatwierdź · Rekomendowane')
     expect(screen.queryByRole('button', { name: 'Decline' })).toBeNull()
     expect(screen.queryByLabelText(/snooze until/i)).toBeNull()
     const explanation = screen.getByRole('heading', { name: 'Co zmieni kliknięcie' }).parentElement!
     expect(screen.getAllByRole('heading', { name: 'Co zmieni kliknięcie' })).toHaveLength(1)
     expect(explanation.querySelectorAll('li')).toHaveLength(3)
-    expect(explanation.textContent).toContain('Approve')
-    expect(explanation.textContent).toContain('Request changes')
-    expect(explanation.textContent).toContain('Remind in 2 hours')
+    expect(explanation.textContent).toContain('Zatwierdź')
+    expect(explanation.textContent).toContain('Poproś o poprawki')
+    expect(explanation.textContent).toContain('Przypomnij za 2 godziny')
     expect(explanation.textContent).toContain('nie publikuje')
     expect(explanation.textContent).toContain('wraca ona do decyzji')
   })
   it('requires a changes comment and sends preparation-only decisions', async () => {
     const p = props(); render(<WorkInbox {...p} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Request changes' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Poproś o poprawki' }))
     expect(p.onDecision).not.toHaveBeenCalled()
-    fireEvent.change(screen.getByLabelText('Discussion / requested changes'), { target: { value: 'Narrow audience' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Request changes' }))
+    fireEvent.change(screen.getByLabelText('Dyskusja / żądane poprawki'), { target: { value: 'Narrow audience' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Poproś o poprawki' }))
     await waitFor(() => expect(p.onDecision).toHaveBeenCalledWith({ action: 'request_changes', comment: 'Narrow audience' }))
-    fireEvent.click(screen.getByRole('button', { name: 'Approve' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Zatwierdź' }))
     await waitFor(() => expect(p.onDecision).toHaveBeenCalledWith({ action: 'approve_preparation' }))
   })
   it('submits the fixed reminder semantic without arbitrary dates or decline', async () => {
     const p = props(); render(<WorkInbox {...p} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Remind in 2 hours' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Przypomnij za 2 godziny' }))
     await waitFor(() => expect(p.onDecision).toHaveBeenCalledWith({ action: 'remind_in_2_hours' }))
   })
   it('keeps historical work recoverable and opens exact profile/id without chat', () => {
@@ -220,25 +220,25 @@ describe('durable work inbox', () => {
   })
   it('blocks duplicate pending controls and read-only work', () => {
     render(<WorkInbox {...props({ pending: true })} />)
-    expect(screen.getByRole('group', { name: 'Decision for revision 2' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('group', { name: 'Decyzja dla rewizji 2' }).hasAttribute('disabled')).toBe(true)
   })
   it('keeps comments read-only without current can_decide authority', () => {
     render(<WorkInbox {...props({ selected: { ...card, actionable: false, canDecide: false, readOnlyReason: 'Owner sign-in required' } })} />)
-    expect(screen.getByLabelText('Discussion / requested changes').hasAttribute('disabled')).toBe(true)
-    expect(screen.getByRole('button', { name: 'Add comment' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByLabelText('Dyskusja / żądane poprawki').hasAttribute('disabled')).toBe(true)
+    expect(screen.getByRole('button', { name: 'Dodaj komentarz' }).hasAttribute('disabled')).toBe(true)
   })
   it('sets and restores an owner priority without collecting an actor', async () => {
     const priority = { profile: 'CMO Exact', work_id: 'work-1', candidate_id: 'candidate-1', eligibility: 'assessed' as const, why_here: 'Deadline', next_step: 'Review', trade_off: 'Defers polish', assessed_at: null, evidence: [], assessment: null, override: { id: 'override-1', version: 2, mode: 'set_priority' as const, label: 'Now', actor: 'owner:server', reason: 'Launch', expires_at: null, review_id: null, review_at: null, active: true }, topicName: 'Launch', group: { kind: 'topic' as const, id: 'topic-1', profile: 'CMO Exact', backend_namespace: 'organization-db' }, groupOrder: 0, itemOrder: 0 }
     const p = props({ priorityWritable: true, selected: { ...card, priority } }); render(<WorkInbox {...p} />)
-    fireEvent.change(screen.getByLabelText('Priority label'), { target: { value: 'Do first' } })
-    fireEvent.change(screen.getByLabelText('Reason'), { target: { value: 'Material deadline' } })
-    expect(screen.getByRole('button', { name: 'Set priority' }).hasAttribute('disabled')).toBe(true)
-    expect(screen.getByText('Choose when this override expires.')).toBeTruthy()
-    fireEvent.change(screen.getByLabelText('Expires at (required)'), { target: { value: '2099-01-01T00:00' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Set priority' }))
+    fireEvent.change(screen.getByLabelText('Etykieta priorytetu'), { target: { value: 'Do first' } })
+    fireEvent.change(screen.getByLabelText('Powód'), { target: { value: 'Material deadline' } })
+    expect(screen.getByRole('button', { name: 'Ustaw priorytet' }).hasAttribute('disabled')).toBe(true)
+    expect(screen.getByText('Wybierz termin wygaśnięcia tego nadpisania.')).toBeTruthy()
+    fireEvent.change(screen.getByLabelText('Wygasa (wymagane)'), { target: { value: '2099-01-01T00:00' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Ustaw priorytet' }))
     await waitFor(() => expect(p.onPriority).toHaveBeenCalledWith({ label: 'Do first', reason: 'Material deadline', expiresAt: new Date('2099-01-01T00:00').toISOString() }))
     expect(screen.queryByLabelText(/actor/i)).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: 'Restore recommended' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Przywróć rekomendowane' }))
     await waitFor(() => expect(p.onRestorePriority).toHaveBeenCalledTimes(1))
   })
   it('rejects executable, local and credential-bearing links', () => {
@@ -253,5 +253,10 @@ describe('durable work inbox', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Otwórz projekt' }))
 
     expect(onOpenProject).toHaveBeenCalledWith({ source_id: 'desktop-project-7', profile: 'project-owner', backend_namespace: 'desktop:exact' })
+  })
+  it('renders Polish work chrome', () => {
+    render(<WorkInbox {...props({ selected: null })} />)
+    expect(screen.getByText('Trwała praca biznesowa')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Odśwież pracę' })).toBeTruthy()
   })
 })

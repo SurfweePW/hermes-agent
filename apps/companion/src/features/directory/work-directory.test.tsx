@@ -268,7 +268,7 @@ describe('WorkDirectory', () => {
     })
 
     const { rerender } = render(<WorkDirectory {...topics} />)
-    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Topics', 'Projects', 'Sessions'])
+    expect(screen.getAllByRole('tab').map((tab) => tab.textContent)).toEqual(['Tematy', 'Projekty', 'Rozmowy'])
     expect(screen.getByText('Topics require an organization backend update')).toBeTruthy()
 
     rerender(<WorkDirectory {...props('section=projects')} />)
@@ -280,13 +280,13 @@ describe('WorkDirectory', () => {
 
   it('opens direct read-only project details and session history', () => {
     const { rerender } = render(<WorkDirectory {...props('section=projects&focus=project-1&focusProfile=atlas&focusSource=desktop-db', { selectedProject: projectDetail, detailStatus: 'ready' })} />)
-    expect(screen.getByText('Read-only source detail')).toBeTruthy()
-    fireEvent.click(screen.getByRole('tab', { name: 'Sessions' }))
+    expect(screen.getByText('Szczegóły źródła tylko do odczytu')).toBeTruthy()
+    fireEvent.click(screen.getByRole('tab', { name: 'Rozmowy' }))
 
     rerender(<WorkDirectory {...props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=history', { selectedSession: session, history, detailStatus: 'ready' })} />)
     expect(screen.getByText('Please research launch timing.')).toBeTruthy()
     expect(screen.getByText('Research complete.')).toBeTruthy()
-    expect(screen.getByText(/Viewing history does not resume or activate this session/)).toBeTruthy()
+    expect(screen.getByText(/Wyświetlenie historii nie wznawia ani nie aktywuje tej rozmowy/)).toBeTruthy()
     expect(screen.getByText(/Tool execution/)).toBeTruthy()
   })
 
@@ -303,16 +303,16 @@ describe('WorkDirectory', () => {
 
     expect(screen.getByText('Companion launch')).toBeTruthy()
     expect(screen.getByText(/organization-db.*atlas/)).toBeTruthy()
-    expect(screen.getByText('Some authorized Topic relationships could not be verified.')).toBeTruthy()
+    expect(screen.getByText('Nie udało się zweryfikować części autoryzowanych powiązań tematów.')).toBeTruthy()
   })
 
   it('offers only a verified current-client original route and otherwise gives a complete fallback', () => {
     const unsupported = props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=history', { selectedSession: session, history, detailStatus: 'ready' })
     const { rerender } = render(<WorkDirectory {...unsupported} />)
 
-    expect(screen.queryByRole('button', { name: 'Open original' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Otwórz źródło' })).toBeNull()
     expect(screen.getByText('Szczegóły techniczne').closest('details')?.hasAttribute('open')).toBe(false)
-    expect(screen.getByText(/Continue this conversation in its existing client/)).toBeTruthy()
+    expect(screen.getByText(/Kontynuuj tę rozmowę w dotychczasowym kliencie/)).toBeTruthy()
     expect(screen.getByText('Please research launch timing.')).toBeTruthy()
 
     const routedHistory: CompanionSessionHistoryResult = {
@@ -322,7 +322,7 @@ describe('WorkDirectory', () => {
 
     const routed = props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=history', { selectedSession: session, history: routedHistory, detailStatus: 'ready' })
     rerender(<WorkDirectory {...routed} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Open original' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Otwórz źródło' }))
     expect(routed.onOpenOriginal).toHaveBeenCalledWith(routedHistory.original_route, 'atlas', 'session-1')
   })
 
@@ -338,7 +338,7 @@ describe('WorkDirectory', () => {
 
     render(<WorkDirectory {...routed} onOpenOriginal={undefined} />)
 
-    expect(screen.queryByRole('button', { name: 'Open original' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Otwórz źródło' })).toBeNull()
     expect(screen.getByText('Szczegóły techniczne').closest('details')?.hasAttribute('open')).toBe(false)
   })
 
@@ -356,12 +356,12 @@ describe('WorkDirectory', () => {
     })
 
     render(<WorkDirectory {...routed} onOpenOriginal={onOpenOriginal} />)
-    fireEvent.click(screen.getByRole('button', { name: 'Open original' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Otwórz źródło' }))
 
-    expect((screen.getByRole('button', { name: 'Opening original…' }) as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByRole('button', { name: 'Otwieranie źródła…' }) as HTMLButtonElement).disabled).toBe(true)
     rejectOpen(new Error('secret native detail'))
 
-    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/could not open/i))
+    await waitFor(() => expect(screen.getByRole('alert').textContent).toMatch(/nie mógł otworzyć/i))
     expect(document.body.textContent).not.toContain('secret native detail')
     expect(screen.getByText('Szczegóły techniczne').closest('details')?.hasAttribute('open')).toBe(false)
   })
@@ -374,14 +374,14 @@ describe('WorkDirectory', () => {
     })
 
     const { rerender } = render(<WorkDirectory {...projectView} />)
-    expect(screen.getByText('No Needs Me items')).toBeTruthy()
+    expect(screen.getByText('Brak pozycji wymagających mnie')).toBeTruthy()
 
     const projectFiles = props('section=projects&focus=project-1&focusProfile=atlas&focusSource=desktop-db&tab=files', {
       selectedProject: projectDetail, entityProjection: projection, detailStatus: 'ready'
     })
 
     rerender(<WorkDirectory {...projectFiles} />)
-    fireEvent.click(screen.getByRole('button', { name: 'View files in Library' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Zobacz pliki' }))
     expect(Object.fromEntries(projectFiles.onNavigate.mock.calls[0][0] as URLSearchParams)).toEqual({
       view: 'library', libraryProfile: 'atlas', libraryProject: 'project-1'
     })
@@ -391,14 +391,14 @@ describe('WorkDirectory', () => {
     })
 
     rerender(<WorkDirectory {...sessionView} />)
-    expect(screen.getByText('No linked work')).toBeTruthy()
+    expect(screen.getByText('Brak powiązanej pracy')).toBeTruthy()
 
     const sessionFiles = props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=files', {
       selectedSession: session, history, entityProjection: projection, detailStatus: 'ready'
     })
 
     rerender(<WorkDirectory {...sessionFiles} />)
-    fireEvent.click(screen.getByRole('button', { name: 'View files in Library' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Zobacz pliki' }))
     expect(Object.fromEntries(sessionFiles.onNavigate.mock.calls[0][0] as URLSearchParams)).toEqual({
       view: 'library', libraryProfile: 'atlas', librarySession: 'session-1'
     })
@@ -415,7 +415,7 @@ describe('WorkDirectory', () => {
 
     render(<WorkDirectory {...props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=history', { selectedSession: session, history: privateHistory, detailStatus: 'ready' })} />)
 
-    expect(screen.getByText(/Image attachment/)).toBeTruthy()
+    expect(screen.getByText(/Załącznik obrazu/)).toBeTruthy()
     expect(document.body.textContent).not.toContain('/Users/alice')
     expect(document.body.textContent).not.toContain('data:image')
     expect(document.body.textContent).not.toContain('[sender|123]')
@@ -545,35 +545,35 @@ describe('WorkDirectory', () => {
   it('never presents unknown project membership as verified absence', () => {
     render(<WorkDirectory {...props('section=sessions', { sessions: [{ ...session, project: null }] })} />)
 
-    expect(screen.getByRole('button', { name: /Project membership not reported/ })).toBeTruthy()
-    expect(document.body.textContent).not.toContain('No project')
+    expect(screen.getByRole('button', { name: /Nie zgłoszono przypisania do projektu/ })).toBeTruthy()
+    expect(document.body.textContent).not.toContain('Brak projektu')
   })
 
   it('exposes functional visibility, source, origin, date, topic, project, and type filters with chips and clear', () => {
     const onNavigate = vi.fn()
     render(<WorkDirectory {...props('section=sessions&source=desktop-db&profile=atlas&origin=desktop&visibility=current&dateFrom=2026-09-01&dateTo=2026-09-30&topic=topic-1&project=project-1&type=direct&sort=name&group=profile&q=Launch')} onNavigate={onNavigate} />)
-    expect((screen.getByLabelText('Search titles') as HTMLInputElement).value).toBe('Launch')
-    expect((screen.getByLabelText('Visibility') as HTMLSelectElement).value).toBe('current')
-    expect((screen.getByLabelText('From date') as HTMLInputElement).value).toBe('2026-09-01')
-    expect((screen.getByLabelText('To date') as HTMLInputElement).value).toBe('2026-09-30')
-    expect((screen.getByLabelText('Sort') as HTMLSelectElement).value).toBe('name')
-    expect((screen.getByLabelText('Group by') as HTMLSelectElement).value).toBe('profile')
-    const chips = screen.getByLabelText('Active filters').textContent
-    expect(chips).toContain('Source: desktop-db')
-    expect(chips).toContain('Origin: desktop')
-    expect(chips).toContain('Topic: Companion launch')
-    expect(chips).toContain('Project: Launch plan')
-    expect(chips).toContain('Type: direct')
+    expect((screen.getByLabelText('Szukaj nazw') as HTMLInputElement).value).toBe('Launch')
+    expect((screen.getByLabelText('Widoczność') as HTMLSelectElement).value).toBe('current')
+    expect((screen.getByLabelText('Data od') as HTMLInputElement).value).toBe('2026-09-01')
+    expect((screen.getByLabelText('Data do') as HTMLInputElement).value).toBe('2026-09-30')
+    expect((screen.getByLabelText('Sortowanie') as HTMLSelectElement).value).toBe('name')
+    expect((screen.getByLabelText('Grupuj według') as HTMLSelectElement).value).toBe('profile')
+    const chips = screen.getByLabelText('Aktywne filtry').textContent
+    expect(chips).toContain('Źródło: desktop-db')
+    expect(chips).toContain('Pochodzenie: desktop')
+    expect(chips).toContain('Temat: Companion launch')
+    expect(chips).toContain('Projekt: Launch plan')
+    expect(chips).toContain('Typ: direct')
     expect(screen.getByRole('button', { name: /Launch research/ })).toBeTruthy()
 
-    fireEvent.change(screen.getByLabelText('Search titles'), { target: { value: 'Research' } })
+    fireEvent.change(screen.getByLabelText('Szukaj nazw'), { target: { value: 'Research' } })
     const next = onNavigate.mock.calls.at(-1)?.[0] as URLSearchParams
     expect(next.get('q')).toBe('Research')
     expect(next.getAll('source')).toEqual(['desktop-db'])
     expect(next.getAll('profile')).toEqual(['atlas'])
     expect(next.getAll('origin')).toEqual(['desktop'])
 
-    fireEvent.click(screen.getByRole('button', { name: 'Clear filters' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Wyczyść filtry' }))
     const cleared = onNavigate.mock.calls.at(-1)?.[0] as URLSearchParams
 
     for (const key of ['q', 'source', 'profile', 'origin', 'visibility', 'dateFrom', 'dateTo', 'topic', 'project', 'type']) {expect(cleared.has(key)).toBe(false)}
@@ -581,34 +581,34 @@ describe('WorkDirectory', () => {
 
   it('distinguishes verified empty results from update-required and failed coverage', () => {
     const { rerender } = render(<WorkDirectory {...props('section=projects', { projects: [] })} />)
-    expect(screen.getByText('No eligible records')).toBeTruthy()
-    expect(screen.getByText(/complete empty result/)).toBeTruthy()
+    expect(screen.getByText('Brak dostępnych rekordów')).toBeTruthy()
+    expect(screen.getByText(/pełną pustą listę/)).toBeTruthy()
 
     const unsupportedCoverage = { ...coverage, status: 'unsupported' as const, complete: false, projectStatus: 'unsupported' as const, message: 'Projects require a backend update.' }
     rerender(<WorkDirectory {...props('section=projects', { projects: [], coverage: [unsupportedCoverage] })} />)
-    expect(screen.getAllByText('Backend update required').length).toBeGreaterThan(0)
-    expect(screen.getByText(/not a complete empty result/)).toBeTruthy()
+    expect(screen.getAllByText('Wymagana aktualizacja backendu').length).toBeGreaterThan(0)
+    expect(screen.getByText(/nie jest potwierdzoną pustą listą/)).toBeTruthy()
 
     const failedCoverage = { ...coverage, status: 'error' as const, complete: false, projectStatus: 'error' as const, message: 'Projects could not be verified.' }
     rerender(<WorkDirectory {...props('section=projects', { projects: [], coverage: [failedCoverage] })} />)
-    expect(screen.getByText('Source coverage unavailable')).toBeTruthy()
-    expect(screen.getByText(/not a complete empty result/)).toBeTruthy()
+    expect(screen.getByText('Zakres źródeł niedostępny')).toBeTruthy()
+    expect(screen.getByText(/nie jest potwierdzoną pustą listą/)).toBeTruthy()
 
     const loadingCoverage = { ...coverage, status: 'loading' as const, complete: false, projectStatus: 'loading' as const, projectComplete: false }
     rerender(<WorkDirectory {...props('section=projects', { projects: [], coverage: [coverage, loadingCoverage] })} />)
-    expect(screen.getByText('Loading verified source records…')).toBeTruthy()
+    expect(screen.getByText('Wczytywanie zweryfikowanych rekordów źródłowych…')).toBeTruthy()
 
     rerender(<WorkDirectory {...props('section=projects', { projects: [], coverage: [] })} />)
-    expect(screen.getByText('Loading verified source records…')).toBeTruthy()
+    expect(screen.getByText('Wczytywanie zweryfikowanych rekordów źródłowych…')).toBeTruthy()
   })
 
   it('normalizes invalid URL enums and exposes complete keyboard-operable tab semantics', () => {
     const listing = props('section=sessions&archive=forged&group=forged')
     const { rerender } = render(<WorkDirectory {...listing} />)
-    expect((screen.getByLabelText('Visibility') as HTMLSelectElement).value).toBe('all')
-    expect((screen.getByLabelText('Group by') as HTMLSelectElement).value).toBe('none')
-    const topics = screen.getByRole('tab', { name: 'Topics' })
-    const projects = screen.getByRole('tab', { name: 'Projects' })
+    expect((screen.getByLabelText('Widoczność') as HTMLSelectElement).value).toBe('all')
+    expect((screen.getByLabelText('Grupuj według') as HTMLSelectElement).value).toBe('none')
+    const topics = screen.getByRole('tab', { name: 'Tematy' })
+    const projects = screen.getByRole('tab', { name: 'Projekty' })
     expect(topics.tabIndex).toBe(-1)
     expect(projects.getAttribute('aria-controls')).toBe('work-directory-panel-projects')
     expect(document.getElementById('work-directory-panel-sessions')?.getAttribute('role')).toBe('tabpanel')
@@ -618,9 +618,9 @@ describe('WorkDirectory', () => {
     expect((listing.onNavigate.mock.calls.at(-1)?.[0] as URLSearchParams).get('section')).toBe('sessions')
 
     rerender(<WorkDirectory {...props('section=projects&focus=project-1&focusProfile=atlas&focusSource=desktop-db&tab=forged', { selectedProject: projectDetail, detailStatus: 'ready' })} />)
-    expect(screen.getByRole('tab', { name: 'Overview' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByRole('tab', { name: 'Przegląd' }).getAttribute('aria-selected')).toBe('true')
     expect(screen.getByRole('tabpanel').getAttribute('aria-labelledby')).toBe('project-detail-tab-overview')
-    expect(screen.getByText('Last activity')).toBeTruthy()
+    expect(screen.getByText('Ostatnia aktywność')).toBeTruthy()
   })
 
   it('keeps the selected source identity in detail URLs and clears only focus when going back', () => {
@@ -632,7 +632,7 @@ describe('WorkDirectory', () => {
 
     const detail = props(focused.toString(), { selectedProject: projectDetail, detailStatus: 'ready' })
     rerender(<WorkDirectory {...detail} />)
-    fireEvent.click(screen.getByRole('button', { name: '← Back to projects' }))
+    fireEvent.click(screen.getByRole('button', { name: '← Wróć do projektów' }))
     const restored = detail.onNavigate.mock.calls[0][0] as URLSearchParams
     expect(restored.get('focus')).toBeNull()
     expect(restored.get('q')).toBe('Launch')

@@ -172,14 +172,14 @@ describe('Topics directory', () => {
     const listing = props('section=topics&q=launch&collection=operations&lifecycle=active&verified=true&sort=name')
     render(<WorkDirectory {...listing} />)
 
-    expect((screen.getByLabelText('Search topics') as HTMLInputElement).value).toBe('launch')
-    expect((screen.getByLabelText('Topic sort') as HTMLSelectElement).value).toBe('name')
-    expect(screen.getByText('1 of 2 topics loaded')).toBeTruthy()
-    expect(screen.getByLabelText('Active topic filters').textContent).toContain('Collection: operations')
+    expect((screen.getByLabelText('Szukaj tematów') as HTMLInputElement).value).toBe('launch')
+    expect((screen.getByLabelText('Sortowanie tematów') as HTMLSelectElement).value).toBe('name')
+    expect(screen.getByText('Wczytano 1 z 2 tematów')).toBeTruthy()
+    expect(screen.getByLabelText('Aktywne filtry tematów').textContent).toContain('Kolekcja: operations')
     expect(screen.getByRole('button', { name: /Companion launch/ }).textContent).toContain('Profil: atlas')
     expect(screen.getByRole('button', { name: /Companion launch/ }).textContent).not.toContain('organization-db')
     expect(screen.getAllByText('Szczegóły techniczne').some((summary) => summary.closest('details')?.textContent?.includes('organization-db'))).toBe(true)
-    expect(screen.getByRole('button', { name: 'Clear filters' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Wyczyść filtry' })).toBeTruthy()
 
     fireEvent.click(screen.getByRole('button', { name: /Companion launch/ }))
     expect(Object.fromEntries((listing.onNavigate.mock.calls[0][0] as URLSearchParams).entries())).toMatchObject({
@@ -194,7 +194,7 @@ describe('Topics directory', () => {
       sort: 'name'
     })
 
-    fireEvent.click(screen.getByRole('button', { name: 'Load more topics from atlas' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Wczytaj więcej tematów z profilu atlas' }))
     expect(listing.onLoadOlder).toHaveBeenCalledWith('topics', 'atlas')
   })
 
@@ -208,23 +208,23 @@ describe('Topics directory', () => {
 
     const { rerender } = render(<WorkDirectory {...focused} />)
 
-    expect(screen.getByText('Read-only organization detail')).toBeTruthy()
+    expect(screen.getByText('Szczegóły organizacji tylko do odczytu')).toBeTruthy()
     const technical = screen.getByText('Szczegóły techniczne').closest('details')
     expect(technical?.hasAttribute('open')).toBe(false)
     expect(technical?.textContent).toContain('organization-db')
     expect(screen.getByText(/Profil: atlas/)).toBeTruthy()
-    expect(screen.getByRole('tab', { name: 'Needs Me' }).getAttribute('aria-selected')).toBe('true')
+    expect(screen.getByRole('tab', { name: 'Wymaga mnie' }).getAttribute('aria-selected')).toBe('true')
 
-    for (const name of ['Overview', 'Needs Me', 'Work', 'Files', 'Sources']) {
+    for (const name of ['Przegląd', 'Wymaga mnie', 'Praca', 'Pliki', 'Źródła']) {
       const tab = screen.getByRole('tab', { name })
 
       expect(document.getElementById(tab.getAttribute('aria-controls')!)).toBeTruthy()
     }
 
     expect(screen.getByText('Approve launch checklist')).toBeTruthy()
-    expect(screen.getByText(/Release gate is ready · Next: Approve the checklist/)).toBeTruthy()
+    expect(screen.getByText(/Release gate is ready · Dalej: Approve the checklist/)).toBeTruthy()
 
-    fireEvent.keyDown(screen.getByRole('tab', { name: 'Needs Me' }), { key: 'ArrowRight' })
+    fireEvent.keyDown(screen.getByRole('tab', { name: 'Wymaga mnie' }), { key: 'ArrowRight' })
     expect((focused.onNavigate.mock.calls.at(-1)?.[0] as URLSearchParams).get('tab')).toBe('work')
 
     const workView = props('section=topics&focus=topic-1&focusProfile=atlas&focusSource=organization-db&tab=work', {
@@ -233,7 +233,7 @@ describe('Topics directory', () => {
 
     rerender(<WorkDirectory {...workView} />)
     expect(screen.getByText('Approve launch checklist')).toBeTruthy()
-    expect(screen.getByText(/needs me · prepared · revision 4/)).toBeTruthy()
+    expect(screen.getByText(/needs me · prepared · wersja 4/)).toBeTruthy()
 
     const sourcesView = props('section=topics&focus=topic-1&focusProfile=atlas&focusSource=organization-db&tab=sources', {
       selectedTopic: detail, entityProjection, topicSourceDetails, detailStatus: 'ready'
@@ -242,7 +242,7 @@ describe('Topics directory', () => {
     rerender(<WorkDirectory {...sourcesView} />)
     expect(screen.getByText('Launch project')).toBeTruthy()
     expect(screen.getByText(/primary_project · ready · desktop project · current/)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Open project' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Otwórz projekt' }))
     expect(Object.fromEntries((sourcesView.onNavigate.mock.calls.at(-1)?.[0] as URLSearchParams).entries())).toMatchObject({
       section: 'projects', focus: 'launch-project', focusProfile: 'atlas', focusSource: 'organization-db', tab: 'overview'
     })
@@ -252,13 +252,13 @@ describe('Topics directory', () => {
     })
 
     rerender(<WorkDirectory {...filesView} />)
-    fireEvent.click(screen.getByRole('button', { name: 'View files in Library' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Wyświetl pliki w Bibliotece' }))
     expect(Object.fromEntries((filesView.onNavigate.mock.calls.at(-1)?.[0] as URLSearchParams).entries())).toEqual({
       view: 'library', libraryProfile: 'atlas', libraryTopic: 'topic-1'
     })
 
     rerender(<WorkDirectory {...focused} />)
-    fireEvent.click(screen.getByRole('button', { name: '← Back to topics' }))
+    fireEvent.click(screen.getByRole('button', { name: '← Wróć do tematów' }))
     const restored = focused.onNavigate.mock.calls.at(-1)?.[0] as URLSearchParams
     expect(restored.get('focus')).toBeNull()
     expect(restored.get('focusSource')).toBeNull()
@@ -282,13 +282,13 @@ describe('Topics directory', () => {
     })
 
     const { rerender } = render(<WorkDirectory {...props('section=topics')} snapshot={empty} />)
-    expect(screen.getByText('No topics yet')).toBeTruthy()
+    expect(screen.getByText('Brak tematów')).toBeTruthy()
 
     rerender(<WorkDirectory {...props('section=topics')} snapshot={{
       ...empty,
       topicCoverage: [{ ...empty.topicCoverage[0], status: 'error', coverage: null, total: null }]
     }} />)
-    expect(screen.getByText('Topic coverage unavailable')).toBeTruthy()
-    expect(screen.getByText(/cannot claim this directory is empty/i)).toBeTruthy()
+    expect(screen.getByText('Zakres tematów niedostępny')).toBeTruthy()
+    expect(screen.getByText(/nie może uznać tego katalogu za pusty/i)).toBeTruthy()
   })
 })

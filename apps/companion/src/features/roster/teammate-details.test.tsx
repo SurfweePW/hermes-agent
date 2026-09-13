@@ -6,6 +6,17 @@ import { TeammateDetails } from './teammate-details'
 const teammate = { id: 'atlas', initials: 'A', name: 'Atlas', role: 'Chief of Staff', status: 'idle' as const, summary: 'Ready.' }
 
 describe('TeammateDetails', () => {
+  it('renders Polish profile chrome without translating profile content', () => {
+    render(<TeammateDetails onBack={() => undefined} onMessage={() => undefined} onOpenSession={() => undefined} onPin={() => undefined} sessions={[]} sessionsLoading teammate={teammate} />)
+
+    expect(screen.getByRole('button', { name: '← Wróć' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Otwórz rozmowę' })).toBeTruthy()
+    expect(screen.getByText('Historia rozmów')).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Ostatnie rozmowy' })).toBeTruthy()
+    expect(screen.getByRole('status').textContent).toBe('Wczytywanie rozmów…')
+    expect(screen.getByText('Chief of Staff')).toBeTruthy()
+  })
+
   it('opens a session by clicking its content while keeping pin separate', () => {
     const onPin = vi.fn()
     const onOpenSession = vi.fn()
@@ -15,9 +26,9 @@ describe('TeammateDetails', () => {
     const row = screen.getByRole('article', { name: title })
     expect(row.classList.contains('session-row')).toBe(true)
     expect(screen.queryByRole('button', { name: 'Resume' })).toBeNull()
-    fireEvent.click(screen.getByRole('button', { name: `Open session ${title}` }))
+    fireEvent.click(screen.getByRole('button', { name: `Otwórz rozmowę: ${title}` }))
     expect(onOpenSession).toHaveBeenCalledWith('resolved-1')
-    fireEvent.click(screen.getByRole('button', { name: `Pin ${title}` }))
+    fireEvent.click(screen.getByRole('button', { name: `Przypnij rozmowę: ${title}` }))
     expect(onPin).toHaveBeenCalledWith('stored-1', true)
     expect(onOpenSession).toHaveBeenCalledOnce()
   })
@@ -25,7 +36,7 @@ describe('TeammateDetails', () => {
   it('renders malformed gateway timestamps without crashing', () => {
     render(<TeammateDetails onMessage={() => undefined} onOpenSession={() => undefined} onPin={() => undefined} sessions={[{ id: 'bad-time', title: 'Recovered session', preview: 'Still readable', started_at: 1, last_active: 1e20, message_count: 2, source: 'companion', pinned: false }]} sessionsLoading={false} teammate={teammate} />)
 
-    const time = screen.getByText('Last activity unknown')
+    const time = screen.getByText('Brak danych o ostatniej aktywności')
     expect(time.getAttribute('datetime')).toBeNull()
   })
 })

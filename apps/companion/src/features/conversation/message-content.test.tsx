@@ -7,12 +7,12 @@ describe('MessageContent', () => {
   it('collapses known context compaction payloads while keeping details accessible', () => {
     render(<MessageContent role="system" text={'[CONTEXT COMPACTION — REFERENCE ONLY]\nA very long internal summary with private transport details.'} />)
 
-    expect(screen.getByText('Earlier context summary')).toBeTruthy()
+    expect(screen.getByText('Podsumowanie wcześniejszego kontekstu')).toBeTruthy()
     expect(screen.queryByText(/private transport details/)).toBeNull()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Show details' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Pokaż szczegóły' }))
     expect(screen.getByText(/private transport details/)).toBeTruthy()
-    fireEvent.click(screen.getByRole('button', { name: 'Hide details' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Ukryj szczegóły' }))
     expect(screen.queryByText(/private transport details/)).toBeNull()
   })
 
@@ -21,7 +21,7 @@ describe('MessageContent', () => {
     render(<MessageContent role="user" text={text} />)
 
     expect(screen.getByText('Please review this.')).toBeTruthy()
-    expect(screen.getAllByText('Image attachment').length).toBeGreaterThan(0)
+    expect(screen.getAllByText('Załącznik obrazu').length).toBeGreaterThan(0)
     expect(document.body.textContent).not.toContain('123456789')
     expect(document.body.textContent).not.toContain('/Users/atlasweber')
     expect(document.body.textContent).not.toContain('iVBORw0KGgo')
@@ -31,7 +31,7 @@ describe('MessageContent', () => {
     render(<MessageContent role="user" text={'Please inspect this.\n[Image attached at: /Users/atlasweber/Library/Application Support/Hermes/img.jpg]\ndata:image/jpeg;base64,/9j/4AAQSkZJRgABAQ'} />)
 
     expect(screen.getByText('Please inspect this.')).toBeTruthy()
-    expect(screen.getAllByText('Image attachment')).toHaveLength(1)
+    expect(screen.getAllByText('Załącznik obrazu')).toHaveLength(1)
     expect(document.body.textContent).not.toContain('/Users/')
     expect(document.body.textContent).not.toContain('[Image attached at:')
     expect(document.body.textContent).not.toContain('/9j/4AAQ')
@@ -53,24 +53,26 @@ describe('MessageContent', () => {
     const longText = `Beginning ${'detail '.repeat(140)} ending`
     const { rerender } = render(<MessageContent role="user" text={longText} />)
 
-    expect(screen.getByText('Show more')).toBeTruthy()
+    expect(screen.getByText('Pokaż więcej')).toBeTruthy()
     expect(document.body.textContent).not.toContain('ending')
-    fireEvent.click(screen.getByRole('button', { name: 'Show more' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Pokaż więcej' }))
     expect(document.body.textContent).toContain('ending')
-    expect(screen.getByRole('button', { name: 'Show less' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Pokaż mniej' })).toBeTruthy()
 
     rerender(<MessageContent role="assistant" text={longText} />)
-    expect(screen.queryByRole('button', { name: /Show (more|less)/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Pokaż więcej' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Pokaż mniej' })).toBeNull()
     expect(document.body.textContent).toContain('ending')
 
     rerender(<MessageContent role="user" text="A short request" />)
-    expect(screen.queryByRole('button', { name: /Show (more|less)/ })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Pokaż więcej' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Pokaż mniej' })).toBeNull()
   })
 
   it('does not trust a user-authored compaction prefix without the generated summary envelope', () => {
     render(<MessageContent role="user" text="[CONTEXT COMPACTION — REFERENCE ONLY] This is ordinary user text." />)
 
-    expect(screen.queryByLabelText('Earlier context summary')).toBeNull()
+    expect(screen.queryByLabelText('Podsumowanie wcześniejszego kontekstu')).toBeNull()
     expect(screen.getByText(/ordinary user text/)).toBeTruthy()
   })
 

@@ -338,7 +338,7 @@ describe('createDirectoryStore', () => {
 
     listSessions.mockRejectedValueOnce(new Error('temporary failure'))
     await store.refresh()
-    expect(store.getSnapshot().coverage[0]).toMatchObject({ complete: false, sessionStatus: 'error', message: 'Sessions could not be verified.' })
+    expect(store.getSnapshot().coverage[0]).toMatchObject({ complete: false, sessionStatus: 'error', message: 'Nie udało się zweryfikować rozmów.' })
 
     listSessions.mockResolvedValue({ sessions: [], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } })
     listProjects.mockResolvedValue({ projects: [], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } })
@@ -370,7 +370,7 @@ describe('createDirectoryStore', () => {
     const snapshot = store.getSnapshot()
 
     expect(snapshot.sessions.map((item) => item.profile)).toEqual([other])
-    expect(snapshot.coverage.find((item) => item.profile === profile)).toMatchObject({ status: 'error', message: 'This source is not authorized.' })
+    expect(snapshot.coverage.find((item) => item.profile === profile)).toMatchObject({ status: 'error', message: 'Ten profil nie jest autoryzowany w bieżącym połączeniu.' })
     expect(snapshot.coverage.find((item) => item.profile === other)).toMatchObject({ status: 'ready' })
     expect(snapshot.selectedSession?.profile).toBe(other)
     expect(snapshot.history?.session_id).toBe('other-session')
@@ -382,8 +382,8 @@ describe('createDirectoryStore', () => {
     vi.mocked(client.listCompanionSessions).mockRejectedValue({ code: 4403 })
     await store.refresh()
 
-    expect(store.getSnapshot()).toMatchObject({ sessions: [], selectedSession: null, history: null, detailStatus: 'error', detailMessage: 'This source is not authorized.' })
-    expect(store.getSnapshot().coverage).toMatchObject([{ profile, status: 'error', message: 'This source is not authorized.' }])
+    expect(store.getSnapshot()).toMatchObject({ sessions: [], selectedSession: null, history: null, detailStatus: 'error', detailMessage: 'Ten profil nie jest autoryzowany w bieżącym połączeniu.' })
+    expect(store.getSnapshot().coverage).toMatchObject([{ profile, status: 'error', message: 'Ten profil nie jest autoryzowany w bieżącym połączeniu.' }])
     expect(JSON.stringify(store.getSnapshot())).not.toContain('one-message')
   })
 
@@ -707,7 +707,7 @@ describe('createDirectoryStore', () => {
     expect(snapshot.entityProjection?.status).toBe('ready')
     expect(snapshot.topicSourceDetails).toEqual([
       expect.objectContaining({ status: 'ready', source: expect.objectContaining({ canonical_id: 'project:atlas' }) }),
-      expect.objectContaining({ status: 'error', detail: 'This source is not authorized.', source: expect.objectContaining({ canonical_id: 'project:mentor' }) })
+      expect.objectContaining({ status: 'error', detail: 'Ten profil nie jest autoryzowany w bieżącym połączeniu.', source: expect.objectContaining({ canonical_id: 'project:mentor' }) })
     ])
     expect(snapshot.sessions.some((item) => item.profile === otherProfile)).toBe(false)
     expect(snapshot.projects.some((item) => item.profile === otherProfile)).toBe(false)

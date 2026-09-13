@@ -1,5 +1,5 @@
-import { render, screen } from '@testing-library/react'
-import { describe, expect, it } from 'vitest'
+import { fireEvent, render, screen } from '@testing-library/react'
+import { describe, expect, it, vi } from 'vitest'
 
 import { Roster, type Teammate } from './roster'
 
@@ -14,9 +14,27 @@ describe('Roster', () => {
   it('renders every teammate status as visible text', () => {
     render(<Roster onSelect={() => undefined} teammates={teammates} />)
 
-    expect(screen.getByText('Needs approval')).toBeTruthy()
-    expect(screen.getByText('Working')).toBeTruthy()
-    expect(screen.getByText('Blocked')).toBeTruthy()
-    expect(screen.getByText('Completed')).toBeTruthy()
+    expect(screen.getByText('Wymaga zgody')).toBeTruthy()
+    expect(screen.getByText('Pracuje')).toBeTruthy()
+    expect(screen.getByText('Zablokowany')).toBeTruthy()
+    expect(screen.getByText('Zakończono')).toBeTruthy()
+    expect(document.body.textContent).not.toContain('Needs approval')
+  })
+
+  it('keeps an unserved profile visible and disabled with a Polish reason', () => {
+    const onSelect = vi.fn()
+
+    render(<Roster availability={[{
+      teammateId: 'mentor',
+      selectable: false,
+      statusLabel: 'Niedostępny w tym połączeniu',
+      detail: 'Ten profil nie jest obsługiwany przez bieżący gateway.'
+    }]} onSelect={onSelect} teammates={teammates} />)
+
+    const profile = screen.getByRole('button', { name: /Mentor.*Niedostępny w tym połączeniu/ })
+    expect(profile.hasAttribute('disabled')).toBe(true)
+    expect(screen.getByText('Ten profil nie jest obsługiwany przez bieżący gateway.')).toBeTruthy()
+    fireEvent.click(profile)
+    expect(onSelect).not.toHaveBeenCalled()
   })
 })
