@@ -146,6 +146,42 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+const otherProfile = 'mentor'
+const sessionFor = (requestedProfile: string, id: string) => ({ ...session(id), profile: requestedProfile })
+const projectFor = (requestedProfile: string) => ({ ...project, id: `${requestedProfile}-project`, profile: requestedProfile })
+const topicFor = (requestedProfile: string) => ({ ...topic, id: `${requestedProfile}-topic`, canonical_id: `topic:${requestedProfile}`, name: `${requestedProfile} topic` })
+const topicNamespaceFor = (requestedProfile: string) => requestedProfile === profile ? 'organization-db' : `${requestedProfile}-organization-db`
+
+const topicPageFor = (requestedProfile: string, items: TopicItem[], hasMore = false, total = items.length): TopicListResult => ({
+  ...topicPage(items, hasMore, total),
+  profile: requestedProfile,
+  backend_namespace: topicNamespaceFor(requestedProfile)
+})
+
+const topicDetailFor = (requestedProfile: string, item = topicFor(requestedProfile)): TopicDetail => ({
+  ...topicDetail(item),
+  profile: requestedProfile,
+  backend_namespace: topicNamespaceFor(requestedProfile)
+})
+
+function seedTwoProfiles(client: DirectoryGateway) {
+  vi.mocked(client.listCompanionSessions).mockImplementation(async ({ profile: requestedProfile }) => ({
+    sessions: [sessionFor(requestedProfile, `${requestedProfile}-session`)], has_more: false, next_cursor: null,
+    coverage: { complete: true, freshness: null, message: null }
+  }))
+  vi.mocked(client.listCompanionProjects).mockImplementation(async ({ profile: requestedProfile }) => ({
+    projects: [projectFor(requestedProfile)], has_more: false, next_cursor: null,
+    coverage: { complete: true, freshness: null, message: null }
+  }))
+  vi.mocked(client.listCompanionTopics).mockImplementation(async ({ profile: requestedProfile }) => topicPageFor(requestedProfile, [topicFor(requestedProfile)]))
+  vi.mocked(client.getCompanionSessionHistory).mockImplementation(async (requestedProfile, id) => ({ ...history(id), profile: requestedProfile }))
+  vi.mocked(client.getCompanionProject).mockImplementation(async (requestedProfile) => ({
+    ...projectDetail([sessionFor(requestedProfile, `${requestedProfile}-session`)]),
+    project: projectFor(requestedProfile)
+  }))
+  vi.mocked(client.getCompanionTopic).mockImplementation(async (requestedProfile, id) => topicDetailFor(requestedProfile, topicFor(requestedProfile).id === id ? topicFor(requestedProfile) : { ...topicFor(requestedProfile), id }))
+}
+
 describe('createDirectoryStore', () => {
   it('loads every eligible session page when search matches a project name', async () => {
     const client = gateway()
@@ -551,5 +587,151 @@ describe('createDirectoryStore', () => {
     await store.openTopic(profile, topic.id, 'forged-source')
     expect(store.getSnapshot()).toMatchObject({ detailStatus: 'error', detailMessage: 'Topic details could not be verified.' })
     expect(store.getSnapshot().selectedTopic).toBeNull()
+  })
+
+  it('removes a rejected topic source completely when pagination returns 4403', async () => {
+    const client = gateway()
+    seedTwoProfiles(client)
+    vi.mocked(client.listCompanionTopics).mockImplementation(async ({ profile: requestedProfile, cursor }) => {
+      if (requestedProfile === profile && cursor) {throw { code: 4403 }}
+
+      return topicPageFor(requestedProfile, [topicFor(requestedProfile)], requestedProfile === profile, requestedProfile === profile ? 2 : 1)
+    })
+    const detail = topicDetailFor(profile)
+    detail.sources.items = [{ kind: 'namespace', canonical_id: 'namespace:atlas', relationship: 'owner', namespace: { profile, backend_id: topicNamespaceFor(profile) } }]
+    vi.mocked(client.getCompanionTopic).mockResolvedValue(detail)
+    const store = createDirectoryStore()
+    await store.attach(client, [profile, otherProfile])
+    await store.openTopic(profile, topicFor(profile).id, topicNamespaceFor(profile))
+    expect(store.getSnapshot().topicSourceDetails.some((item) => item.source.namespace.profile === profile)).toBe(true)
+
+    await store.loadOlder('topics', profile)
+
+    const snapshot = store.getSnapshot()
+    expect(snapshot.topics.some((item) => item.profile === profile)).toBe(false)
+    expect(snapshot.topics.some((item) => item.profile === otherProfile)).toBe(true)
+    expect(snapshot).toMatchObject({ selectedTopic: null, entityProjection: null, topicSourceDetails: [], history: null, detailStatus: 'error' })
+    expect(snapshot.topicCoverage.find((item) => item.profile === profile)).toMatchObject({ status: 'error', coverage: null, backendNamespace: null })
+  })
+
+  it.each(['openProject', 'openSession', 'openTopic', 'loadOlderHistory', 'loadOlderProjectSessions'] as const)('cleans only the rejected profile after 4403 from %s', async (entryPoint) => {
+    const client = gateway()
+    seedTwoProfiles(client)
+
+    if (entryPoint === 'loadOlderHistory') {
+      vi.mocked(client.getCompanionSessionHistory).mockImplementation(async (requestedProfile, id) => ({
+        ...history(id), profile: requestedProfile, has_more: requestedProfile === profile, next_cursor: requestedProfile === profile ? 'older-history' : null
+      }))
+    }
+
+    if (entryPoint === 'loadOlderProjectSessions') {
+      vi.mocked(client.getCompanionProject).mockImplementation(async (requestedProfile) => ({
+        ...projectDetail([sessionFor(requestedProfile, `${requestedProfile}-session`)], requestedProfile === profile),
+        project: projectFor(requestedProfile)
+      }))
+    }
+
+    const store = createDirectoryStore()
+    await store.attach(client, [profile, otherProfile])
+
+    if (entryPoint === 'openProject' || entryPoint === 'loadOlderProjectSessions') {
+      await store.openProject(profile, projectFor(profile).id, source)
+    } else if (entryPoint === 'openSession' || entryPoint === 'loadOlderHistory') {
+      await store.openSession(profile, `${profile}-session`, source)
+    } else {
+      await store.openTopic(profile, topicFor(profile).id, topicNamespaceFor(profile))
+    }
+
+    const before = store.getSnapshot()
+
+    const control = {
+      sessions: before.sessions.filter((item) => item.profile === otherProfile),
+      projects: before.projects.filter((item) => item.profile === otherProfile),
+      topics: before.topics.filter((item) => item.profile === otherProfile),
+      coverage: before.coverage.find((item) => item.profile === otherProfile),
+      topicCoverage: before.topicCoverage.find((item) => item.profile === otherProfile)
+    }
+
+    if (entryPoint === 'openProject') {
+      vi.mocked(client.getCompanionProject).mockRejectedValue({ code: 4403 })
+      await store.openProject(profile, projectFor(profile).id, source)
+    } else if (entryPoint === 'openSession') {
+      vi.mocked(client.getCompanionSessionHistory).mockRejectedValue({ code: 4403 })
+      await store.openSession(profile, `${profile}-session`, source)
+    } else if (entryPoint === 'openTopic') {
+      vi.mocked(client.getCompanionTopic).mockRejectedValue({ code: 4403 })
+      await store.openTopic(profile, topicFor(profile).id, topicNamespaceFor(profile))
+    } else if (entryPoint === 'loadOlderHistory') {
+      vi.mocked(client.getCompanionSessionHistory).mockRejectedValue({ code: 4403 })
+      await store.loadOlderHistory()
+    } else {
+      vi.mocked(client.getCompanionProject).mockRejectedValue({ code: 4403 })
+      await store.loadOlderProjectSessions()
+    }
+
+    const snapshot = store.getSnapshot()
+    expect(snapshot.sessions.some((item) => item.profile === profile)).toBe(false)
+    expect(snapshot.projects.some((item) => item.profile === profile)).toBe(false)
+    expect(snapshot.topics.some((item) => item.profile === profile)).toBe(false)
+    expect(snapshot).toMatchObject({ selectedProject: null, selectedSession: null, selectedTopic: null, history: null, entityProjection: null, topicSourceDetails: [], detailStatus: 'error' })
+    expect(snapshot.coverage.find((item) => item.profile === profile)).toMatchObject({ status: 'error', backendNamespace: null })
+    expect(snapshot.topicCoverage.find((item) => item.profile === profile)).toMatchObject({ status: 'error', backendNamespace: null })
+    expect(snapshot.sessions.filter((item) => item.profile === otherProfile)).toEqual(control.sessions)
+    expect(snapshot.projects.filter((item) => item.profile === otherProfile)).toEqual(control.projects)
+    expect(snapshot.topics.filter((item) => item.profile === otherProfile)).toEqual(control.topics)
+    expect(snapshot.coverage.find((item) => item.profile === otherProfile)).toEqual(control.coverage)
+    expect(snapshot.topicCoverage.find((item) => item.profile === otherProfile)).toEqual(control.topicCoverage)
+  })
+
+  it('keeps successful supplemental source details when another linked source returns 4403', async () => {
+    const client = gateway()
+    seedTwoProfiles(client)
+    const detail = topicDetailFor(profile)
+    detail.sources.items = [
+      { kind: 'project', canonical_id: 'project:atlas', relationship: 'related', namespace: { profile, backend_id: source }, source_id: 'atlas-source-project', project_kind: 'desktop_project' },
+      { kind: 'project', canonical_id: 'project:mentor', relationship: 'related', namespace: { profile: otherProfile, backend_id: source }, source_id: 'mentor-source-project', project_kind: 'desktop_project' }
+    ]
+    vi.mocked(client.getCompanionTopic).mockResolvedValue(detail)
+    vi.mocked(client.getCompanionProject).mockImplementation(async (requestedProfile) => {
+      if (requestedProfile === otherProfile) {throw { code: 4403 }}
+
+      return { ...projectDetail([]), project: projectFor(requestedProfile) }
+    })
+    const store = createDirectoryStore()
+    await store.attach(client, [profile, otherProfile])
+
+    await store.openTopic(profile, topicFor(profile).id, topicNamespaceFor(profile))
+
+    const snapshot = store.getSnapshot()
+    expect(snapshot.selectedTopic?.profile).toBe(profile)
+    expect(snapshot.entityProjection?.status).toBe('ready')
+    expect(snapshot.topicSourceDetails).toEqual([
+      expect.objectContaining({ status: 'ready', source: expect.objectContaining({ canonical_id: 'project:atlas' }) }),
+      expect.objectContaining({ status: 'error', detail: 'This source is not authorized.', source: expect.objectContaining({ canonical_id: 'project:mentor' }) })
+    ])
+    expect(snapshot.sessions.some((item) => item.profile === otherProfile)).toBe(false)
+    expect(snapshot.projects.some((item) => item.profile === otherProfile)).toBe(false)
+    expect(snapshot.topics.some((item) => item.profile === otherProfile)).toBe(false)
+  })
+
+  it('signals owner authorization loss without profile-scoped cleanup', async () => {
+    const client = gateway()
+    seedTwoProfiles(client)
+    vi.mocked(client.listCompanionTopics).mockImplementation(async ({ profile: requestedProfile, cursor }) => {
+      if (requestedProfile === profile && cursor) {throw { code: 4401 }}
+
+      return topicPageFor(requestedProfile, [topicFor(requestedProfile)], requestedProfile === profile, requestedProfile === profile ? 2 : 1)
+    })
+    const onOwnerAuthorizationLost = vi.fn()
+    const store = createDirectoryStore({ onOwnerAuthorizationLost })
+    await store.attach(client, [profile, otherProfile])
+    const before = store.getSnapshot()
+
+    await store.loadOlder('topics', profile)
+
+    expect(onOwnerAuthorizationLost).toHaveBeenCalledWith(expect.objectContaining({ code: 4401 }))
+    expect(store.getSnapshot().sessions).toEqual(before.sessions)
+    expect(store.getSnapshot().projects).toEqual(before.projects)
+    expect(store.getSnapshot().topics).toEqual(before.topics)
   })
 })

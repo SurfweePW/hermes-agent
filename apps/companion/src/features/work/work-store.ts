@@ -14,6 +14,10 @@ export interface WorkSnapshot {
   sources: readonly WorkSourceState[]
 }
 export interface WorkSourceState { profile: string; incomplete: boolean; status: 'verified' | 'unsupported' | 'error'; lastSuccess: string | null; message: string | null }
+export interface WorkStoreOptions {
+  /** Signals that the owner session must be re-authorized. */
+  onOwnerAuthorizationLost?: (error: unknown) => void
+}
 export interface WorkStore {
   getSnapshot(): WorkSnapshot
   subscribe(listener: () => void): () => void
@@ -156,7 +160,7 @@ function view(card: WorkCard, capability: WorkCapability | undefined, detail?: W
 }
 
 /** In-memory verified projection only. Server owns all business state. */
-export function createWorkStore(): WorkStore {
+export function createWorkStore(options: WorkStoreOptions = {}): WorkStore {
   let snapshot: WorkSnapshot = { items: [], selected: null, status: 'loading', pending: false, message: null, groupBy: 'topic', priorityWritable: false, sources: [] }
   const listeners = new Set<() => void>()
   let gateway: (WorkGateway & Partial<OrganizationGateway>) | null = null
@@ -175,6 +179,13 @@ export function createWorkStore(): WorkStore {
     snapshot = { ...snapshot, ...change }
 
     for (const listener of listeners) {listener()}
+  }
+
+  const ownerAuthorizationLost = (error: unknown) => {
+    if (errorCode(error) !== 4401) {return false}
+    options.onOwnerAuthorizationLost?.(error)
+
+    return true
   }
 
   const projection = () => ({
@@ -268,13 +279,15 @@ export function createWorkStore(): WorkStore {
     }
 
     for (const response of failed) {
+      ownerAuthorizationLost(response.error)
       const unsupported = errorCode(response.error) === -32601
       sourceStates.set(response.profile, { profile: response.profile, incomplete: true, status: unsupported ? 'unsupported' : 'error', lastSuccess: sourceStates.get(response.profile)?.lastSuccess ?? null, message: unsupported ? 'Durable Work is unsupported by this source.' : errorCode(response.error) === 4403 ? UNAUTHORIZED_SOURCE_MESSAGE : 'Refresh failed; the last verified view is retained.' })
     }
 
     try {
       detail = selection && successful.some(({ profile }) => profile === selection?.profile) ? await client.getWork(selection.profile, selection.id) : detail
-    } catch {
+    } catch (error) {
+      ownerAuthorizationLost(error)
       // Keep the last verified detail; source coverage already communicates an incomplete refresh.
     }
 
@@ -346,6 +359,7 @@ export function createWorkStore(): WorkStore {
       return true
     } catch (error) {
       if (generation !== epoch || gateway !== client) {return false}
+      ownerAuthorizationLost(error)
       publish({ pending: false })
 
       if (errorCode(error) === 4403) {publish({ status: 'error', message: UNAUTHORIZED_SOURCE_MESSAGE })} else if (errorCode(error) === 4090) {
@@ -420,6 +434,7 @@ export function createWorkStore(): WorkStore {
       return true
     } catch (error) {
       if (generation !== epoch || gateway !== client) {return false}
+      ownerAuthorizationLost(error)
       publish({ pending: false, status: 'error' })
 
       if (errorCode(error) === 4409) {
@@ -460,7 +475,10 @@ export function createWorkStore(): WorkStore {
           priorityWritable = capability.owner_authorization && !capability.read_only
             && capability.mutation_methods.includes('companion.priorities.override_set')
             && capability.mutation_methods.includes('companion.priorities.restore_recommended')
-        } catch { priorityWritable = false }
+        } catch (error) {
+          ownerAuthorizationLost(error)
+          priorityWritable = false
+        }
       }
 
       publish({ pending: false, priorityWritable })

@@ -90,6 +90,10 @@ export interface DirectorySnapshot {
   detailMessage: string | null
   coverage: readonly SourceCoverage[]
 }
+export interface DirectoryStoreOptions {
+  /** Signals that the owner session must be re-authorized. */
+  onOwnerAuthorizationLost?: (error: unknown) => void
+}
 export interface DirectoryStore {
   getSnapshot(): DirectorySnapshot
   subscribe(listener: () => void): () => void
@@ -134,7 +138,7 @@ const failureCopy = (kind: 'Sessions' | 'Projects', error: unknown) => `${kind} 
 const UNAUTHORIZED_SOURCE_MESSAGE = 'This source is not authorized.'
 
 /** Feature-owned, read-only projection. Gateway responses remain authoritative. */
-export function createDirectoryStore(): DirectoryStore {
+export function createDirectoryStore(options: DirectoryStoreOptions = {}): DirectoryStore {
   let snapshot = initialSnapshot()
   let gateway: DirectoryGateway | null = null
   let profiles: string[] = []
@@ -189,13 +193,8 @@ export function createDirectoryStore(): DirectoryStore {
     for (const [key, item] of topics) {if (item.profile === profile) {topics.delete(key)}}
   }
 
-  /**
-   * A gateway serves only the profiles it is configured for, so authorization is a
-   * property of ONE source. Purge just that profile's rows and keep every other
-   * profile's verified data (purging them all left the owner with an unusable client
-   * whenever a single stale profile stayed on the roster).
-   */
-  const markUnauthorized = (profile: string) => {
+  /** Remove only the rejected profile while preserving every other verified source. */
+  const markProfileUnauthorized = (profile: string) => {
     dropProfileRows(profile)
     coverage.set(profile, {
       ...pendingCoverage(profile),
@@ -204,32 +203,61 @@ export function createDirectoryStore(): DirectoryStore {
       projectStatus: 'error',
       message: UNAUTHORIZED_SOURCE_MESSAGE
     })
+    topicCoverage.set(profile, { profile, status: 'error', coverage: null, message: UNAUTHORIZED_SOURCE_MESSAGE, cursor: null, hasMore: false, loaded: 0, total: null, backendNamespace: null })
     const droppedSelection = selection?.profile === profile
 
-    if (droppedSelection) {selection = null}
+    if (droppedSelection) {
+      selection = null
+      publish({ ...projection(), selectedProject: null, selectedSession: null, selectedTopic: null, entityProjection: null, topicSourceDetails: [], history: null, detailStatus: 'error', detailMessage: UNAUTHORIZED_SOURCE_MESSAGE })
 
-    publish(droppedSelection
-      ? { ...projection(), selectedProject: null, selectedSession: null, selectedTopic: null, entityProjection: null, topicSourceDetails: [], history: null, detailStatus: 'error', detailMessage: UNAUTHORIZED_SOURCE_MESSAGE }
-      : projection())
+      return
+    }
+
+    const retainedWork = snapshot.entityProjection?.work.filter((item) => item.binding.source_namespace.profile !== profile)
+    const entityProjection = snapshot.entityProjection && retainedWork
+      ? {
+          ...snapshot.entityProjection,
+          work: retainedWork,
+          needsMe: snapshot.entityProjection.needsMe.filter((item) => item.binding.source_namespace.profile !== profile),
+          relatedTopics: snapshot.entityProjection.relatedTopics?.filter((item) => item.profile !== profile)
+        }
+      : snapshot.entityProjection
+    const selectedProject = snapshot.selectedProject
+      ? { ...snapshot.selectedProject, topics: snapshot.selectedProject.topics.filter((item) => item.profile !== profile) }
+      : null
+    const selectedTopic = snapshot.selectedTopic
+      ? { ...snapshot.selectedTopic, sources: { ...snapshot.selectedTopic.sources, items: snapshot.selectedTopic.sources.items?.filter((item) => item.namespace.profile !== profile) ?? null } }
+      : null
+
+    publish({
+      ...projection(),
+      selectedProject,
+      selectedTopic,
+      entityProjection,
+      topicSourceDetails: snapshot.topicSourceDetails.filter((item) => item.source.namespace.profile !== profile)
+    })
   }
 
-  const markTopicsUnauthorized = (profile: string) => {
-    topicCoverage.set(profile, { profile, status: 'error', coverage: null, message: UNAUTHORIZED_SOURCE_MESSAGE, cursor: null, hasMore: false, loaded: 0, total: null, backendNamespace: null })
-    publish(projection())
+  const ownerAuthorizationLost = (error: unknown) => {
+    if (errorCode(error) !== 4401) {return false}
+    options.onOwnerAuthorizationLost?.(error)
+
+    return true
   }
 
   const loadTopics = async (client: DirectoryGateway, profile: string, generation: number, append = false) => {
     const previous = topicCoverage.get(profile)
+    const retainedTopics = append ? [] : [...topics].filter(([, item]) => item.profile === profile)
+
+    if (!append) {
+      for (const [key] of retainedTopics) {topics.delete(key)}
+    }
 
     if (!client.listCompanionTopics) {
       topicCoverage.set(profile, { profile, status: 'unsupported', coverage: null, message: 'Backend update required for Topics.', cursor: null, hasMore: false, loaded: 0, total: null, backendNamespace: null })
       publish(projection())
 
       return
-    }
-
-    if (!append) {
-      for (const key of topics.keys()) { if (key.startsWith(`${profile}\0`)) { topics.delete(key) } }
     }
 
     topicCoverage.set(profile, append
@@ -251,8 +279,18 @@ export function createDirectoryStore(): DirectoryStore {
     } catch (error) {
       if (generation !== epoch || gateway !== client) { return }
 
+      const ownerLost = ownerAuthorizationLost(error)
+
+      if (ownerLost && previous) {
+        for (const [key, item] of retainedTopics) {topics.set(key, item)}
+        topicCoverage.set(profile, previous)
+        publish(projection())
+
+        return
+      }
+
       if (errorCode(error) === 4403) {
-        markTopicsUnauthorized(profile)
+        markProfileUnauthorized(profile)
 
         return
       }
@@ -289,8 +327,11 @@ export function createDirectoryStore(): DirectoryStore {
     const sessionError = sessionSettled.status === 'rejected' ? sessionSettled.reason : null
     const projectError = projectSettled.status === 'rejected' ? projectSettled.reason : null
 
+    ownerAuthorizationLost(sessionError)
+    ownerAuthorizationLost(projectError)
+
     if (errorCode(sessionError) === 4403 || errorCode(projectError) === 4403) {
-      markUnauthorized(profile)
+      markProfileUnauthorized(profile)
 
       return
     }
@@ -409,6 +450,14 @@ export function createDirectoryStore(): DirectoryStore {
       publish(projection())
     } catch (error) {
       if (generation !== epoch || gateway !== client) {return}
+      ownerAuthorizationLost(error)
+
+      if (errorCode(error) === 4403) {
+        markProfileUnauthorized(profile)
+
+        return
+      }
+
       const previous = coverage.get(profile) ?? pendingCoverage(profile)
       coverage.set(profile, {
         ...previous,
@@ -535,10 +584,12 @@ export function createDirectoryStore(): DirectoryStore {
     }
   }
 
-  const loadTopicSources = async (client: DirectoryGateway, detail: TopicDetail): Promise<TopicSourceDetail[]> => Promise.all((detail.sources.items ?? []).map(async (source): Promise<TopicSourceDetail> => {
-    if (source.kind === 'namespace') { return { source, status: 'ready', title: source.namespace.profile, detail: `Authorized namespace · ${source.namespace.backend_id}` } }
+  const loadTopicSources = async (client: DirectoryGateway, detail: TopicDetail): Promise<{ details: TopicSourceDetail[]; unauthorizedProfiles: string[] }> => {
+    const sources = detail.sources.items ?? []
 
-    try {
+    const settled = await Promise.allSettled(sources.map(async (source): Promise<TopicSourceDetail> => {
+      if (source.kind === 'namespace') { return { source, status: 'ready', title: source.namespace.profile, detail: `Authorized namespace · ${source.namespace.backend_id}` } }
+
       if (source.kind === 'project') {
         const value = await client.getCompanionProject(source.namespace.profile, source.source_id)
 
@@ -551,44 +602,78 @@ export function createDirectoryStore(): DirectoryStore {
       const known = sessions.get(sourceKey(source.namespace.backend_id, source.namespace.profile, source.session.persisted_session_id))
 
       return { source, status: 'ready', title: known?.title || source.session.persisted_session_id, detail: `${value.entries.length} messages loaded · ${value.coverage.complete ? 'complete history' : 'partial history'}` }
-    } catch (error) {
-      if (errorCode(error) === 4403) { throw error }
+    }))
 
-      return { source, status: errorCode(error) === 4404 ? 'missing' : 'error', title: source.kind === 'project' ? source.source_id : source.session.persisted_session_id, detail: errorCode(error) === 4404 ? 'Source record not found' : 'Live source could not be verified' }
-    }
-  }))
+    const details: TopicSourceDetail[] = []
+    const unauthorizedProfiles = new Set<string>()
 
-  const publishSupplemental = async (client: DirectoryGateway, generation: number, kind: 'project' | 'session' | 'topic', profile: string, id: string, source: string, detail?: TopicDetail) => {
-    try {
-      const [projection, sourceDetails] = await Promise.all([
-        loadEntityProjection(client, kind, profile, id, source, detail),
-        detail ? loadTopicSources(client, detail) : Promise.resolve([])
-      ])
-
-      if (generation === epoch && gateway === client) {
-        const selectedProject = kind === 'project' && snapshot.selectedProject
-          ? {
-              ...snapshot.selectedProject,
-              topics: projection.relatedTopics ?? [],
-              organization_available: true,
-              organization_complete: projection.relatedTopicsComplete === true,
-              organization_message: projection.relatedTopicsComplete === true ? null : 'Some authorized Topic relationships could not be verified.'
-            }
-          : snapshot.selectedProject
-
-        publish({ selectedProject, entityProjection: projection, topicSourceDetails: sourceDetails })
-      }
-    } catch (error) {
-      if (generation !== epoch || gateway !== client) { return }
-
-      if (errorCode(error) === 4403) {
-        publish({ entityProjection: { status: 'error', complete: false, work: [], needsMe: [], message: UNAUTHORIZED_SOURCE_MESSAGE }, topicSourceDetails: [] })
+    settled.forEach((result, index) => {
+      if (result.status === 'fulfilled') {
+        details.push(result.value)
 
         return
       }
 
-      publish({ entityProjection: { status: failureStatus(error), complete: false, work: [], needsMe: [], message: unsupported(error) ? 'Backend update required for authorized Work and Needs Me.' : 'Authorized Work and Needs Me could not be verified.' }, topicSourceDetails: [] })
+      const source = sources[index]
+
+      if (!source) {return}
+      ownerAuthorizationLost(result.reason)
+
+      if (errorCode(result.reason) === 4403) {unauthorizedProfiles.add(source.namespace.profile)}
+      details.push({
+        source,
+        status: errorCode(result.reason) === 4404 ? 'missing' : 'error',
+        title: source.kind === 'project' ? source.source_id : source.kind === 'session' ? source.session.persisted_session_id : source.namespace.profile,
+        detail: errorCode(result.reason) === 4403 ? UNAUTHORIZED_SOURCE_MESSAGE : errorCode(result.reason) === 4404 ? 'Source record not found' : 'Live source could not be verified'
+      })
+    })
+
+    return { details, unauthorizedProfiles: [...unauthorizedProfiles] }
+  }
+
+  const publishSupplemental = async (client: DirectoryGateway, generation: number, kind: 'project' | 'session' | 'topic', profile: string, id: string, source: string, detail?: TopicDetail) => {
+    const [projectionResult, sourcesResult] = await Promise.allSettled([
+      loadEntityProjection(client, kind, profile, id, source, detail),
+      detail ? loadTopicSources(client, detail) : Promise.resolve({ details: [] as TopicSourceDetail[], unauthorizedProfiles: [] as string[] })
+    ])
+
+    if (generation !== epoch || gateway !== client) {return}
+
+    if (projectionResult.status === 'rejected') {
+      ownerAuthorizationLost(projectionResult.reason)
+
+      if (errorCode(projectionResult.reason) === 4403) {
+        markProfileUnauthorized(profile)
+
+        return
+      }
     }
+
+    const sourceResult = sourcesResult.status === 'fulfilled'
+      ? sourcesResult.value
+      : { details: [] as TopicSourceDetail[], unauthorizedProfiles: [] as string[] }
+
+    if (sourcesResult.status === 'rejected') {ownerAuthorizationLost(sourcesResult.reason)}
+
+    for (const unauthorizedProfile of sourceResult.unauthorizedProfiles) {markProfileUnauthorized(unauthorizedProfile)}
+
+    if (!selection || selection.profile !== profile || generation !== epoch || gateway !== client) {return}
+
+    const entityProjection = projectionResult.status === 'fulfilled'
+      ? projectionResult.value
+      : { status: failureStatus(projectionResult.reason), complete: false, work: [], needsMe: [], message: unsupported(projectionResult.reason) ? 'Backend update required for authorized Work and Needs Me.' : 'Authorized Work and Needs Me could not be verified.' } satisfies EntityProjection
+
+    const selectedProject = kind === 'project' && snapshot.selectedProject && projectionResult.status === 'fulfilled'
+      ? {
+          ...snapshot.selectedProject,
+          topics: entityProjection.relatedTopics ?? [],
+          organization_available: true,
+          organization_complete: entityProjection.relatedTopicsComplete === true,
+          organization_message: entityProjection.relatedTopicsComplete === true ? null : 'Some authorized Topic relationships could not be verified.'
+        }
+      : snapshot.selectedProject
+
+    publish({ selectedProject, entityProjection, topicSourceDetails: sourceResult.details })
   }
 
   const openProject = async (profile: string, id: string, source?: string, preserve = false) => {
@@ -610,8 +695,10 @@ export function createDirectoryStore(): DirectoryStore {
       await publishSupplemental(client, generation, 'project', profile, id, detail.project.source)
     } catch (error) {
       if (generation === epoch && gateway === client) {
+        ownerAuthorizationLost(error)
+
         if (errorCode(error) === 4403) {
-          publish({ detailStatus: 'error', detailMessage: UNAUTHORIZED_SOURCE_MESSAGE })
+          markProfileUnauthorized(profile)
 
           return
         }
@@ -666,8 +753,10 @@ export function createDirectoryStore(): DirectoryStore {
       await publishSupplemental(client, generation, 'session', profile, id, result.source)
     } catch (error) {
       if (generation === epoch && gateway === client) {
+        ownerAuthorizationLost(error)
+
         if (errorCode(error) === 4403) {
-          publish({ detailStatus: 'error', detailMessage: UNAUTHORIZED_SOURCE_MESSAGE })
+          markProfileUnauthorized(profile)
 
           return
         }
@@ -697,8 +786,10 @@ export function createDirectoryStore(): DirectoryStore {
       await publishSupplemental(client, generation, 'topic', profile, id, detail.backend_namespace, detail)
     } catch (error) {
       if (generation === epoch && gateway === client) {
+        ownerAuthorizationLost(error)
+
         if (errorCode(error) === 4403) {
-          publish({ detailStatus: 'error', detailMessage: UNAUTHORIZED_SOURCE_MESSAGE })
+          markProfileUnauthorized(profile)
 
           return
         }
@@ -822,11 +913,12 @@ export function createDirectoryStore(): DirectoryStore {
       const current = snapshot.history
 
       if (!client || !selection || selection.kind !== 'session' || !current?.has_more || !current.next_cursor) {return}
+      const selectedProfile = selection.profile
       const generation = ++epoch
       publish({ detailStatus: 'loading', detailMessage: null })
 
       try {
-        const next = await client.getCompanionSessionHistory(selection.profile, selection.id, current.next_cursor, selection.source)
+        const next = await client.getCompanionSessionHistory(selectedProfile, selection.id, current.next_cursor, selection.source)
 
         if (generation !== epoch || gateway !== client) {return}
         const seen = new Set(current.entries.map((entry) => entry.id))
@@ -834,8 +926,10 @@ export function createDirectoryStore(): DirectoryStore {
         publish({ history: { ...next, entries: [...next.entries.filter((entry) => !seen.has(entry.id)), ...current.entries], coverage: { ...next.coverage, complete: current.coverage.complete && next.coverage.complete, message: [...new Set(coverageMessage)].join(' ') || null } }, detailStatus: 'ready' })
       } catch (error) {
         if (generation === epoch && gateway === client) {
+          ownerAuthorizationLost(error)
+
           if (errorCode(error) === 4403) {
-            publish({ detailStatus: 'error', detailMessage: UNAUTHORIZED_SOURCE_MESSAGE })
+            markProfileUnauthorized(selectedProfile)
 
             return
           }
@@ -849,11 +943,12 @@ export function createDirectoryStore(): DirectoryStore {
       const current = snapshot.selectedProject
 
       if (!client || !selection || selection.kind !== 'project' || !current?.membership_has_more || !current.membership_next_cursor) {return}
+      const selectedProfile = selection.profile
       const generation = ++epoch
       publish({ detailStatus: 'loading', detailMessage: null })
 
       try {
-        const next = await client.getCompanionProject(selection.profile, selection.id, current.membership_next_cursor)
+        const next = await client.getCompanionProject(selectedProfile, selection.id, current.membership_next_cursor)
 
         if (generation !== epoch || gateway !== client) {return}
 
@@ -873,8 +968,10 @@ export function createDirectoryStore(): DirectoryStore {
         })
       } catch (error) {
         if (generation === epoch && gateway === client) {
+          ownerAuthorizationLost(error)
+
           if (errorCode(error) === 4403) {
-            publish({ detailStatus: 'error', detailMessage: UNAUTHORIZED_SOURCE_MESSAGE })
+            markProfileUnauthorized(selectedProfile)
 
             return
           }

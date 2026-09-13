@@ -159,13 +159,42 @@ describe('verified work store', () => {
   })
 
   it('keeps verified work of every other source when one source is revoked', async () => {
-    const { gateway, store } = setup(); await store.attach(gateway, ['cmo']); await store.open('cmo', 'stable-id')
-    vi.mocked(gateway.workCapabilities).mockRejectedValue({ code: 4403 })
+    const { gateway, store } = setup()
+    const otherCard = { ...card, id: 'atlas-work', profile: 'atlas', title: 'Atlas work' }
+    vi.mocked(gateway.listWork).mockImplementation(async (requestedProfile) => ({ items: [requestedProfile === 'atlas' ? otherCard : card] }))
+    vi.mocked(gateway.getWork).mockImplementation(async (requestedProfile) => ({ item: requestedProfile === 'atlas' ? otherCard : card, comments: [], decisions: [], tracker_status_history: [] }))
+    await store.attach(gateway, ['cmo', 'atlas'])
+    await store.open('cmo', 'stable-id')
+    vi.mocked(gateway.workCapabilities).mockImplementation(async (requestedProfile) => {
+      if (requestedProfile === 'cmo') {throw { code: 4403 }}
+
+      return { can_decide: true, reason: null }
+    })
     await store.refresh()
 
-    expect(store.getSnapshot()).toMatchObject({ status: 'error' })
-    expect(store.getSnapshot().sources).toMatchObject([{ profile: 'cmo', status: 'error', message: 'This source is not authorized.' }])
-    expect(JSON.stringify(store.getSnapshot())).toContain('Campaign')
+    expect(store.getSnapshot().status).toBe('verified')
+    expect(store.getSnapshot().sources).toEqual(expect.arrayContaining([
+      expect.objectContaining({ profile: 'cmo', status: 'error', message: 'This source is not authorized.' }),
+      expect.objectContaining({ profile: 'atlas', status: 'verified' })
+    ]))
+    expect(store.getSnapshot().items).toEqual(expect.arrayContaining([expect.objectContaining({ id: otherCard.id, profile: 'atlas' })]))
+    expect(store.getSnapshot().selected).toMatchObject({ id: 'stable-id', profile: 'cmo' })
+  })
+
+  it('signals owner authorization loss without removing verified work', async () => {
+    const { gateway } = setup()
+    const onOwnerAuthorizationLost = vi.fn()
+    const store = createWorkStore({ onOwnerAuthorizationLost })
+    await store.attach(gateway, ['cmo'])
+    await store.open('cmo', 'stable-id')
+    const before = store.getSnapshot()
+    vi.mocked(gateway.workCapabilities).mockRejectedValue({ code: 4401 })
+
+    await store.refresh()
+
+    expect(onOwnerAuthorizationLost).toHaveBeenCalledWith(expect.objectContaining({ code: 4401 }))
+    expect(store.getSnapshot().items).toEqual(before.items)
+    expect(store.getSnapshot().selected).toEqual(before.selected)
   })
 
   it('uses authoritative profile/id/version/revision and reads back server-generated record IDs', async () => {
