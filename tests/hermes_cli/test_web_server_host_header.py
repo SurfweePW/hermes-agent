@@ -153,15 +153,15 @@ class TestWebSocketHostOriginGuard:
 
         client = TestClient(ws.app)
         url = f"/api/events?token={ws._SESSION_TOKEN}&channel=security-test"
-        with pytest.raises(WebSocketDisconnect) as exc:
-            with client.websocket_connect(
-                url,
-                headers={
-                    "Host": "evil.example",
-                    "Origin": "http://evil.example",
-                },
-            ):
-                pass
+        with client.websocket_connect(
+            url,
+            headers={
+                "Host": "evil.example",
+                "Origin": "http://evil.example",
+            },
+        ) as rejected:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                rejected.receive_text()
 
         assert exc.value.code == 4403
 
@@ -230,14 +230,14 @@ class TestWebSocketHostOriginGuard:
 
         client = TestClient(ws.app)
         url = f"/api/events?token={ws._SESSION_TOKEN}&channel=security-test"
-        with pytest.raises(WebSocketDisconnect) as exc:
-            with client.websocket_connect(
-                url,
-                headers={
-                    "Host": "dashboard.example.test:9443",
-                    "Origin": "https://evil.test",
-                },
-            ):
-                pass
+        with client.websocket_connect(
+            url,
+            headers={
+                "Host": "dashboard.example.test:9443",
+                "Origin": "https://evil.test",
+            },
+        ) as rejected:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                rejected.receive_text()
 
         assert exc.value.code == 4403

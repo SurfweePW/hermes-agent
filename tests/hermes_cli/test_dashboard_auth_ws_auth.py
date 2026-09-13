@@ -13,7 +13,9 @@ pre-existing regression unrelated to dashboard-auth.
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -473,4 +475,49 @@ class TestGatewayWsUrl:
         gw_cred = gw.split("internal=")[1].split("&")[0]
         sc_cred = sc.split("internal=")[1].split("&")[0]
         assert gw_cred == sc_cred
+
+
+class _RejectedWebSocket:
+    def __init__(self):
+        self.events = []
+        self.sent = []
+        self.client = SimpleNamespace(host="127.0.0.1")
+
+    async def accept(self):
+        self.events.append(("accept",))
+
+    async def close(self, *, code, reason=""):
+        self.events.append(("close", code, reason))
+
+    async def send_json(self, payload):
+        self.sent.append(payload)
+
+    async def send_text(self, payload):
+        self.sent.append(payload)
+
+
+@pytest.mark.parametrize(
+    ("gate", "expected_code"),
+    [("console", 4401), ("sidecar", 4401)],
+)
+def test_rejected_websocket_is_accepted_before_close_without_sending_data(
+    monkeypatch, gate, expected_code,
+):
+    """A real WS client must receive the policy close code, never HTTP 403."""
+    from hermes_cli.web_routers import chat_ws
+
+    ws: Any = _RejectedWebSocket()
+    monkeypatch.setattr(web_server, "_DASHBOARD_EMBEDDED_CHAT_ENABLED", True)
+    if gate == "console":
+        monkeypatch.setattr(chat_ws, "_ws_auth_reason", lambda _ws: ("bad ticket", "ticket"))
+        result = asyncio.run(chat_ws._ws_gate(ws, "console"))
+        assert result is None
+    else:
+        monkeypatch.setattr(chat_ws, "_ws_auth_ok", lambda _ws: False)
+        result = asyncio.run(chat_ws._close_unless_sidecar_allowed(ws))
+        assert result is False
+
+    assert [event[0] for event in ws.events] == ["accept", "close"]
+    assert ws.events[1][1] == expected_code
+    assert ws.sent == []
 

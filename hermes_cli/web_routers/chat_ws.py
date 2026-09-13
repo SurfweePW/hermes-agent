@@ -99,6 +99,16 @@ def _ws_close_reason(text: str) -> str:
     return encoded[:120].decode("utf-8", "ignore") + "..."
 
 
+async def _accept_and_close(ws: WebSocket, *, code: int, reason: str = "") -> None:
+    """Complete the WS handshake before returning a policy close frame.
+
+    Accepting does not disclose session data; rejected sockets are closed before
+    any sender or session-backed handler is created.
+    """
+    await ws.accept()
+    await ws.close(code=code, reason=reason)
+
+
 async def _ws_gate(ws: WebSocket, kind: str) -> Optional[tuple[str, str, str]]:
     """Run the pre-accept gates for /api/console and /api/pty.
 
@@ -110,26 +120,26 @@ async def _ws_gate(ws: WebSocket, kind: str) -> Optional[tuple[str, str, str]]:
     peer = ws.client.host if ws.client else "?"
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
         _log.info("%s refused: embedded chat disabled peer=%s", kind, peer)
-        await ws.close(code=4404, reason="embedded chat disabled")
+        await _accept_and_close(ws, code=4404, reason="embedded chat disabled")
         return None
 
     auth_reason, cred = _ws_auth_reason(ws)
     mode = _ws_auth_mode()
     if auth_reason is not None:
         _log.warning("%s auth rejected reason=%s mode=%s cred=%s peer=%s", kind, auth_reason, mode, cred, peer)
-        await ws.close(code=4401, reason=_ws_close_reason(f"auth: {auth_reason}"))
+        await _accept_and_close(ws, code=4401, reason=_ws_close_reason(f"auth: {auth_reason}"))
         return None
 
     host_origin_reason = _ws_host_origin_reason(ws)
     if host_origin_reason is not None:
         _log.warning("%s refused: %s peer=%s", kind, host_origin_reason, peer)
-        await ws.close(code=4403, reason=_ws_close_reason(host_origin_reason))
+        await _accept_and_close(ws, code=4403, reason=_ws_close_reason(host_origin_reason))
         return None
 
     client_reason = _ws_client_reason(ws)
     if client_reason is not None:
         _log.warning("%s refused: %s", kind, client_reason)
-        await ws.close(code=4408, reason=_ws_close_reason(client_reason))
+        await _accept_and_close(ws, code=4408, reason=_ws_close_reason(client_reason))
         return None
     return peer, mode, cred
 
@@ -138,13 +148,13 @@ async def _close_unless_sidecar_allowed(ws: WebSocket) -> bool:
     """Pre-accept gates for the /api/ws, /api/pub and /api/events sidecars:
     4403 when chat is disabled or the request isn't allowed, 4401 on bad auth."""
     if not _DASHBOARD_EMBEDDED_CHAT_ENABLED:
-        await ws.close(code=4403)
+        await _accept_and_close(ws, code=4403)
         return False
     if not _ws_auth_ok(ws):
-        await ws.close(code=4401)
+        await _accept_and_close(ws, code=4401)
         return False
     if not _ws_request_is_allowed(ws):
-        await ws.close(code=4403)
+        await _accept_and_close(ws, code=4403)
         return False
     return True
 
