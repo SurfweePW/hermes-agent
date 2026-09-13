@@ -216,14 +216,26 @@ export class JsonRpcGatewayClient {
         return
       }
 
-      if (this.options.onSocketClose(event)) {
-        return
-      }
+      const wasOpen = this.state === 'open'
+
+      const error = new JsonRpcGatewayError(this.options.closedErrorMessage, {
+        closeCode: event.code,
+        closeReason: event.reason
+      })
 
       this.socket = null
       this.stopHeartbeat()
+      this.rejectAllPending(error)
+
+      if (wasOpen && this.options.onSocketClose(event)) {
+        // The connection owner handles presentation/recovery; keep the
+        // transport's internal state accurate without emitting `closed`.
+        this.state = 'closed'
+
+        return
+      }
+
       this.setState('closed')
-      this.rejectAllPending(new Error(this.options.closedErrorMessage))
     })
 
     await new Promise<void>((resolve, reject) => {
