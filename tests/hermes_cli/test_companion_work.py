@@ -11,6 +11,7 @@ import threading
 
 import pytest
 
+from hermes_cli import companion_work
 from hermes_cli.companion_work import resolve_store
 from hermes_cli.companion_work_store import WorkError, WorkStore, anchored_store_path
 from hermes_cli.companion_work_store_readonly import existing_card_ids
@@ -307,7 +308,7 @@ def test_comment_durable_idempotent_no_approval_or_version_mutation(tmp_path):
     card = proposed(store)
     with pytest.raises(WorkError) as exc:
         store.comment(card['id'], 'Please check the evidence', 'forged-comment')
-    assert exc.value.code == 4403
+    assert exc.value.code == 4401
     comment = store.comment(card['id'], 'Please check the evidence', 'comment-1', human_identity='owner:test')
     assert comment['comment']['id'] != 'comment-1'
     assert store.comment(card['id'], 'Please check the evidence', 'comment-1', human_identity='owner:test') == comment
@@ -429,7 +430,7 @@ def test_untrusted_agent_cannot_decide_or_smuggle_payload_authorization(tmp_path
     card = proposed(store)
     with pytest.raises(WorkError) as exc:
         store.decide(card['id'], card['version'], card['revision'], 'approve_preparation', 'forged')
-    assert exc.value.code == 4403
+    assert exc.value.code == 4401
     with pytest.raises(WorkError):
         store.upsert('forged', dict(PAYLOAD, approval={'scope': 'publish'}))
     assert store.get(card['id'])['item']['approval'] is None
@@ -980,6 +981,7 @@ def test_real_two_client_owner_login_rpc_revision_loop(work_transport):
     with a.websocket_connect('wss://work.example.test/api/ws?ticket=' + ta) as one, b.websocket_connect('wss://work.example.test/api/ws?ticket=' + tb) as two:
         capabilities = rpc(one, 'capabilities')
         assert capabilities['can_decide'] is True
+        assert capabilities['error_code'] is None
         assert capabilities['notifications'] == {
             'delivery_mode': 'external_receipt_only',
             'batch_receipts': True,
@@ -1012,9 +1014,10 @@ def test_real_two_client_owner_login_rpc_revision_loop(work_transport):
         rpc(two, 'get', {'id': c['id'], 'profile': 'missing-profile'}, error=4403)
     # Reconnect is a fresh ticket, never reuse the consumed admission ticket.
     from starlette.websockets import WebSocketDisconnect
-    with pytest.raises(WebSocketDisconnect):
-        with a.websocket_connect('wss://work.example.test/api/ws?ticket=' + ta):
-            pass
+    with a.websocket_connect('wss://work.example.test/api/ws?ticket=' + ta) as rejected:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            rejected.receive_text()
+    assert exc.value.code == 4401
     ticket = a.post('/api/auth/ws-ticket').json()['ticket']
     with a.websocket_connect('wss://work.example.test/api/ws?ticket=' + ticket) as reopened:
         assert len(rpc(reopened, 'get', {'id': c['id']})['decisions']) == 2
@@ -1066,28 +1069,42 @@ def test_real_owner_logout_revokes_already_open_rpc_authority(work_transport):
         logged_out = client.post('/auth/logout', follow_redirects=False)
 
         assert logged_out.status_code == 302
-        assert rpc(ws, 'capabilities')['can_decide'] is False
-        rpc(ws, 'comment', {}, error=4403)
-        rpc(ws, 'decide', {}, error=4403)
+        assert rpc(ws, 'capabilities') == {
+            'can_decide': False,
+            'reason': companion_work.DECISION_AUTH_REASON,
+            'error_code': 4401,
+            'notifications': {
+                'delivery_mode': 'external_receipt_only',
+                'batch_receipts': True,
+                'card_receipts': True,
+                'os_notifications': 'unsupported',
+                'grants_authority': False,
+            },
+        }
+        rpc(ws, 'comment', {}, error=4401)
+        rpc(ws, 'decide', {}, error=4401)
 
 
 def test_real_shared_and_internal_transports_cannot_decide(work_transport, monkeypatch):
     web, a, _ = work_transport
     from hermes_cli.dashboard_auth.ws_tickets import internal_ws_credential
     from starlette.websockets import WebSocketDisconnect
-    with pytest.raises(WebSocketDisconnect):
-        with a.websocket_connect('wss://work.example.test/api/ws?token=' + web._SESSION_TOKEN):
-            pass
+    with a.websocket_connect(
+        'wss://work.example.test/api/ws?token=' + web._SESSION_TOKEN
+    ) as rejected:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            rejected.receive_text()
+    assert exc.value.code == 4401
     with a.websocket_connect('wss://work.example.test/api/ws?internal=' + internal_ws_credential()) as agent:
-        assert rpc(agent, 'capabilities')['can_decide'] is False
-        rpc(agent, 'comment', {}, error=4403)
-        rpc(agent, 'decide', {}, error=4403)
+        assert rpc(agent, 'capabilities')['error_code'] == 4401
+        rpc(agent, 'comment', {}, error=4401)
+        rpc(agent, 'decide', {}, error=4401)
         rpc(agent, 'capabilities', {'human_identity': 'owner'}, error=-32602)
     monkeypatch.setattr(web.app.state, 'auth_required', False)
     with a.websocket_connect('wss://work.example.test/api/ws?token=' + web._SESSION_TOKEN) as shared:
-        assert rpc(shared, 'capabilities')['can_decide'] is False
-        rpc(shared, 'comment', {}, error=4403)
-        rpc(shared, 'decide', {}, error=4403)
+        assert rpc(shared, 'capabilities')['error_code'] == 4401
+        rpc(shared, 'comment', {}, error=4401)
+        rpc(shared, 'decide', {}, error=4401)
 
 
 
@@ -1130,7 +1147,7 @@ def test_multiuser_owner_allowlist_fail_closed_and_policy_revocation(work_transp
         assert rpc(ws, 'capabilities')['can_decide'] is True
         (home / 'config.yaml').write_text('dashboard: {work_owner_identities: []}')
         assert rpc(ws, 'capabilities')['can_decide'] is False
-        rpc(ws, 'decide', {}, error=4403)
+        rpc(ws, 'decide', {}, error=4401)
         (home / 'config.yaml').write_text('dashboard: {}')
         assert rpc(ws, 'capabilities')['can_decide'] is False
         (home / 'config.yaml').write_text('dashboard: {work_owner_identities: "stub:stub-user-1"}')
@@ -1139,7 +1156,7 @@ def test_multiuser_owner_allowlist_fail_closed_and_policy_revocation(work_transp
         assert rpc(ws, 'capabilities')['can_decide'] is True
         clock['now'] += ws_tickets.OWNER_AUTH_LEASE_SECONDS
         assert rpc(ws, 'capabilities')['can_decide'] is False
-        rpc(ws, 'decide', {}, error=4403)
+        rpc(ws, 'decide', {}, error=4401)
 
 
 def test_basic_single_owner_policy(tmp_path, monkeypatch):
@@ -1170,9 +1187,12 @@ def test_loopback_auth_opt_in_uses_existing_gate(work_transport, monkeypatch):
         assert status.status_code == 200
         assert status.json()['auth_required'] is True
         assert client.post('/api/auth/ws-ticket', follow_redirects=False).status_code == 401
-        with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect('wss://127.0.0.1/api/ws?token=' + web._SESSION_TOKEN):
-                pass
+        with client.websocket_connect(
+            'wss://127.0.0.1/api/ws?token=' + web._SESSION_TOKEN
+        ) as rejected:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                rejected.receive_text()
+        assert exc.value.code == 4401
         ticket = login_ticket(client)
         with client.websocket_connect('wss://127.0.0.1/api/ws?ticket=' + ticket) as ws:
             assert rpc(ws, 'capabilities')['can_decide'] is True

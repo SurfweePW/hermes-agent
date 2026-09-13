@@ -15,6 +15,8 @@ import sqlite3
 from uuid import uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
+from tui_gateway.companion_errors import OWNER_AUTHORIZATION_REQUIRED_CODE
+
 STATES = frozenset({'ideas', 'in_progress', 'needs_me', 'done', 'declined'})
 ACTIONS = frozenset({'approve_preparation', 'request_changes', 'snooze', 'decline'})
 DECISION_OPTIONS = frozenset({'approve_preparation', 'request_changes', 'remind_in_2_hours'})
@@ -373,7 +375,10 @@ class WorkStore:
     def comment(self, card_id, body, idempotency_key, *, human_identity=None):
         card_id = text(card_id, 'id', 100)
         if not human_identity:
-            raise WorkError('authenticated dashboard owner login required', 4403)
+            raise WorkError(
+                'authenticated dashboard owner login required',
+                OWNER_AUTHORIZATION_REQUIRED_CODE,
+            )
         actor = 'human'
         request = {'id': card_id, 'text': text(body, 'text'), 'actor': actor}
         with self._tx() as db:
@@ -394,7 +399,10 @@ class WorkStore:
         expected_version = integer(expected_version, 'expected_version')
         revision = integer(revision, 'revision')
         if not human_identity:
-            raise WorkError('authenticated dashboard human login required', 4403)
+            raise WorkError(
+                'authenticated dashboard human login required',
+                OWNER_AUTHORIZATION_REQUIRED_CODE,
+            )
         if not isinstance(action, str) or action not in ACTIONS:
             raise WorkError('invalid decision action or revision', -32602)
         if not isinstance(reason, str) or len(reason) > 20000:

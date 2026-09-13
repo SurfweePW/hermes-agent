@@ -12,6 +12,7 @@ import sys
 
 from hermes_cli.companion_work_store import (
     WorkError, WorkStore, anchored_store_path)
+from tui_gateway.companion_errors import OWNER_AUTHORIZATION_REQUIRED_CODE
 
 DECISION_AUTH_REASON = ('Owner sign-in required: use an authorized dashboard session and a fresh '
                         'single-use ticket. Shared tokens and agent/internal clients cannot mutate decisions.')
@@ -117,6 +118,7 @@ def execute(operation, params, *, owner_authorization=None):
         return {
             'can_decide': bool(owner),
             'reason': None if owner else DECISION_AUTH_REASON,
+            'error_code': None if owner else OWNER_AUTHORIZATION_REQUIRED_CODE,
             'notifications': {
                 'delivery_mode': 'external_receipt_only',
                 'batch_receipts': True,
@@ -126,7 +128,7 @@ def execute(operation, params, *, owner_authorization=None):
             },
         }
     if operation in {'comment', 'decide'} and not owner:
-        raise WorkError(DECISION_AUTH_REASON, 4403)
+        raise WorkError(DECISION_AUTH_REASON, OWNER_AUTHORIZATION_REQUIRED_CODE)
     store = resolve_store(params.get('profile'))
     p = {k: v for k, v in params.items() if k != 'profile'}
     try:
