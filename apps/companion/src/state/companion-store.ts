@@ -49,6 +49,7 @@ import type { WorkGateway } from '../gateway/work-types'
 import { getOwnerAuthBridge, type OwnerAuthBridge } from '../security/owner-auth'
 import { createDefaultSecretStore, type SessionSecretStore } from '../security/secret-store'
 
+import type { ProfileServiceability } from './profile-selector'
 import { createSessionDraftStore, type LocalSessionDraftIdentity, type SessionDraftIdentity } from './session-drafts'
 import { createSessionOperationRetryStore, type CreationRetryEntry } from './session-operation-retries'
 
@@ -117,7 +118,13 @@ export interface CompanionSnapshot {
   storesTokenEncrypted: boolean
   ownerAuthAvailable: boolean
   connectionMode: CompanionConnectionMode
+  profileServiceability: readonly ProfileServiceability[]
 }
+
+export type ConversationCreationResult =
+  | { status: 'admitted'; target: CompanionSessionTarget }
+  | { status: 'refused' }
+  | { status: 'unknown' }
 
 export interface CompanionGateway extends Partial<WorkGateway>, Partial<OrganizationGateway>, Partial<DirectoryGateway>, Partial<LibraryGateway> {
   readonly connectionState: ConnectionState
@@ -178,11 +185,11 @@ export interface CompanionStore {
   openAttention(item: GatewayAttentionItem): Promise<void>
   refreshSessions(): Promise<void>
   setSessionPinned(sessionId: string, pinned: boolean): Promise<void>
-  openBotChat(teammateId?: string): Promise<void>
-  submitQuickTask(teammateId: string, text: string): Promise<void>
+  openBotChat(teammateId?: string): Promise<boolean>
+  submitQuickTask(teammateId: string, text: string): Promise<ConversationCreationResult>
   activateSessionDraft(target: CompanionSessionTarget): void
   setDraft(draft: string): void
-  submitDraft(): Promise<void>
+  submitDraft(): Promise<ConversationCreationResult | void>
   interrupt(): Promise<void>
   respondToApproval(choice: ApprovalChoice): Promise<void>
   recover(): Promise<void>
@@ -530,6 +537,12 @@ function isUncertainCreationFailure(error: unknown): boolean {
   return !(error instanceof JsonRpcGatewayError) || error.code === 5066
 }
 
+function isOwnerAuthorizationLost(error: unknown): boolean {
+  return error instanceof JsonRpcGatewayError
+    ? error.code === 4401 || error.closeCode === 4401
+    : typeof error === 'object' && error !== null && 'code' in error && Number(error.code) === 4401
+}
+
 function isUnsupportedMethod(error: unknown): boolean {
   if (!(error instanceof Error)) {return false}
 
@@ -548,8 +561,9 @@ function authenticatedOwnerScope(status: unknown): string | null {
 }
 
 export function createCompanionStore(options: CompanionStoreOptions = {}): CompanionStore {
-  const work = createWorkStore()
-  const directory = createDirectoryStore()
+  let handleOwnerAuthorizationLost = (_error: unknown) => undefined
+  const work = createWorkStore({ onOwnerAuthorizationLost: (error) => handleOwnerAuthorizationLost(error) })
+  const directory = createDirectoryStore({ onOwnerAuthorizationLost: (error) => handleOwnerAuthorizationLost(error) })
   const gatewayFactory = options.gatewayFactory ?? (() => new CompanionClient())
   const storage = options.storage ?? browserStorage()
   const sessionDrafts = createSessionDraftStore(storage)
@@ -690,7 +704,8 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     canForgetSavedToken: Boolean(savedToken || savedTokenError),
     storesTokenEncrypted: secrets.persistent,
     ownerAuthAvailable: Boolean(ownerAuth),
-    connectionMode
+    connectionMode,
+    profileServiceability: []
   })
 
   const publish = (changes: Partial<CompanionSnapshot>) => {
@@ -840,8 +855,10 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
   }
 
   const resetOwnerPresentation = (
-    { purgeIdentityState = true }: { purgeIdentityState?: boolean } = {}
+    { purgeIdentityState = true, preserveDrafts = false }: { purgeIdentityState?: boolean; preserveDrafts?: boolean } = {}
   ): boolean => {
+    const preservedDraft = preserveDrafts ? snapshot.draft : ''
+    const preservedDraftIdentity = preserveDrafts ? activeDraftIdentity : null
     work.reset()
     directory.reset()
     profileIds.clear()
@@ -876,7 +893,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       }
     }
 
-    activeDraftIdentity = null
+    activeDraftIdentity = preservedDraftIdentity
     activePresentationIdentity = null
     publish({
       phase: 'disconnected',
@@ -893,12 +910,23 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       attentionScope: 'This gateway runtime only',
       recentSessions: [],
       sessionsLoading: false,
-      draft: '',
+      draft: preservedDraft,
       turnStatus: 'idle',
-      error: draftPersistenceWarning ? DRAFT_PERSISTENCE_ERROR : null
+      error: draftPersistenceWarning ? DRAFT_PERSISTENCE_ERROR : null,
+      profileServiceability: []
     })
 
     return !sessionDrafts.hasUnsafePlaintext()
+  }
+
+  handleOwnerAuthorizationLost = (error: unknown) => {
+    if (!isOwnerAuthorizationLost(error)) {return}
+    const operation = ++connectionGeneration
+    discardGateway(operation)
+    connectionMode = 'shared'
+    ownerScope = null
+    resetOwnerPresentation({ purgeIdentityState: false, preserveDrafts: true })
+    publish({ phase: 'setup', error: 'Sesja właściciela wygasła. Zaloguj się ponownie.' })
   }
 
   const handleEvent = (event: CompanionEvent) => {
@@ -1146,6 +1174,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
     if (!isCurrentConnection(client, generation)) {return false}
     const nextProfileIds = new Map<string, string>()
+    const profileServiceability: ProfileServiceability[] = []
     const idCounts = new Map<string, number>()
 
     const teammates = result.profiles.flatMap((profile, index): Teammate[] => {
@@ -1158,6 +1187,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       idCounts.set(baseId, count)
       const id = count === 1 ? baseId : `${baseId}-${count}`
       nextProfileIds.set(id, profile.name)
+      profileServiceability.push({ teammateId: id, profile: profile.name, servedByGateway: profile.served_by_gateway === true })
 
       return [{
         id,
@@ -1173,7 +1203,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     profileIds.clear()
 
     for (const [id, profile] of nextProfileIds) {profileIds.set(id, profile)}
-    publish({ teammates })
+    publish({ teammates, profileServiceability })
 
     return true
   }
@@ -1542,20 +1572,23 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     return true
   }
 
+  const clearAdmittedCreationDraft = (retry: CreationRetryEntry, receipt: CompanionSessionCreationReceipt) => {
+    if (activeDraftIdentity?.sessionKind !== 'local' || activeDraftIdentity.sessionId !== retry.draftId
+      || activeDraftIdentity.revision !== retry.draftRevision) {return}
+
+    sessionDrafts.set(activeDraftIdentity, '')
+    activeDraftIdentity = receipt.stored_session_id ? {
+      backendNamespace: receipt.backend_namespace, profile: receipt.profile,
+      sessionId: receipt.stored_session_id, sessionKind: 'stored'
+    } : activeDraftIdentity
+    publish({ draft: activeDraftIdentity ? sessionDrafts.get(activeDraftIdentity) : '' })
+  }
+
   const completeCreation = (retry: CreationRetryEntry, receipt: CompanionSessionCreationReceipt, error: string | null = null) => {
     selectCreatedTarget(receipt)
     operationRetries.remove(retry)
-
-    if (activeDraftIdentity?.sessionKind === 'local' && activeDraftIdentity.sessionId === retry.draftId
-      && activeDraftIdentity.revision === retry.draftRevision) {
-      sessionDrafts.set(activeDraftIdentity, '')
-      activeDraftIdentity = receipt.stored_session_id ? {
-        backendNamespace: receipt.backend_namespace, profile: receipt.profile,
-        sessionId: receipt.stored_session_id, sessionKind: 'stored'
-      } : activeDraftIdentity
-    }
-
-    publish({ draft: activeDraftIdentity ? sessionDrafts.get(activeDraftIdentity) : '', turnStatus: error ? 'error' : 'idle', error })
+    clearAdmittedCreationDraft(retry, receipt)
+    publish({ turnStatus: error ? 'error' : 'idle', error })
   }
 
   const retainCreation = (retry: CreationRetryEntry, receipt: CompanionSessionCreationReceipt, message: string) => {
@@ -1578,6 +1611,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     admitted: (retry, receipt) => {
       operationRetries.put({ ...retry, operationStatus: receipt.operation_status, storedSessionId: receipt.stored_session_id })
       selectCreatedTarget(receipt)
+      clearAdmittedCreationDraft(retry, receipt)
       publish({ turnStatus: 'streaming', error: null })
     },
     running: (retry, receipt) => creationReceiptHandlers.admitted(retry, receipt),
@@ -1596,6 +1630,18 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
   }
 
   const applyCreationReceipt = (retry: CreationRetryEntry, receipt: CompanionSessionCreationReceipt) => creationReceiptHandlers[receipt.operation_status](retry, receipt)
+
+  const creationResult = (receipt: CompanionSessionCreationReceipt): ConversationCreationResult => {
+    const target = creationTarget(receipt)
+    const admitted = receipt.operation_status === 'admitted' || receipt.operation_status === 'running'
+      || receipt.operation_status === 'completed' || receipt.operation_status === 'failed' || receipt.operation_status === 'cancelled'
+      || receipt.operation_status === 'not_admitted' && receipt.row_state === 'present'
+
+    if (admitted && target) {return { status: 'admitted', target }}
+    if (receipt.operation_status === 'not_admitted') {return { status: 'refused' }}
+
+    return { status: 'unknown' }
+  }
 
   const reconcileCreationsAfterReconnect = async (client: CompanionGateway, connectionOperation: number) => {
     if (!ownerScope) {return}
@@ -1622,19 +1668,22 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
     }
   }
 
-  const submitLocalCreation = async (identity: LocalSessionDraftIdentity, text: string) => {
+  const submitLocalCreation = async (identity: LocalSessionDraftIdentity, text: string): Promise<ConversationCreationResult> => {
     if (!creationLock || !ownerScope || !gateway?.createCompanionSession || connectionMode !== 'owner') {
       publish({ turnStatus: 'error', error: 'Secure exclusive creation is unavailable on this device.' })
 
-      return
+      return { status: 'refused' }
     }
 
     const create = gateway.createCompanionSession.bind(gateway)
     const lockName = `hermes.companion.create:${identity.ownerScope}:${identity.backendNamespace}:${identity.sessionId}`
-    await creationLock.request(lockName, { ifAvailable: true, mode: 'exclusive' }, async (lock) => {
-      if (!lock) {publish({ turnStatus: 'error', error: 'This draft is already being submitted.' });
 
- return}
+    return creationLock.request(lockName, { ifAvailable: true, mode: 'exclusive' }, async (lock): Promise<ConversationCreationResult> => {
+      if (!lock) {
+        publish({ turnStatus: 'error', error: 'This draft is already being submitted.' })
+
+        return { status: 'refused' }
+      }
 
       let retry = operationRetries.list(identity.ownerScope, identity.backendNamespace).find((entry): entry is CreationRetryEntry => entry.operationKind === 'create'
         && entry.ownerScope === identity.ownerScope && entry.backendNamespace === identity.backendNamespace
@@ -1652,45 +1701,61 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         } catch (error) {
           publish({ turnStatus: 'error', error: error instanceof Error ? error.message : 'Companion could not durably save creation retry metadata.' })
 
-          return
+          return { status: 'refused' }
         }
         const verified = operationRetries.get(retry)
 
         if (!verified || verified.messageSha256 !== payloadDigest) {
-          publish({ turnStatus: 'error', error: 'Companion could not durably save creation retry metadata.' });
+          publish({ turnStatus: 'error', error: 'Companion could not durably save creation retry metadata.' })
 
- return
+          return { status: 'refused' }
         }
       } else if (retry.messageSha256 !== payloadDigest) {
-        publish({ turnStatus: 'error', error: 'The submitted draft revision no longer matches its retry metadata.' });
+        publish({ turnStatus: 'error', error: 'The submitted draft revision no longer matches its retry metadata.' })
 
- return
+        return { status: 'refused' }
       }
 
       retry = { ...retry, operationStatus: 'uncertain' }
       operationRetries.put(retry)
 
       if (operationRetries.get(retry)?.operationStatus !== 'uncertain') {
-        publish({ turnStatus: 'error', error: 'Companion could not mark creation uncertain before transmission.' });
+        publish({ turnStatus: 'error', error: 'Companion could not mark creation uncertain before transmission.' })
 
- return
+        return { status: 'refused' }
       }
 
+      const messagesBeforeSubmission = snapshot.messages
       publish({ turnStatus: 'uncertain', error: null,
-        messages: [...snapshot.messages, { id: `message-${++messageSequence}`, role: 'user', text }] })
+        messages: [...messagesBeforeSubmission, { id: `message-${++messageSequence}`, role: 'user', text }] })
 
       try {
         const receipt = await create({ version: 1, backend_namespace: retry.backendNamespace, profile: retry.profile,
           client_request_id: retry.clientRequestId, project_id: retry.projectId, text })
 
         applyCreationReceipt(retry, receipt)
+        const result = creationResult(receipt)
+
+        if (result.status === 'refused') {publish({ messages: messagesBeforeSubmission })}
+
+        return result
       } catch (error) {
+        if (isOwnerAuthorizationLost(error)) {
+          handleOwnerAuthorizationLost(error)
+
+          return { status: 'refused' }
+        }
+
         if (isUncertainCreationFailure(error)) {
           publish({ turnStatus: 'uncertain', error: 'The new conversation may have been created. Reconnect to reconcile it; Hermes will not create it twice.' })
-        } else {
-          operationRetries.remove(retry)
-          publish({ turnStatus: 'error', error: publicError(error) })
+
+          return { status: 'unknown' }
         }
+
+        operationRetries.remove(retry)
+        publish({ messages: messagesBeforeSubmission, turnStatus: 'error', error: publicError(error) })
+
+        return { status: 'refused' }
       }
     })
   }
@@ -1754,10 +1819,14 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       }
     },
     async configureOwner(input) {
+      const recoveringExpiredOwner = snapshot.error === 'Sesja właściciela wygasła. Zaloguj się ponownie.'
       const operation = ++connectionGeneration
       discardGateway(operation)
       connectionMode = 'shared'
-      const identityStatePurged = resetOwnerPresentation()
+      const identityStatePurged = resetOwnerPresentation({
+        purgeIdentityState: !recoveringExpiredOwner,
+        preserveDrafts: recoveringExpiredOwner
+      })
 
       try {
         const configuration = parseGatewayBaseUrl(input.baseUrl)
@@ -1787,6 +1856,12 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
           publish({ phase: 'ready', connectionMode: 'owner', error: null })
         }
       } catch (error) {
+        if (isOwnerAuthorizationLost(error)) {
+          handleOwnerAuthorizationLost(error)
+
+          return
+        }
+
         if (connectionGeneration === operation) {
           discardGateway(operation)
           connectionMode = 'shared'
@@ -1826,6 +1901,12 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
 
         if (isCurrentConnection(client, operation)) {publish({ phase: 'ready', error: null })}
       } catch (error) {
+        if (isOwnerAuthorizationLost(error)) {
+          handleOwnerAuthorizationLost(error)
+
+          return
+        }
+
         if (connectionGeneration === operation) {
           discardGateway(operation)
           publish({ phase: 'disconnected', error: publicError(error) })
@@ -2255,7 +2336,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
           if (isCurrentConnection(client, connectionOperation) && sessionGeneration === sessionOperation) {publish({ error: publicError(error) })}
         }
 
-        return
+        return true
       }
 
       const backendNamespace = profile ? backendNamespaceForProfile(profile) : null
@@ -2265,7 +2346,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
         || connectionMode !== 'owner' || snapshot.phase !== 'ready' || !creationLock) {
         publish({ error: 'Durable conversation creation is unavailable for this connection.' })
 
-        return
+        return false
       }
 
       beginSessionOperation()
@@ -2277,17 +2358,21 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       publish({ selectedTeammateId: teammateId, runtimeSessionId: null, storedSessionId: null,
         activeSession: activeSessionPresentation(teammate, null, 'New conversation'), messages: [], pendingApproval: null,
         draft: sessionDrafts.get(activeDraftIdentity), turnStatus: 'idle', error: null })
+
+      return true
     },
     async submitQuickTask(teammateId, text) {
       const task = text.trim()
 
-      if (!task) {return}
+      if (!task) {return { status: 'refused' }}
       const sessionOperation = sessionGeneration + 1
-      await api.openBotChat(teammateId)
+      const opened = await api.openBotChat(teammateId)
 
-      if (sessionGeneration !== sessionOperation) {return}
+      if (!opened || sessionGeneration !== sessionOperation) {return { status: 'refused' }}
       api.setDraft(text)
-      await api.submitDraft()
+      const result = await api.submitDraft()
+
+      return result ?? { status: 'refused' }
     },
     activateSessionDraft(target) {
       if (!isActivePersistedDraft(target)) {
@@ -2339,9 +2424,7 @@ export function createCompanionStore(options: CompanionStoreOptions = {}): Compa
       if (!client || !text || snapshot.phase !== 'ready') {return}
 
       if (activeDraftIdentity?.sessionKind === 'local') {
-        await submitLocalCreation(activeDraftIdentity, draftAtSubmission)
-
-        return
+        return submitLocalCreation(activeDraftIdentity, draftAtSubmission)
       }
 
       if (persistedContinuationTarget) {

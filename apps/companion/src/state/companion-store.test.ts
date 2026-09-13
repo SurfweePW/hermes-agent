@@ -12,8 +12,8 @@ class ControlledGateway implements CompanionGateway {
   readonly calls: Array<[string, ...unknown[]]> = []
   profiles: ProfilesListResult = {
     profiles: [
-      { name: 'atlas' },
-      { name: 'Operations Assistant' }
+      { name: 'atlas', served_by_gateway: true },
+      { name: 'Operations Assistant', served_by_gateway: true }
     ]
   }
   session: SessionResult = {
@@ -228,6 +228,43 @@ describe('CompanionStore setup and sessions', () => {
     expect(store.getSnapshot()).toMatchObject({ storedSessionId: 'created-stored', turnStatus: 'idle' })
   })
 
+  it('keeps a refused creation draft and clears it only after a later admitted receipt', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner')
+    }
+    let attempt = 0
+    const { store } = harness(null, undefined, undefined, ownerAuth, (gateway) => {
+      Object.assign(gateway, {
+        listCompanionSessions: async () => ({ backend_namespace: 'backend-1', sessions: [], has_more: false, next_cursor: null,
+          coverage: { complete: true, freshness: null, message: null } }),
+        listCompanionProjects: async () => ({ backend_namespace: 'backend-1', projects: [], has_more: false, next_cursor: null,
+          coverage: { complete: true, freshness: null, message: null } }),
+        getCompanionProject: async () => {throw new Error('unused')},
+        createCompanionSession: async (request: CreateCompanionSessionRequest) => ({
+          version: 1 as const, operation_kind: 'create' as const, backend_namespace: request.backend_namespace,
+          profile: request.profile, client_request_id: request.client_request_id, project_id: null,
+          stored_session_id: attempt++ === 0 ? null : 'created-stored', row_state: attempt === 1 ? 'absent' as const : 'present' as const,
+          operation_status: attempt === 1 ? 'not_admitted' as const : 'admitted' as const, runtime_session_id: null
+        })
+      })
+    })
+
+    await store.configureOwner({ baseUrl: 'https://gateway.test' })
+    await vi.waitFor(() => expect(store.directory.getSnapshot().coverage[0]?.backendNamespace).toBe('backend-1'))
+    await store.openBotChat('atlas')
+    store.setDraft('Zachowaj tę wiadomość')
+
+    expect(await store.submitDraft()).toEqual({ status: 'refused' })
+    expect(store.getSnapshot()).toMatchObject({ draft: 'Zachowaj tę wiadomość', storedSessionId: null })
+
+    expect(await store.submitDraft()).toEqual({
+      status: 'admitted',
+      target: { backend_namespace: 'backend-1', profile: 'atlas', stored_session_id: 'created-stored' }
+    })
+    expect(store.getSnapshot()).toMatchObject({ draft: '', storedSessionId: 'created-stored' })
+  })
+
   it('reconciles an uncertain first send without creating a second session', async () => {
     const ownerAuth: OwnerAuthBridge = {
       ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
@@ -265,7 +302,9 @@ describe('CompanionStore setup and sessions', () => {
     await store.openBotChat('atlas')
     expect(gateways[0].calls.some(([name]) => name === 'createSession' || name === 'listSessions')).toBe(false)
     store.setDraft('Create exactly once')
-    await store.submitDraft()
+    const result = await store.submitDraft()
+    expect(result).toEqual({ status: 'unknown' })
+    expect(store.getSnapshot().draft).toBe('Create exactly once')
     expect(store.getSnapshot().turnStatus).toBe('uncertain')
     gateways[0].setState('closed')
 
@@ -318,6 +357,83 @@ describe('CompanionStore setup and sessions', () => {
     expect(ownerAuth.ownerSignIn).toHaveBeenCalledWith({ baseUrl: 'https://gateway.test' })
     expect(gateways[0].calls[0]).toEqual(['connect', 'wss://gateway.test/api/ws?ticket=owner-ticket'])
     expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner', error: null })
+  })
+
+  it('routes an RPC 4401 through owner recovery, clears owner-only presentation and preserves the draft', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket')
+    }
+    let refuseDirectory = false
+    const { store } = harness(null, undefined, undefined, ownerAuth, (gateway) => {
+      Object.assign(gateway, {
+        listCompanionSessions: async () => {
+          if (refuseDirectory) {throw new JsonRpcGatewayError('owner lease expired', { code: 4401 })}
+
+          return { backend_namespace: 'backend-1', sessions: [], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } }
+        },
+        listCompanionProjects: async () => ({ backend_namespace: 'backend-1', projects: [], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } }),
+        getCompanionProject: async () => {throw new Error('unused')}
+      })
+    })
+
+    await store.configureOwner({ baseUrl: 'https://gateway.test' })
+    store.setDraft('Zachowaj szkic po wygaśnięciu sesji')
+    refuseDirectory = true
+    await store.directory.refresh()
+
+    expect(store.getSnapshot()).toMatchObject({ phase: 'setup', connectionMode: 'shared', teammates: [], draft: 'Zachowaj szkic po wygaśnięciu sesji', error: 'Sesja właściciela wygasła. Zaloguj się ponownie.' })
+    expect(store.directory.getSnapshot().sessions).toEqual([])
+    expect(store.work.getSnapshot().items).toEqual([])
+    expect(ownerAuth.ownerSignOut).not.toHaveBeenCalled()
+
+    refuseDirectory = false
+    await store.configureOwner({ baseUrl: 'https://gateway.test' })
+
+    expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner', draft: 'Zachowaj szkic po wygaśnięciu sesji', error: null })
+    expect(ownerAuth.ownerSignIn).toHaveBeenCalledTimes(2)
+  })
+
+  it('routes a WebSocket close-code 4401 connection rejection through owner recovery', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=expired-ticket')
+    }
+    const { store } = harness(null, undefined, undefined, ownerAuth, (gateway) => {
+      gateway.connectResult = Promise.reject(new JsonRpcGatewayError('upgrade rejected', { closeCode: 4401 }))
+    })
+
+    await store.configureOwner({ baseUrl: 'https://gateway.test' })
+
+    expect(store.getSnapshot()).toMatchObject({ phase: 'setup', connectionMode: 'shared', teammates: [], error: 'Sesja właściciela wygasła. Zaloguj się ponownie.' })
+    expect(ownerAuth.ownerSignOut).not.toHaveBeenCalled()
+  })
+
+  it('keeps a 4403 directory rejection profile-scoped without signing the owner out', async () => {
+    const ownerAuth: OwnerAuthBridge = {
+      ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })), ownerStatus: vi.fn(), ownerSignOut: vi.fn(),
+      ownerWebSocketUrl: vi.fn(async () => 'wss://gateway.test/api/ws?ticket=owner-ticket')
+    }
+    let refuseDirectory = false
+    const { store } = harness(null, undefined, undefined, ownerAuth, (gateway) => {
+      Object.assign(gateway, {
+        listCompanionSessions: async () => {
+          if (refuseDirectory) {throw new JsonRpcGatewayError('profile is not served', { code: 4403 })}
+
+          return { backend_namespace: 'backend-1', sessions: [], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } }
+        },
+        listCompanionProjects: async () => ({ backend_namespace: 'backend-1', projects: [], has_more: false, next_cursor: null, coverage: { complete: true, freshness: null, message: null } }),
+        getCompanionProject: async () => {throw new Error('unused')}
+      })
+    })
+
+    await store.configureOwner({ baseUrl: 'https://gateway.test' })
+    refuseDirectory = true
+    await store.directory.refresh()
+
+    expect(store.getSnapshot()).toMatchObject({ phase: 'ready', connectionMode: 'owner', error: null })
+    expect(store.directory.getSnapshot().coverage.some((item) => item.status === 'error')).toBe(true)
+    expect(ownerAuth.ownerSignOut).not.toHaveBeenCalled()
   })
 
   it('reconnects a persisted native owner session after a cold restart', async () => {

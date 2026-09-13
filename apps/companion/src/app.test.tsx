@@ -7,23 +7,35 @@ import { createFakeWorkGateway, FakeWorkGateway } from './fixtures/fake-work-gat
 import type { CreateCompanionSessionRequest } from './gateway/types'
 import type { OwnerAuthBridge } from './security/owner-auth'
 import type { SessionSecretStore } from './security/secret-store'
-import { createCompanionStore } from './state/companion-store'
+import { type CompanionGateway, createCompanionStore } from './state/companion-store'
 
-async function readyStore() {
-  const store = createCompanionStore({ gatewayFactory: createFakeGateway, storage: { getItem: () => null, setItem: () => undefined } })
+function serveAllProfiles<T extends CompanionGateway>(gateway: T): T {
+  const listProfiles = gateway.listProfiles.bind(gateway)
+  gateway.listProfiles = async () => {
+    const result = await listProfiles()
+
+    return { ...result, profiles: result.profiles.map((profile) => ({ ...profile, served_by_gateway: true })) }
+  }
+
+  return gateway
+}
+
+async function readyStore(gateway = createFakeWorkGateway()) {
+  const store = createCompanionStore({ gatewayFactory: () => serveAllProfiles(gateway), storage: { getItem: () => null, setItem: () => undefined } })
   await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
 
   return store
 }
 
 async function readyDirectoryStore() {
-  const store = createCompanionStore({ gatewayFactory: createFakeWorkGateway, storage: { getItem: () => null, setItem: () => undefined } })
+  const store = createCompanionStore({ gatewayFactory: () => serveAllProfiles(createFakeWorkGateway()), storage: { getItem: () => null, setItem: () => undefined } })
   await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
 
   return store
 }
 
 async function readyOwnerDirectoryStore(gateway = new FakeWorkGateway()) {
+  serveAllProfiles(gateway)
   const ownerAuth: OwnerAuthBridge = {
     ownerSignIn: vi.fn(async () => ({ signedIn: true, ownerScope: 'owner-account-a' })),
     ownerStatus: vi.fn(),
@@ -67,9 +79,11 @@ describe('App', () => {
   beforeEach(() => window.history.replaceState({}, '', '/'))
   afterEach(() => {vi.useRealTimers(); vi.restoreAllMocks()})
   it('keeps durable work in Needs Me, shows the old-server boundary and preserves runtime attention', async () => {
-    const store = await readyStore()
+    const gateway = createFakeWorkGateway()
+    gateway.listWork = async () => {throw Object.assign(new Error('Method not found'), { code: -32601 })}
+    const store = await readyStore(gateway)
     render(<App store={store} />)
-    fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje' })[0])
+    fireEvent.click(screen.getAllByRole('button', { name: /^Decyzje/ })[0])
     expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
     expect(screen.getByText(/does not support the durable work inbox/)).toBeTruthy()
     expect(screen.getByText('Runtime-local attention')).toBeTruthy()
@@ -380,9 +394,39 @@ describe('App', () => {
     fireEvent.click(await screen.findByRole('button', { name: '← Back' }))
     const form = screen.getByRole('form', { name: 'Quick task' })
     expect(form.classList.contains('quick-task')).toBe(true)
-    expect(screen.getByLabelText('Assign to').tagName).toBe('SELECT')
+    expect(screen.getByLabelText('Rozmawiaj z').tagName).toBe('SELECT')
     expect(screen.getByLabelText('Task').tagName).toBe('TEXTAREA')
     expect(screen.getByRole('button', { name: 'Send task' })).toBeTruthy()
+  })
+
+  it('keeps an unserved profile visible but prevents quick-task submission', async () => {
+    const gateway = createFakeWorkGateway()
+    const listProfiles = gateway.listProfiles.bind(gateway)
+    gateway.listProfiles = async () => {
+      const result = await listProfiles()
+
+      return { ...result, profiles: result.profiles.map((profile) => ({ ...profile, served_by_gateway: profile.name !== 'mentor' })) }
+    }
+    const createSession = vi.spyOn(gateway, 'createSession')
+    const store = createCompanionStore({ gatewayFactory: () => gateway, storage: { getItem: () => null, setItem: () => undefined } })
+    await store.configure({ baseUrl: 'http://fixture.invalid', token: 'test-token' })
+
+    render(<App store={store} />)
+    fireEvent.click(screen.getAllByRole('button', { name: /Atlas/ })[0])
+    fireEvent.click(await screen.findByRole('button', { name: '← Back' }))
+
+    const selector = screen.getByLabelText('Rozmawiaj z') as HTMLSelectElement
+    const mentor = screen.getByRole('option', { name: 'Mentor — niedostępny' }) as HTMLOptionElement
+    createSession.mockClear()
+    expect(mentor.disabled).toBe(true)
+    expect(screen.getByText('Niedostępny w tym połączeniu')).toBeTruthy()
+    expect(screen.getByText(/Ten profil nie jest obsługiwany przez bieżący gateway/)).toBeTruthy()
+
+    fireEvent.change(selector, { target: { value: 'mentor' } })
+    fireEvent.change(screen.getByLabelText('Task'), { target: { value: 'Nie wysyłaj' } })
+    expect((screen.getByRole('button', { name: 'Send task' }) as HTMLButtonElement).disabled).toBe(true)
+    fireEvent.submit(screen.getByRole('form', { name: 'Quick task' }))
+    expect(createSession).not.toHaveBeenCalled()
   })
 
   it('submits a mobile new conversation through durable companion creation', async () => {
@@ -410,7 +454,7 @@ describe('App', () => {
     render(<App store={store} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Nowa rozmowa' }))
-    expect((screen.getByLabelText('Profil rozmowy') as HTMLSelectElement).value).toBe('atlas')
+    expect((screen.getAllByLabelText('Rozmawiaj z')[0] as HTMLSelectElement).value).toBe('atlas')
     fireEvent.change(screen.getByLabelText('Pierwsza wiadomość'), { target: { value: 'Sprawdź mobilne wejście' } })
     fireEvent.click(screen.getByRole('button', { name: 'Rozpocznij rozmowę' }))
 

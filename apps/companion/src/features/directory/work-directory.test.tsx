@@ -1,8 +1,10 @@
 import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { validateCompanionProjectList, validateCompanionSessionList } from '../../gateway/companion-client'
 import type { CompanionProject, CompanionProjectDetail, CompanionSession, CompanionSessionHistoryResult } from '../../gateway/types'
+import type { ProfileSelectorOption } from '../../state/profile-selector'
 
 import { createDirectoryStore, type DirectoryGateway, type DirectorySnapshot, type SourceCoverage } from './directory-store'
 import { ChatsDirectory, WorkDirectory } from './work-directory'
@@ -49,24 +51,33 @@ const snapshot = (change: Partial<DirectorySnapshot> = {}): DirectorySnapshot =>
 })
 
 const props = (params: string, change: Partial<DirectorySnapshot> = {}) => ({
-  snapshot: snapshot(change), params: new URLSearchParams(params), onNavigate: vi.fn(), onLoadOlder: vi.fn(),
+  snapshot: snapshot(change), params: new URLSearchParams(params), profileOptions: snapshot(change).coverage.map((item) => ({ teammateId: item.profile, profile: item.profile, name: item.profile === 'atlas' ? 'Atlas' : item.profile, servedByGateway: true, selectable: item.status !== 'error' && item.sessionStatus !== 'error' && item.projectStatus !== 'error', optionLabel: item.profile === 'atlas' ? 'Atlas' : item.profile, statusLabel: null, detail: null })), onNavigate: vi.fn(), onLoadOlder: vi.fn(),
   onLoadOlderHistory: vi.fn(), onLoadOlderProjectSessions: vi.fn(), onRefresh: vi.fn(), onBack: vi.fn(), onOpenOriginal: vi.fn()
 })
+
+const selectorOptions: ProfileSelectorOption[] = [
+  { teammateId: 'atlas', profile: 'atlas', name: 'Atlas', servedByGateway: true, selectable: true, optionLabel: 'Atlas', statusLabel: null, detail: null },
+  { teammateId: 'mentor', profile: 'mentor', name: 'Mentor', servedByGateway: true, selectable: false, optionLabel: 'Mentor — niedostępny', statusLabel: 'Niedostępny w tym połączeniu', detail: null },
+  { teammateId: 'maven', profile: 'maven', name: 'Maven', servedByGateway: false, selectable: false, optionLabel: 'Maven — niedostępny', statusLabel: 'Niedostępny w tym połączeniu', detail: 'Ten profil nie jest obsługiwany przez bieżący gateway. Zmień konfigurację gatewaya, aby używać go w aplikacji.' }
+]
 
 describe('WorkDirectory', () => {
   afterEach(() => vi.restoreAllMocks())
 
   it('exposes new-conversation entry only in the mobile Rozmowy layout', () => {
-    const teammates = [{ id: 'atlas', name: 'Atlas' }, { id: 'mentor', name: 'Mentor' }]
+    const profileOptions = [
+      { teammateId: 'atlas', profile: 'atlas', name: 'Atlas', servedByGateway: true, selectable: true, optionLabel: 'Atlas', statusLabel: null, detail: null },
+      { teammateId: 'mentor', profile: 'mentor', name: 'Mentor', servedByGateway: true, selectable: true, optionLabel: 'Mentor', statusLabel: null, detail: null }
+    ]
     vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(390)
 
-    const { unmount } = render(<ChatsDirectory {...props('')} onCreateConversation={vi.fn(async () => undefined)} onOpenSession={vi.fn()} teammates={teammates} />)
+    const { unmount } = render(<ChatsDirectory {...props('')} onCreateConversation={vi.fn(async () => ({ status: 'admitted' as const, target: { backend_namespace: 'desktop-db', profile: 'atlas', stored_session_id: 'new' } }))} onOpenSession={vi.fn()} profileOptions={profileOptions} />)
     expect(screen.getByRole('button', { name: 'Nowa rozmowa' })).toBeTruthy()
     unmount()
 
     vi.restoreAllMocks()
     vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(1024)
-    render(<ChatsDirectory {...props('')} onCreateConversation={vi.fn(async () => undefined)} onOpenSession={vi.fn()} teammates={teammates} />)
+    render(<ChatsDirectory {...props('')} onCreateConversation={vi.fn(async () => ({ status: 'admitted' as const, target: { backend_namespace: 'desktop-db', profile: 'atlas', stored_session_id: 'new' } }))} onOpenSession={vi.fn()} profileOptions={profileOptions} />)
     expect(screen.queryByRole('button', { name: 'Nowa rozmowa' })).toBeNull()
   })
 
@@ -626,5 +637,60 @@ describe('WorkDirectory', () => {
     expect(restored.get('focus')).toBeNull()
     expect(restored.get('q')).toBe('Launch')
     expect(detail.onBack).toHaveBeenCalledOnce()
+  })
+
+  it('preserves a new-conversation draft on refusal and unknown outcome, then clears it only after admission', async () => {
+    vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(390)
+    const outcomes = [
+      { status: 'refused' as const },
+      { status: 'unknown' as const },
+      { status: 'admitted' as const, target: { profile: 'atlas', backend_namespace: 'backend-1', stored_session_id: 'stored-1' } }
+    ]
+    const create = vi.fn(async (_profile: string, _text: string) => outcomes.shift()!)
+    const Harness = () => {
+      const [draft, setDraft] = useState('')
+
+      return <ChatsDirectory {...props('section=sessions')} draft={draft} onCreateConversation={async (profile, text) => {
+        const outcome = await create(profile, text)
+
+        if (outcome.status === 'admitted') {setDraft('')}
+
+        return outcome
+      }} onDraftChange={setDraft} onOpenSession={vi.fn()} profileOptions={selectorOptions} />
+    }
+
+    render(<Harness />)
+    fireEvent.click(screen.getByRole('button', { name: 'Nowa rozmowa' }))
+    fireEvent.change(screen.getByLabelText('Pierwsza wiadomość'), { target: { value: 'Nie zgub tej wiadomości' } })
+    fireEvent.submit(screen.getByRole('form', { name: 'Nowa rozmowa' }))
+    expect(await screen.findByText(/Nie można teraz utworzyć rozmowy/)).toBeTruthy()
+    expect((screen.getByLabelText('Pierwsza wiadomość') as HTMLTextAreaElement).value).toBe('Nie zgub tej wiadomości')
+    expect(screen.getByRole('form', { name: 'Nowa rozmowa' })).toBeTruthy()
+
+    fireEvent.submit(screen.getByRole('form', { name: 'Nowa rozmowa' }))
+    expect(await screen.findByText(/Nie można potwierdzić utworzenia rozmowy/)).toBeTruthy()
+    expect((screen.getByLabelText('Pierwsza wiadomość') as HTMLTextAreaElement).value).toBe('Nie zgub tej wiadomości')
+
+    fireEvent.submit(screen.getByRole('form', { name: 'Nowa rozmowa' }))
+    await waitFor(() => expect((screen.getByLabelText('Pierwsza wiadomość') as HTMLTextAreaElement).value).toBe(''))
+    expect(create).toHaveBeenCalledTimes(3)
+  })
+
+  it('uses the same selectable profile set in the conversation composer and Chats filter', () => {
+    vi.spyOn(window, 'innerWidth', 'get').mockReturnValue(390)
+    render(<ChatsDirectory {...props('section=sessions')} onCreateConversation={vi.fn(async () => ({ status: 'refused' as const }))} onOpenSession={vi.fn()} profileOptions={selectorOptions} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Nowa rozmowa' }))
+    const selectors = screen.getAllByLabelText('Rozmawiaj z') as HTMLSelectElement[]
+
+    expect(selectors).toHaveLength(2)
+    for (const selector of selectors) {
+      const options = Array.from(selector.options).filter((option) => option.value && option.value !== 'all')
+      expect(options.map((option) => [option.value, option.disabled])).toEqual([
+        ['atlas', false],
+        ['mentor', true],
+        ['maven', true]
+      ])
+    }
+    expect(screen.getAllByRole('option', { name: /Maven — niedostępny/ }).every((option) => (option as HTMLOptionElement).disabled)).toBe(true)
   })
 })
