@@ -233,7 +233,7 @@ describe('Topics directory', () => {
 
     rerender(<WorkDirectory {...workView} />)
     expect(screen.getByText('Approve launch checklist')).toBeTruthy()
-    expect(screen.getByText(/needs me · prepared · wersja 4/)).toBeTruthy()
+    expect(screen.getByText(/Wymaga decyzji · Przygotowanie zakończone · Wersja 4/)).toBeTruthy()
 
     const sourcesView = props('section=topics&focus=topic-1&focusProfile=atlas&focusSource=organization-db&tab=sources', {
       selectedTopic: detail, entityProjection, topicSourceDetails, detailStatus: 'ready'

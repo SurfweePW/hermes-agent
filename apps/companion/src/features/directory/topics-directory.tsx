@@ -2,6 +2,7 @@ import { type KeyboardEvent } from 'react'
 
 import { TechnicalDetails } from '../../components/technical-details'
 import { topicsCopy } from '../../copy/topics'
+import { workCopy } from '../../copy/work'
 import type { TopicCollection, TopicDetail, TopicItem } from '../../gateway/topic-types'
 
 import type { DirectorySnapshot } from './directory-store'
@@ -137,7 +138,7 @@ export function EntityWork({ projection, type }: { projection: DirectorySnapshot
 
   if (!items.length) { return <Empty copy={projection.complete ? topicsCopy.work.completeEmptyCopy : projection.message ?? topicsCopy.work.incompleteCopy} title={projection.complete ? type === 'needsMe' ? topicsCopy.work.noNeedsMe : topicsCopy.work.noLinked : topicsCopy.work.incomplete} /> }
 
-  return <ul className="reference-list">{items.map((entry) => <li key={entry.id}><strong>{entry.detail?.item.title ?? `${entry.binding.work_kind}: ${entry.binding.source_work_id}`}</strong><span>{entry.detail ? `${entry.detail.item.state.replaceAll('_', ' ')} · ${entry.detail.item.preparation_status.replaceAll('_', ' ')} · ${topicsCopy.work.revision} ${entry.detail.item.revision}` : topicsCopy.work.sourceMissing}</span>{entry.priority && <span>{entry.priority.why_here} · {topicsCopy.work.next}: {entry.priority.next_step}</span>}</li>)}</ul>
+  return <ul className="reference-list">{items.map((entry) => <li key={entry.id}><strong>{entry.detail?.item.title ?? `${entry.binding.work_kind}: ${entry.binding.source_work_id}`}</strong><span>{entry.detail ? `${workCopy.itemState[entry.detail.item.state]} · ${workCopy.preparationStatus[entry.detail.item.preparation_status]} · ${workCopy.summary.revision} ${entry.detail.item.revision}` : topicsCopy.work.sourceMissing}</span>{entry.priority && <span>{entry.priority.why_here} · {topicsCopy.work.next}: {entry.priority.next_step}</span>}</li>)}</ul>
 }
 
 function CollectionEmpty({ collection, empty, unavailable }: { collection: TopicCollection<unknown>; empty: string; unavailable: string }) {

@@ -1,3 +1,4 @@
+import { workCopy } from '../../copy/work'
 import type { GatewayAttentionItem } from '../../gateway/types'
 
 interface NeedsMeProps {
@@ -24,11 +25,11 @@ export function NeedsMe({ items, scope, onOpen, onRefresh }: NeedsMeProps) {
 
           return actionable ? (
             <button className="attention-item attention-item--amber" key={item.id} onClick={() => onOpen(item)} type="button">
-              <span className="attention-item__number">!</span><span><span className="label">{item.kind} · {item.profile}</span><strong>{item.title}</strong><small>{item.detail || 'Otwórz dokładną prośbę.'}</small></span><span aria-hidden="true">→</span>
+              <span className="attention-item__number">!</span><span><span className="label">{workCopy.attentionKind[item.kind]} · {item.profile}</span><strong>{item.title}</strong><small>{item.detail || 'Otwórz dokładną prośbę.'}</small></span><span aria-hidden="true">→</span>
             </button>
           ) : (
             <article className="attention-item" key={item.id}>
-              <span className="attention-item__number">i</span><span><span className="label">{item.kind} · {item.profile}</span><strong>{item.title}</strong><small>{item.detail}</small><em>Odpowiedz w źródłowym Hermesie.</em></span>
+              <span className="attention-item__number">i</span><span><span className="label">{workCopy.attentionKind[item.kind]} · {item.profile}</span><strong>{item.title}</strong><small>{item.detail}</small><em>Odpowiedz w źródłowym Hermesie.</em></span>
             </article>
           )
         })}

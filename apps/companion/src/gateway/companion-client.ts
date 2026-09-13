@@ -5,6 +5,8 @@ import {
   JsonRpcGatewayClient
 } from '@hermes/shared'
 
+import { directoryCopy } from '../copy/directory'
+import { stateCopy } from '../copy/state'
 import {
   type LibraryChunkOptions,
   type LibraryListOptions,
@@ -456,7 +458,7 @@ export function validateCompanionProjectDetail(value: unknown, profile: string, 
     work: [],
     organization_available: false,
     organization_complete: false,
-    organization_message: 'Topic relationships require the authorized organization projection.',
+    organization_message: directoryCopy.store.organizationProjectionRequired,
     membership_has_more: value.membership.has_more as boolean,
     membership_next_cursor: optionalCursor(value.membership, method),
     coverage: { complete: value.membership.coverage === 'complete', freshness: asOf, message: warningList.join(' ') || null }
@@ -617,7 +619,7 @@ function toCompanionEvent(event: GatewayEvent): CompanionEvent | null {
   }
 }
 
-export const COMPANION_TERMINAL_ERROR_MESSAGE = 'Hermes reported an error while running this turn.'
+export const COMPANION_TERMINAL_ERROR_MESSAGE = stateCopy.errors.terminalTurnFailed
 export const COMPANION_TERMINAL_TEXT_MAX_LENGTH = 65_536
 
 /** Typed Companion domain facade over the shared JSON-RPC WebSocket transport. */

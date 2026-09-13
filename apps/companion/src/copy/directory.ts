@@ -13,7 +13,25 @@ export const directoryCopy = {
     browsingUpdateRequired: 'Pełne przeglądanie wymaga aktualizacji backendu.',
     reconnectSource: 'Połącz ponownie, aby zweryfikować to źródło.',
     reconnectTopics: 'Połącz ponownie, aby zweryfikować tematy.',
-    reconnectDetails: 'Połącz ponownie, aby zweryfikować szczegóły.'
+    reconnectDetails: 'Połącz ponownie, aby zweryfikować szczegóły.',
+    relationshipsUnverified: 'Nie udało się zweryfikować części autoryzowanych powiązań lub zapisów źródłowych.',
+    entityWorkFailure: (needsUpdate: boolean) => needsUpdate
+      ? 'Autoryzowana praca i zadania wymagające uwagi wymagają aktualizacji backendu.'
+      : 'Nie udało się zweryfikować autoryzowanej pracy i zadań wymagających uwagi.',
+    topicRelationshipsUnverified: 'Nie udało się zweryfikować części autoryzowanych powiązań tematów.',
+    projectDetailsFailure: (needsUpdate: boolean) => needsUpdate ? 'Szczegóły projektu wymagają aktualizacji backendu.' : 'Nie udało się zweryfikować szczegółów projektu.',
+    sessionHistoryFailure: (needsUpdate: boolean) => needsUpdate ? 'Historia rozmowy wymaga aktualizacji backendu.' : 'Nie udało się zweryfikować historii rozmowy.',
+    topicDetailsFailure: (needsUpdate: boolean) => needsUpdate ? 'Szczegóły tematu wymagają aktualizacji backendu.' : 'Nie udało się zweryfikować szczegółów tematu.',
+    olderHistoryUnverified: 'Nie udało się zweryfikować starszej historii rozmowy.',
+    completeProjectMembershipUnverified: 'Nie udało się zweryfikować pełnego przypisania rozmów do projektu.',
+    exactSessionUnresolved: 'Nie udało się ustalić dokładnego zapisu rozmowy.',
+    organizationProjectionRequired: 'Powiązania tematów wymagają autoryzowanego zapisu organizacji.',
+    sourceChanged: {
+      projectDetails: 'Źródło zmieniło się podczas wczytywania szczegółów projektu.',
+      sessionHistory: 'Źródło zmieniło się podczas wczytywania historii rozmowy.',
+      topicDetails: 'Źródło zmieniło się podczas wczytywania szczegółów tematu.',
+      projectMembership: 'Źródło zmieniło się podczas wczytywania przypisania rozmów do projektu.'
+    }
   },
   status: {
     idle: 'Bezczynne',
@@ -100,14 +118,42 @@ export const directoryCopy = {
     archived: 'Archiwum',
     hidden: 'Ukryta'
   },
+  sourceDetail: {
+    authorizedNamespace: (backend: string) => `Autoryzowana przestrzeń nazw · ${backend}`,
+    project: (type: string, archived: boolean) => `${type} · ${archived ? 'archiwalny' : 'bieżący'}`,
+    history: (messages: number, complete: boolean) => `${messages} wczytanych wiadomości · ${complete ? 'pełna historia rozmowy' : 'częściowa historia rozmowy'}`
+  },
   row: {
     sessions: 'rozmów',
     linkedWork: 'powiązanych zadań',
     messages: 'wiadomości',
     items: 'pozycji',
-    untitled: 'Rozmowa bez nazwy',
+    untitled: 'Nazwa rozmowy niedostępna',
     projectUnknown: 'Nie zgłoszono przypisania do projektu',
     unknown: 'Nieznane'
+  },
+  entityStatus: {
+    active: 'Aktywny',
+    archived: 'Archiwalny',
+    completed: 'Ukończona',
+    idle: 'Bezczynna',
+    interrupted: 'Przerwana',
+    queued: 'W kolejce',
+    running: 'W toku',
+    streaming: 'W toku'
+  },
+  history: {
+    roles: {
+      user: 'Ty',
+      assistant: 'Asystent',
+      system: 'System'
+    }
+  },
+  detailLoading: {
+    waiting: 'Oczekiwanie na zapisaną projekcję źródła tylko do odczytu.',
+    loading: 'Wczytywanie zweryfikowanych szczegółów…',
+    updateRequired: 'Wymagana aktualizacja backendu',
+    unavailable: 'Szczegóły niedostępne'
   },
   details: {
     readOnly: 'Szczegóły źródła tylko do odczytu',

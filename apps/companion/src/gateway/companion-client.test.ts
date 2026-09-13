@@ -639,7 +639,7 @@ describe('CompanionClient typed event stream', () => {
     expect(events).toEqual([{
       type: 'error',
       session_id: 'runtime-error',
-      payload: { message: 'Hermes reported an error while running this turn.' }
+      payload: { message: 'Hermes zgłosił błąd podczas wykonywania tej tury.' }
     }])
     expect(JSON.stringify(events)).not.toContain('synthetic-secret')
     expect(JSON.stringify(events)).not.toContain('synthetic-token')

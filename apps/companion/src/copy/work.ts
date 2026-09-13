@@ -47,8 +47,65 @@ export const workCopy = {
     ideas: 'Pomysły',
     history: 'Historia i odłożone'
   },
+  itemState: {
+    ideas: 'Pomysł',
+    in_progress: 'W toku',
+    needs_me: 'Wymaga decyzji',
+    done: 'Ukończone',
+    declined: 'Odrzucone'
+  },
+  priorityEligibility: {
+    urgent_protection: 'Pilna ochrona',
+    assessed: 'Ocenione',
+    potential_validation: 'Potencjalna walidacja',
+    needs_assessment: 'Wymaga oceny'
+  },
+  preparationStatus: {
+    not_authorized: 'Przygotowanie nieautoryzowane',
+    approved_task_linking_pending: 'Oczekiwanie na powiązanie zadania',
+    linked_awaiting_triage: 'Oczekiwanie na kwalifikację',
+    preparing: 'Przygotowanie w toku',
+    prepared: 'Przygotowanie zakończone',
+    blocked: 'Przygotowanie zablokowane',
+    status_unavailable: 'Status przygotowania niedostępny'
+  },
+  presentation: {
+    unauthorizedSource: 'Ten profil nie jest autoryzowany w bieżącym połączeniu.',
+    permitted: 'Przygotuj wyłącznie pracę opisaną w briefie tej wersji.',
+    excluded: 'Publikowanie, płatna aktywacja, zmiany w aktywnym sklepie, wysyłanie, wydawanie pieniędzy i inne zapisy zewnętrzne wymagają osobnej autoryzacji.',
+    preparationStatus: {
+      not_authorized: 'Przygotowanie nieautoryzowane',
+      approved_task_linking_pending: 'Przygotowanie zatwierdzone — oczekiwanie na powiązanie zadania w rejestrze wykonania',
+      linked_awaiting_triage: 'Powiązano z rejestrem wykonania — oczekiwanie na kwalifikację',
+      preparing: 'Przygotowanie w toku — zweryfikowane w rejestrze wykonania',
+      prepared: 'Przygotowanie zakończone — publikacja nadal nieautoryzowana',
+      blocked: 'Przygotowanie zablokowane — przejrzyj dowody w rejestrze',
+      status_unavailable: 'Status rejestru wykonania niedostępny — wymagane uzgodnienie przekazania'
+    },
+    approvedForRevision: (revision: number) => `Przygotowanie zatwierdzone dla wersji ${revision}`,
+    proposedTrackerReference: (reference: string) => `Proponowane odwołanie do rejestru: ${reference}`,
+    discussionAuthor: (actor: string, revision: number, createdAt: string) => `${actor} · Wersja ${revision} · ${createdAt}`,
+    decisionLoginRequired: 'Do podejmowania decyzji biznesowych wymagane jest uwierzytelnione logowanie człowieka w panelu.',
+    unsupportedSource: 'Trwała praca nie jest obsługiwana przez to źródło.',
+    refreshFailed: 'Odświeżenie nie powiodło się; zachowano ostatni zweryfikowany widok.',
+    prioritySaved: 'Priorytet zapisano i zweryfikowano na serwerze.',
+    recommendedPriorityRestored: 'Rekomendowany priorytet przywrócono i zweryfikowano na serwerze.',
+    priorityChanged: 'Ten priorytet się zmienił. Wczytano najnowszą zweryfikowaną wersję; niczego nie ponowiono automatycznie.',
+    prioritySaveUnverified: 'Nie udało się zweryfikować zapisu priorytetu. Odśwież przed ponowną próbą; zapis mógł już dotrzeć do serwera.',
+    exactRecordUnconfirmed: 'Zapis zakończył się, ale nie udało się potwierdzić dokładnego rekordu na serwerze. Niczego nie ponowiono automatycznie; odśwież przed podjęciem kolejnej decyzji.',
+    saved: 'Zapisano i zweryfikowano na serwerze.',
+    decisionChanged: 'To zadanie się zmieniło lub decyzja nie jest już ważna. Zażądano najnowszej wersji; przejrzyj ją przed ponownym podjęciem decyzji. Niczego nie ponowiono automatycznie.',
+    saveUnverified: 'Nie udało się zweryfikować zapisu. Odśwież przed ponowną próbą; zapis mógł już dotrzeć do serwera.'
+  },
+  attentionKind: {
+    approval: 'Zatwierdzenie',
+    question: 'Pytanie',
+    blocker: 'Blokada',
+    completion: 'Ukończenie',
+    error: 'Błąd'
+  },
   summary: {
-    revision: 'Rewizja',
+    revision: 'Wersja',
     recommended: 'Rekomendowane',
     whyHere: 'Dlaczego tutaj:',
     nextStep: 'Następny krok:',
@@ -57,6 +114,7 @@ export const workCopy = {
     evidence: 'Dowody rekomendacji:',
     notAssessed: 'Nie oceniono',
     noEvidence: 'Nie dostarczono dowodów',
+    unknownState: 'Status nieznany',
     benefit: 'Korzyść',
     confidence: 'Pewność',
     unassessed: 'nieoceniona',

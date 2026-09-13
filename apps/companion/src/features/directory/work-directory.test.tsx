@@ -278,6 +278,40 @@ describe('WorkDirectory', () => {
     expect(screen.getByRole('button', { name: /Launch research/ })).toBeTruthy()
   })
 
+  it('localizes detail loading fallbacks', () => {
+    const view = render(<WorkDirectory {...props('section=sessions&focus=missing&focusProfile=atlas&focusSource=desktop-db', { detailStatus: 'loading' })} />)
+    expect(screen.getByText('Wczytywanie zweryfikowanych szczegółów…')).toBeTruthy()
+    expect(screen.getByText('Oczekiwanie na zapisaną projekcję źródła tylko do odczytu.')).toBeTruthy()
+
+    view.rerender(<WorkDirectory {...props('section=sessions&focus=missing&focusProfile=atlas&focusSource=desktop-db', { detailStatus: 'unsupported' })} />)
+    expect(screen.getByText('Wymagana aktualizacja backendu')).toBeTruthy()
+
+    view.rerender(<WorkDirectory {...props('section=sessions&focus=missing&focusProfile=atlas&focusSource=desktop-db', { detailStatus: 'error' })} />)
+    expect(screen.getByText('Szczegóły niedostępne')).toBeTruthy()
+  })
+
+  it('uses one conversation fallback title, Polish statuses, and conversation nouns', () => {
+    const untitled = { ...session, title: '', status: 'completed' }
+    const listing = props('chatView=recent', { sessions: [untitled] })
+    const view = render(<ChatsDirectory {...listing} onOpenSession={vi.fn()} />)
+
+    expect(screen.getByText('Istniejące zapisane rozmowy')).toBeTruthy()
+    expect(screen.getByRole('button', { name: /Nazwa rozmowy niedostępna/ }).textContent).toContain('Ukończona')
+    fireEvent.click(screen.getByRole('button', { name: /Nazwa rozmowy niedostępna/ }))
+
+    view.rerender(<WorkDirectory {...props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db', { selectedSession: untitled, history, detailStatus: 'ready' })} />)
+    const heading = screen.getByRole('heading', { name: 'Nazwa rozmowy niedostępna' })
+    expect(heading.getAttribute('title')).toBe('Nazwa rozmowy niedostępna')
+    expect(screen.getByText('Ukończona')).toBeTruthy()
+  })
+
+  it('localizes linked topic status labels', () => {
+    const linkedProject = { ...projectDetail, topics: [{ id: 'topic-1', title: 'Companion launch', status: 'active', profile: 'atlas', source: 'organization-db' }], organization_available: true, organization_complete: true }
+    render(<WorkDirectory {...props('section=projects&focus=project-1&focusProfile=atlas&focusSource=desktop-db&tab=topics', { selectedProject: linkedProject, detailStatus: 'ready' })} />)
+    expect(screen.getByText(/organization-db · atlas · Aktywny/)).toBeTruthy()
+    expect(document.body.textContent).not.toContain(' · active')
+  })
+
   it('opens direct read-only project details and session history', () => {
     const { rerender } = render(<WorkDirectory {...props('section=projects&focus=project-1&focusProfile=atlas&focusSource=desktop-db', { selectedProject: projectDetail, detailStatus: 'ready' })} />)
     expect(screen.getByText('Szczegóły źródła tylko do odczytu')).toBeTruthy()
@@ -286,6 +320,8 @@ describe('WorkDirectory', () => {
     rerender(<WorkDirectory {...props('section=sessions&focus=session-1&focusProfile=atlas&focusSource=desktop-db&tab=history', { selectedSession: session, history, detailStatus: 'ready' })} />)
     expect(screen.getByText('Please research launch timing.')).toBeTruthy()
     expect(screen.getByText('Research complete.')).toBeTruthy()
+    expect(screen.getByText('Ty')).toBeTruthy()
+    expect(screen.getByText('Asystent')).toBeTruthy()
     expect(screen.getByText(/Wyświetlenie historii nie wznawia ani nie aktywuje tej rozmowy/)).toBeTruthy()
     expect(screen.getByText(/Tool execution/)).toBeTruthy()
   })
@@ -486,7 +522,7 @@ describe('WorkDirectory', () => {
     view.rerender(<ChatsDirectory {...props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', { selectedSession: session, history: older, detailStatus: 'ready' })} onOpenSession={vi.fn()} />)
 
     expect(transcript.scrollTop).toBe(450)
-    expect(screen.queryByRole('button', { name: '↓ New messages' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '↓ Nowe wiadomości' })).toBeNull()
   })
 
   it('follows saved-history appends only near bottom and announces them only while away', () => {
@@ -505,7 +541,7 @@ describe('WorkDirectory', () => {
     const appended = { ...initial, entries: [...initial.entries, { id: 'new-near', kind: 'message' as const, role: 'assistant' as const, content: 'Near append', label: null, occurred_at: null }] }
     view.rerender(<ChatsDirectory {...props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', { selectedSession: session, history: appended, detailStatus: 'ready' })} onOpenSession={vi.fn()} />)
     expect(transcript.scrollTop).toBe(1_400)
-    expect(screen.queryByRole('button', { name: '↓ New messages' })).toBeNull()
+    expect(screen.queryByRole('button', { name: '↓ Nowe wiadomości' })).toBeNull()
 
     transcript.scrollTop = 200
     fireEvent.scroll(transcript)
@@ -514,7 +550,7 @@ describe('WorkDirectory', () => {
     view.rerender(<ChatsDirectory {...props('chat=session-1&chatProfile=atlas&chatSource=desktop-db', { selectedSession: session, history: awayAppend, detailStatus: 'ready' })} onOpenSession={vi.fn()} />)
 
     expect(transcript.scrollTop).toBe(200)
-    fireEvent.click(screen.getByRole('button', { name: '↓ New messages' }))
+    fireEvent.click(screen.getByRole('button', { name: '↓ Nowe wiadomości' }))
     expect(transcript.scrollTop).toBe(1_600)
   })
 

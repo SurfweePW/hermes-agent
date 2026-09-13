@@ -53,7 +53,10 @@ export const stateCopy = {
     profileUnavailable: 'Profil zapisanej rozmowy jest niedostępny.',
     conversationChanged: 'Zapisana rozmowa zmieniła się przed zakończeniem operacji.',
     previousContinuationIncomplete: 'Poprzednia kontynuacja nie została zakończona. Wyślij ponownie, aby rozpocząć nową odpowiedź.',
-    durableCreationUnavailable: 'Trwałe tworzenie rozmowy jest niedostępne dla tego połączenia.'
+    durableCreationUnavailable: 'Trwałe tworzenie rozmowy jest niedostępne dla tego połączenia.',
+    terminalTurnFailed: 'Hermes zgłosił błąd podczas wykonywania tej tury.',
+    stopFailed: 'Nie udało się zatrzymać tury. Może nadal trwać; spróbuj ponownie.',
+    approvalStillPending: 'Ta prośba nadal oczekuje na decyzję.'
   },
   newConversationTitle: 'Nowa rozmowa',
   fallbackProfileName: (index: number) => `Profil Hermes ${index}`,
