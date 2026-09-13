@@ -52,14 +52,28 @@ export interface JsonRpcFrame {
   result?: unknown
 }
 
-/** JSON-RPC error with optional structured `data` from the gateway. */
+/** JSON-RPC or transport error with optional structured gateway details. */
 export class JsonRpcGatewayError extends Error {
+  declare readonly closeCode?: number
+  declare readonly closeReason?: string
   readonly code?: number
   readonly data?: unknown
 
-  constructor(message: string, options?: { code?: number; data?: unknown }) {
+  constructor(
+    message: string,
+    options?: { closeCode?: number; closeReason?: string; code?: number; data?: unknown }
+  ) {
     super(message)
     this.name = 'JsonRpcGatewayError'
+
+    if (options?.closeCode !== undefined) {
+      this.closeCode = options.closeCode
+    }
+
+    if (options?.closeReason !== undefined) {
+      this.closeReason = options.closeReason
+    }
+
     this.code = options?.code
     this.data = options?.data
   }
@@ -223,6 +237,7 @@ export class JsonRpcGatewayClient {
 
         socket.removeEventListener('open', onOpen)
         socket.removeEventListener('error', onError)
+        socket.removeEventListener('close', onClose)
       }
 
       const onOpen = () => {
@@ -251,8 +266,24 @@ export class JsonRpcGatewayClient {
         reject(new Error(this.options.connectErrorMessage))
       }
 
+      const onClose = (event: CloseEvent) => {
+        if (settled) {
+          return
+        }
+
+        settled = true
+        cleanup()
+        reject(
+          new JsonRpcGatewayError(this.options.connectErrorMessage, {
+            closeCode: event.code,
+            closeReason: event.reason
+          })
+        )
+      }
+
       socket.addEventListener('open', onOpen, { once: true })
       socket.addEventListener('error', onError, { once: true })
+      socket.addEventListener('close', onClose, { once: true })
 
       if (this.options.connectTimeoutMs > 0) {
         timer = setTimeout(() => {
