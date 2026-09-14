@@ -408,7 +408,7 @@ describe('App', () => {
   it('renders the ready application shell and live roster', async () => {
     render(<App store={await readyStore()} />)
     expect(screen.getByRole('main')).toBeTruthy()
-    expect(screen.getByRole('heading', { name: 'Hermes Companion' })).toBeTruthy()
+    expect(document.querySelector('.mobile-header__title')?.textContent).toBe('Rozmowy')
     expect(screen.getAllByText('Atlas').length).toBeGreaterThan(0)
     expect(screen.getByRole('navigation', { name: 'Główna nawigacja' })).toBeTruthy()
     expect(screen.queryByRole('navigation', { name: 'Nawigacja mobilna' })).toBeNull()
@@ -443,14 +443,15 @@ describe('App', () => {
   })
 
   it.each([
-    ['/?view=work', 'Rozmowy', null],
-    ['/?view=needs', 'Decyzje', null],
-    ['/?view=library', 'Pliki', null]
-  ])('reaches constructible route %s', async (url, mainLabel, selectedTab) => {
+    ['/?view=work', 'Rozmowy', 'Rozmowy', null],
+    ['/?view=needs', 'Decyzje', 'Do decyzji', null],
+    ['/?view=library', 'Pliki', 'Pliki', null]
+  ])('reaches constructible route %s', async (url, mainLabel, headerTitle, selectedTab) => {
     window.history.replaceState({}, '', url)
     render(<App store={await readyDirectoryStore()} />)
 
     expect(screen.getByRole('main').getAttribute('aria-label')).toBe(mainLabel)
+    expect(document.querySelector('.mobile-header__title')?.textContent).toBe(headerTitle)
     if (selectedTab) {expect(screen.getByRole('tab', { name: selectedTab }).getAttribute('aria-selected')).toBe('true')}
   })
 
@@ -513,6 +514,9 @@ describe('App', () => {
     expect(screen.getByRole('main').getAttribute('aria-label')).toBe('Rozmowa')
     expect(screen.getByRole('main').classList.contains('main-content--conversation')).toBe(true)
     expect(document.querySelector('.desktop-topbar')).toBeNull()
+    expect(document.querySelector('.mobile-header--conversation .mobile-header__title')).toBeTruthy()
+    expect(document.querySelector('.mobile-header--conversation .conversation-state')).toBeTruthy()
+    expect(document.querySelector('.mobile-header--conversation .conversation-updated')?.textContent).toMatch(/^Zaktualizowano /)
     expect(screen.queryByRole('button', { name: /Conversation|Chat/ })).toBeNull()
   })
 
@@ -600,7 +604,8 @@ describe('App', () => {
     fireEvent.click(sessionButton)
 
     expect(new URLSearchParams(window.location.search).get('chatScroll')).toBe('240')
-    fireEvent.click(await screen.findByRole('button', { name: /Wróć do rozmów/ }))
+    const backButtons = await screen.findAllByRole('button', { name: /Wróć do rozmów/ })
+    fireEvent.click(mobile ? backButtons.find((button) => button.classList.contains('mobile-header__back'))! : backButtons[0])
 
     if (mobile) {
       await waitFor(() => expect(scrollWindow).toHaveBeenCalledWith({ top: 240 }))

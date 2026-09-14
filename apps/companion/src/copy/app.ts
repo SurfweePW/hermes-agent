@@ -64,6 +64,16 @@ export const appCopy = {
     settings: 'Ustawienia',
     badgeLabel: (label: string, count: string) => `${label}, pozycji: ${count}`
   },
+  refresh: {
+    action: 'Odśwież bieżący widok',
+    pulling: 'Pociągnij, aby odświeżyć',
+    release: 'Puść, aby odświeżyć',
+    running: 'Odświeżanie…'
+  },
+  branding: {
+    product: 'Hermes Companion',
+    version: 'Wersja aplikacji'
+  },
   profile: {
     companionUser: 'Profil: użytkownik Companiona',
     section: 'Profile',

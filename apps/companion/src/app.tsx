@@ -1,8 +1,12 @@
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 
+import { PullToRefresh } from './components/pull-to-refresh'
 import { appCopy } from './copy/app'
+import { conversationCopy } from './copy/conversation'
+import { workCopy } from './copy/work'
 import { NeedsMe } from './features/attention/needs-me'
 import { Conversation } from './features/conversation/conversation'
+import { deriveConversationState, formatConversationTime } from './features/conversation/conversation-state'
 import { transcriptSessionKey } from './features/conversation/transcript-scroll'
 import { installDirectoryRefreshLifecycle } from './features/directory/directory-refresh'
 import { ChatsDirectory, WorkDirectory } from './features/directory/work-directory'
@@ -51,6 +55,7 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
   const [locationSearch, setLocationSearch] = useState(window.location.search)
   const [libraryRefreshToken, setLibraryRefreshToken] = useState(0)
   const [drawerOpen, setDrawerOpen] = useState(false)
+  const [mobileLayout, setMobileLayout] = useState(() => window.innerWidth <= 780)
   const [refreshedAt, setRefreshedAt] = useState<number | null>(null)
   const mainRef = useRef<HTMLElement>(null)
   const menuButtonRef = useRef<HTMLButtonElement>(null)
@@ -70,6 +75,10 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
   const attentionCount = canonicalDecisionCount(work.items, canonicalRuntimeAttention, authoritativeWorkProfiles)
   const profileOptions = useMemo(() => buildProfileSelectorModel(companion.teammates, companion.profileServiceability, directory.coverage),
     [companion.profileServiceability, companion.teammates, directory.coverage])
+  const routeParams = new URLSearchParams(locationSearch)
+  const savedConversationOpen = screen === 'work' && routeParams.has('chat')
+  const conversationOpen = screen === 'conversation' || savedConversationOpen
+  const foregroundTurn = ['sending', 'submitting', 'streaming', 'stopping'].includes(companion.turnStatus)
   screenRef.current = screen
   locationSearchRef.current = locationSearch
 
@@ -107,6 +116,14 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
 
   useEffect(() => {void refreshLifecycleRef.current?.refresh()}, [screen])
   useEffect(() => {refreshLifecycleRef.current?.reschedule()}, [companion.turnStatus])
+
+  useEffect(() => {
+    const updateMobileLayout = () => setMobileLayout(window.innerWidth <= 780)
+
+    window.addEventListener('resize', updateMobileLayout)
+
+    return () => window.removeEventListener('resize', updateMobileLayout)
+  }, [])
 
   useEffect(() => {
     if (drawerOpen) {
@@ -319,6 +336,17 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
     setScreen('details')
   }
 
+  const backToConversations = () => {
+    const params = new URLSearchParams(locationSearch)
+
+    if (params.get('view') === 'work' && params.has('chat')) {
+      params.delete('chat'); params.delete('chatProfile'); params.delete('chatSource')
+      window.history.pushState({}, '', `${window.location.pathname}?${params.toString()}`)
+      setLocationSearch(window.location.search)
+      setScreen('work')
+    } else {navigate('work')}
+  }
+
   const content = (() => {
     if (((companion.phase === 'disconnected' || companion.phase === 'recovering') && screen !== 'needs') || screen === 'recovery') {
       return <><Recovery error={companion.error} hasDraft={Boolean(companion.draft)} onBack={companion.phase === 'disconnected' ? undefined : () => navigate('needs')} onRetry={() => void store.recover()} recovering={companion.phase === 'recovering'} teammateName={selected?.name} turnUncertain={companion.turnStatus === 'uncertain'} />
@@ -338,16 +366,7 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
         : directorySession?.project?.title ?? appCopy.project.unknown
 
       return selected
-        ? <Conversation approval={companion.pendingApproval} completedAt={directorySession?.last_active} connected={companion.phase === 'ready'} draft={companion.draft} error={Boolean(companion.error)} messages={companion.messages} onApproval={(choice) => void store.respondToApproval(choice)} onBackToSessions={() => {
-            const params = new URLSearchParams(locationSearch)
-
-            if (params.get('view') === 'work' && params.has('chat')) {
-              params.delete('chat'); params.delete('chatProfile'); params.delete('chatSource')
-              window.history.pushState({}, '', `${window.location.pathname}?${params.toString()}`)
-              setLocationSearch(window.location.search)
-              setScreen('work')
-            } else {navigate('work')}
-          }} onDraftChange={store.setDraft} onInterrupt={() => void store.interrupt()} onSubmit={() => void store.submitDraft().catch(() => undefined)} projectLabel={projectLabel} refreshedAt={refreshedAt} sessionKey={transcriptSessionKey(companion.activeSession?.target?.backend_namespace ?? '', companion.activeSession?.target?.profile ?? selected.id, companion.activeSession?.target?.stored_session_id ?? companion.storedSessionId ?? 'canonical')} sessionStatus={directorySession?.status} sessionTitle={companion.activeSession?.title} streamingText={companion.streamingText} teammate={selected} turnStatus={companion.turnStatus} />
+        ? <Conversation approval={companion.pendingApproval} completedAt={directorySession?.last_active} connected={companion.phase === 'ready'} draft={companion.draft} error={Boolean(companion.error)} messages={companion.messages} onApproval={(choice) => void store.respondToApproval(choice)} onBackToSessions={backToConversations} onDraftChange={store.setDraft} onInterrupt={() => void store.interrupt()} onSubmit={() => void store.submitDraft().catch(() => undefined)} projectLabel={projectLabel} refreshedAt={refreshedAt} sessionKey={transcriptSessionKey(companion.activeSession?.target?.backend_namespace ?? '', companion.activeSession?.target?.profile ?? selected.id, companion.activeSession?.target?.stored_session_id ?? companion.storedSessionId ?? 'canonical')} sessionStatus={directorySession?.status} sessionTitle={companion.activeSession?.title} streamingText={companion.streamingText} teammate={selected} turnStatus={companion.turnStatus} />
         : <ChooseTeammate onBack={() => navigate('work')} />
     }
 
@@ -382,17 +401,49 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
 
     if (screen === 'library') {return <Library gateway={store.library} onNavigate={navigateParams} params={new URLSearchParams(locationSearch)} refreshToken={libraryRefreshToken} relationshipContext={libraryRelationshipContext} />}
 
-    if (screen === 'settings') {return <section className="settings-screen"><p className="kicker">{appCopy.settings.kicker}</p><h2>{appCopy.settings.title}</h2><p className="screen-lede">{appCopy.settings.detail}</p><OwnerSignIn baseUrl={companion.baseUrl} onOwnerConnect={store.connectOwner} onOwnerSignOut={store.signOutOwner} ownerConnected={companion.connectionMode === 'owner' && companion.phase === 'ready'} /></section>}
+    if (screen === 'settings') {return <section className="settings-screen"><p className="kicker">{appCopy.settings.kicker}</p><h2>{appCopy.settings.title}</h2><p className="screen-lede">{appCopy.settings.detail}</p><div className="settings-brand"><Wordmark /><span>{appCopy.branding.version}</span><BuildStamp /></div><OwnerSignIn baseUrl={companion.baseUrl} onOwnerConnect={store.connectOwner} onOwnerSignOut={store.signOutOwner} ownerConnected={companion.connectionMode === 'owner' && companion.phase === 'ready'} /></section>}
 
     if (screen === 'details' && selected) {return <TeammateDetails onBack={() => navigate('work')} onMessage={() => setScreen('conversation')} onOpenSession={(id) => { void store.selectTeammate(selected.id, id).then(() => setScreen('conversation')) }} onPin={(id, pinned) => void store.setSessionPinned(id, pinned)} sessions={companion.recentSessions} sessionsLoading={companion.sessionsLoading} teammate={selected} />}
 
     return <ChooseTeammate onBack={() => navigate('work')} />
   })()
 
+  const savedHeaderSession = savedConversationOpen
+    ? [directory.selectedSession, ...directory.sessions].find((item) => item?.id === routeParams.get('chat') && item.profile === routeParams.get('chatProfile') && item.source === routeParams.get('chatSource'))
+    : undefined
+  const activeHeaderTarget = screen === 'conversation' ? companion.activeSession?.target : null
+  const activeHeaderSession = activeHeaderTarget
+    ? [directory.selectedSession, ...directory.sessions].find((item) => item?.id === activeHeaderTarget.stored_session_id && item?.profile === activeHeaderTarget.profile && item?.source === activeHeaderTarget.backend_namespace)
+    : undefined
+  const headerTitle = screen === 'conversation'
+    ? companion.activeSession?.title || conversationCopy.fallbackSessionTitle
+    : savedConversationOpen
+      ? savedHeaderSession?.title || conversationCopy.fallbackSessionTitle
+      : screen === 'details' && selected
+        ? selected.name
+        : screen === 'needs' && work.selected
+          ? work.selected.title
+          : screen === 'needs'
+            ? workCopy.chrome.title
+          : screenTitles[screen]
+  const headerState = screen === 'conversation'
+    ? deriveConversationState({ turnStatus: companion.turnStatus, approvalPending: Boolean(companion.pendingApproval), error: Boolean(companion.error), sessionStatus: activeHeaderSession?.status })
+    : savedConversationOpen
+      ? deriveConversationState({ sessionStatus: savedHeaderSession?.status })
+      : null
+  const headerTime = conversationOpen ? formatConversationTime(screen === 'conversation' ? refreshedAt : directory.history?.coverage.freshness) : null
+  const refreshable = (screen === 'needs' || screen === 'work' || screen === 'library') && !conversationOpen
+
   return (
     <div className="app-shell app-shell--two-column">
-      <header className="mobile-header"><button aria-expanded={drawerOpen} aria-label={appCopy.navigation.openDrawer} className="menu-button" onClick={() => setDrawerOpen(true)} ref={menuButtonRef} type="button"><span aria-hidden="true">☰</span></button><div className="mobile-brand"><Wordmark /><BuildStamp /></div></header>
-      {drawerOpen && <div className="drawer-layer"><button aria-label={appCopy.navigation.closeDrawer} className="drawer-backdrop" onClick={() => setDrawerOpen(false)} type="button" /><aside aria-label={appCopy.navigation.drawer} aria-modal="true" className="mobile-drawer" ref={drawerRef} role="dialog"><Wordmark /><nav aria-label={appCopy.navigation.mobile} className="drawer-nav"><NavButton active={screen === 'work'} icon="◇" label={appCopy.navigation.conversations} onClick={() => {setDrawerOpen(false); navigate('work')}} /><NavButton active={screen === 'needs' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label={appCopy.navigation.decisions} onClick={() => {setDrawerOpen(false); navigate('needs')}} /><NavButton active={screen === 'library'} icon="▤" label={appCopy.navigation.files} onClick={() => {setDrawerOpen(false); navigate('library')}} /><NavButton active={screen === 'settings'} icon="⚙" label={appCopy.navigation.settings} onClick={() => {setDrawerOpen(false); navigate('settings')}} /></nav></aside></div>}
+      <header aria-label={headerTitle} className={`mobile-header${conversationOpen ? ' mobile-header--conversation' : ''}`}>
+        {conversationOpen && mobileLayout && <button aria-label={conversationCopy.backToSessions(savedHeaderSession?.profile ?? selected?.name ?? '')} className="mobile-header__back" onClick={backToConversations} type="button">←</button>}
+        <div className="mobile-header__title" title={headerTitle}>{headerTitle}</div>
+        {headerState && <span className={`conversation-state conversation-state--${headerState.kind}`}>{headerState.label}</span>}
+        {headerTime && <time className="conversation-updated">{conversationCopy.state.updated(headerTime)}</time>}
+        <button aria-expanded={drawerOpen} aria-label={appCopy.navigation.openDrawer} className="menu-button" onClick={() => setDrawerOpen(true)} ref={menuButtonRef} type="button"><span aria-hidden="true">☰</span></button>
+      </header>
+      {drawerOpen && <div className="drawer-layer"><button aria-label={appCopy.navigation.closeDrawer} className="drawer-backdrop" onClick={() => setDrawerOpen(false)} type="button" /><aside aria-label={appCopy.navigation.drawer} aria-modal="true" className="mobile-drawer" ref={drawerRef} role="dialog"><Wordmark /><nav aria-label={appCopy.navigation.mobile} className="drawer-nav"><NavButton active={screen === 'work'} icon="◇" label={appCopy.navigation.conversations} onClick={() => {setDrawerOpen(false); navigate('work')}} /><NavButton active={screen === 'needs' || screen === 'recovery'} badge={attentionCount ? String(attentionCount) : undefined} icon="!" label={appCopy.navigation.decisions} onClick={() => {setDrawerOpen(false); navigate('needs')}} /><NavButton active={screen === 'library'} icon="▤" label={appCopy.navigation.files} onClick={() => {setDrawerOpen(false); navigate('library')}} /><NavButton active={screen === 'settings'} icon="⚙" label={appCopy.navigation.settings} onClick={() => {setDrawerOpen(false); navigate('settings')}} />{refreshable && <button className="nav-button" disabled={foregroundTurn} onClick={() => {setDrawerOpen(false); void refreshLifecycleRef.current?.refresh()}} type="button"><span aria-hidden="true" className="nav-button__icon">↻</span><span>{appCopy.refresh.action}</span></button>}</nav><footer className="drawer-brand"><span>{appCopy.branding.product}</span><BuildStamp /></footer></aside></div>}
       <aside className="left-rail">
         <Wordmark />
         <nav aria-label={appCopy.navigation.main} className="primary-nav">
@@ -403,11 +454,10 @@ export function App({ store = defaultStore }: { store?: CompanionStore }) {
         <div className="rail-roster"><div className="rail-section-title"><span>{appCopy.profile.section}</span><span>{profileOptions.filter((option) => option.selectable).length}</span></div><Roster availability={profileOptions} compact onSelect={openTeammate} teammates={companion.teammates} /></div>
         <div className="connection"><span aria-hidden="true" /><div><strong>{appCopy.profile.ready}</strong><small>{appCopy.profile.count(companion.teammates.length)} · v{__COMPANION_VERSION__}</small></div></div>
       </aside>
-      <main aria-label={screenTitles[screen]} className={`main-content${screen === 'conversation' || screen === 'work' && new URLSearchParams(locationSearch).has('chat') ? ' main-content--conversation' : ''}`} ref={mainRef} tabIndex={-1}>
-        <h1 className="sr-only">Hermes Companion</h1>
-        {screen !== 'conversation' && <header className="desktop-topbar"><div><span>Hermes Companion · v{__COMPANION_VERSION__}</span><strong>{screenTitles[screen]}</strong></div><span aria-label={appCopy.profile.companionUser} className="avatar avatar--user" role="img">CU</span></header>}
+      <main aria-label={screenTitles[screen]} className={`main-content${conversationOpen ? ' main-content--conversation' : ''}`} ref={mainRef} tabIndex={-1}>
+        {!conversationOpen && <header className="desktop-topbar"><strong>{headerTitle}</strong><span aria-label={appCopy.profile.companionUser} className="avatar avatar--user" role="img">CU</span></header>}
         {companion.error && <div className="decision-toast" role="alert">{companion.error}</div>}
-        {content}
+        <PullToRefresh enabled={refreshable && !foregroundTurn} onRefresh={async () => {await refreshLifecycleRef.current?.refresh()}}>{content}</PullToRefresh>
       </main>
     </div>
   )

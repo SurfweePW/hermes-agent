@@ -41,6 +41,11 @@ describe('Conversation', () => {
     expect(screen.getByRole('heading', { name: 'Named logical session' })).toBeTruthy()
     const details = screen.getByText('Szczegóły techniczne').closest('details')!
     expect(details.hasAttribute('open')).toBe(false)
+    const chevron = details.querySelector('.technical-details__chevron') as HTMLElement
+    expect(chevron).toBeTruthy()
+    expect(chevron.textContent).toBe('⌄')
+    fireEvent.click(screen.getByText('Szczegóły techniczne'))
+    expect(details.hasAttribute('open')).toBe(true)
     expect(screen.getByText('Atlas')).toBeTruthy()
     expect(screen.getByText(projectLabel)).toBeTruthy()
   })

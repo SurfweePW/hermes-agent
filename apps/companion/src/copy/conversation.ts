@@ -28,6 +28,7 @@ export const conversationCopy = {
     updated: (time: string) => `Zaktualizowano ${time}`
   },
   technical: {
+    details: 'Szczegóły techniczne',
     profile: 'Profil',
     project: 'Projekt',
     connection: 'Połączenie'

@@ -259,6 +259,6 @@ describe('durable work inbox', () => {
   it('renders Polish work chrome', () => {
     render(<WorkInbox {...props({ selected: null })} />)
     expect(screen.getByText('Trwała praca biznesowa')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Odśwież pracę' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Odśwież pracę' })).toBeNull()
   })
 })

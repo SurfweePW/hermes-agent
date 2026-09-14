@@ -76,10 +76,10 @@ describe('Signal House CSS contract', () => {
   })
 
   it('accounts for mobile safe areas in shell, fixed chrome, and conversation height', () => {
-    expect(appCss).toMatch(/\.app-shell\s*\{[^}]*padding:\s*calc\(68px\s*\+\s*env\(safe-area-inset-top\)\)\s+0\s+env\(safe-area-inset-bottom\)/i)
-    expect(appCss).toMatch(/\.mobile-header\s*\{[^}]*height:\s*calc\(68px\s*\+\s*env\(safe-area-inset-top\)\)[^}]*padding-top:\s*calc\(10px\s*\+\s*env\(safe-area-inset-top\)\)/i)
-    expect(appCss).toMatch(/\.main-content\s*\{[^}]*min-height:\s*calc\(100dvh\s*-\s*68px\s*-\s*env\(safe-area-inset-top\)\s*-\s*env\(safe-area-inset-bottom\)\)/i)
-    expect(appCss).toMatch(/\.main-content--conversation\s*\{[^}]*height:\s*calc\(100dvh\s*-\s*68px\s*-\s*env\(safe-area-inset-top\)\s*-\s*env\(safe-area-inset-bottom\)\)[^}]*overflow:\s*hidden/i)
+    expect(appCss).toMatch(/\.app-shell\s*\{[^}]*padding:\s*calc\(58px\s*\+\s*env\(safe-area-inset-top\)\)\s+0\s+env\(safe-area-inset-bottom\)/i)
+    expect(appCss).toMatch(/\.mobile-header\s*\{[^}]*height:\s*calc\(58px\s*\+\s*env\(safe-area-inset-top\)\)[^}]*padding-top:\s*calc\(5px\s*\+\s*env\(safe-area-inset-top\)\)/i)
+    expect(appCss).toMatch(/\.main-content\s*\{[^}]*min-height:\s*calc\(100dvh\s*-\s*58px\s*-\s*env\(safe-area-inset-top\)\s*-\s*env\(safe-area-inset-bottom\)\)/i)
+    expect(appCss).toMatch(/\.main-content--conversation\s*\{[^}]*height:\s*calc\(100dvh\s*-\s*58px\s*-\s*env\(safe-area-inset-top\)\s*-\s*env\(safe-area-inset-bottom\)\)[^}]*overflow:\s*hidden/i)
     expect(appCss).toMatch(/\.mobile-drawer\s*\{[^}]*width:\s*78%[^}]*max-width:\s*320px/i)
   })
 

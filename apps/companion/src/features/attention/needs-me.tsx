@@ -8,7 +8,7 @@ interface NeedsMeProps {
   onRefresh: () => void
 }
 
-export function NeedsMe({ items, scope, onOpen, onRefresh }: NeedsMeProps) {
+export function NeedsMe({ items, scope, onOpen }: NeedsMeProps) {
   if (items.length === 0) {return null}
 
   return (
@@ -16,7 +16,7 @@ export function NeedsMe({ items, scope, onOpen, onRefresh }: NeedsMeProps) {
       <p className="kicker">Uprawnienia jednorazowe</p>
       <h2 id="runtime-actions-title">Akcje w aktywnych rozmowach <span className="heading-count">{items.length}</span></h2>
       <p className="screen-lede">Te prośby pozwalają kontynuować działanie tylko w bieżącej rozmowie. Trwałe decyzje powyżej zapisują kierunek pracy i nie udzielają zgody na wykonanie. Zakres: <strong>{scope}</strong>.</p>
-      <button className="button" onClick={onRefresh} type="button">Odśwież</button>
+
       <div className="attention-list">
         {items.map((item) => {
           const actionable = item.actionable

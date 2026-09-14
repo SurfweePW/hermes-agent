@@ -287,7 +287,7 @@ export function ChatsDirectory(props: ChatsDirectoryProps) {
   const pagedProjectProfiles = props.snapshot.coverage.filter((item) => item.projectsHasMore && (profile === 'all' || item.profile === profile))
 
   return <section aria-labelledby="chats-title" className="chats-screen" ref={rootRef}>
-    <div className="directory-heading"><div><p className="kicker">Istniejące zapisane rozmowy</p><h2 id="chats-title">Rozmowy</h2><p className="screen-lede">Otwórz historię bez tworzenia nowej rozmowy i bez wznawiania jej przy samym wejściu.</p></div><button className="button" onClick={props.onRefresh} type="button">Odśwież</button></div>
+    <div className="directory-heading"><div><p className="kicker">Istniejące zapisane rozmowy</p><h2 id="chats-title">Rozmowy</h2><p className="screen-lede">Otwórz historię bez tworzenia nowej rozmowy i bez wznawiania jej przy samym wejściu.</p></div></div>
     {mobileLayout && props.onCreateConversation && <MobileConversationEntry draft={draft} onCreate={props.onCreateConversation} onDraftChange={(value) => props.onDraftChange?.(value)} profileOptions={profileOptions} />}
     <div className="chat-controls"><label>Rozmawiaj z<select aria-label="Rozmawiaj z" onChange={(event) => { const value = event.target.value; persistChatProfile(value); setParams({ agent: value === 'all' ? null : value }) }} value={profile}><option value="all">Wszystkie</option>{profileOptions.map((option) => <option disabled={!option.selectable} key={option.profile} value={option.profile}>{option.optionLabel}</option>)}</select></label><label className="chat-search">Szukaj rozmów<input aria-label="Szukaj rozmów" onChange={(event) => setParams({ chatQ: event.target.value || null })} placeholder="Nazwa rozmowy lub projektu" type="search" value={query} /></label></div>
     <TabList className="chat-view-tabs segmented-tabs" idPrefix="chat-view" label="Widok rozmów" onSelect={(value) => setParams({ chatView: value })} selected={mode} tabs={['recent', 'projects']} />
@@ -356,7 +356,7 @@ export function WorkDirectory(props: DirectoryProps) {
   }
 
   return <section aria-labelledby="work-directory-title" className="directory-screen">
-    <div className="directory-heading"><div><p className="kicker">{directoryCopy.chrome.kicker}</p><h2 id="work-directory-title">{directoryCopy.chrome.title}</h2><p className="screen-lede">{directoryCopy.chrome.lede}</p></div><button className="button" onClick={props.onRefresh} type="button">{directoryCopy.chrome.refresh}</button></div>
+    <div className="directory-heading"><div><p className="kicker">{directoryCopy.chrome.kicker}</p><h2 id="work-directory-title">{directoryCopy.chrome.title}</h2><p className="screen-lede">{directoryCopy.chrome.lede}</p></div></div>
     <TabList className="directory-tabs segmented-tabs" idPrefix="work-directory" label={directoryCopy.chrome.tabsLabel} onSelect={(item) => setParams({ section: item as WorkSection, focus: null, focusProfile: null, focusSource: null, tab: null })} selected={section} tabs={['topics', 'projects', 'sessions']} />
     {section !== 'topics' && <Coverage coverage={props.snapshot.coverage} />}
     {(['topics', 'projects', 'sessions'] as const).map((item) => <div aria-labelledby={tabId('work-directory', 'tab', item)} hidden={section !== item} id={tabId('work-directory', 'panel', item)} key={item} role="tabpanel">

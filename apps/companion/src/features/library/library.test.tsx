@@ -61,16 +61,14 @@ describe('Library', () => {
     expect(() => validateLibraryResolve({ available: true, artifact_id: artifactId, profile: 'atlas', backend_namespace: 'test', relative_path: 'private/report.md' }, 'atlas')).toThrow(/path-bearing field/i)
   })
 
-  it('refreshes explicitly and when the lifecycle refresh token changes', async () => {
+  it('refreshes when the lifecycle refresh token changes', async () => {
     const listLibrary = vi.fn().mockResolvedValue(complete())
     const fake = gateway({ listLibrary })
     const view = render(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams()} refreshToken={0} />)
     await waitFor(() => expect(listLibrary).toHaveBeenCalledTimes(1))
 
-    fireEvent.click(screen.getByRole('button', { name: 'Odśwież pliki' }))
-    await waitFor(() => expect(listLibrary).toHaveBeenCalledTimes(2))
     view.rerender(<Library gateway={fake} onNavigate={vi.fn()} params={new URLSearchParams()} refreshToken={1} />)
-    await waitFor(() => expect(listLibrary).toHaveBeenCalledTimes(3))
+    await waitFor(() => expect(listLibrary).toHaveBeenCalledTimes(2))
   })
 
   it('reports an unconfigured backend without claiming the Library is empty', async () => {
@@ -463,7 +461,7 @@ describe('Library', () => {
     render(<Library gateway={gateway()} onNavigate={vi.fn()} params={new URLSearchParams()} />)
     expect(await screen.findByRole('heading', { name: 'Pliki' })).toBeTruthy()
     expect(screen.getByLabelText('Szukaj nazw i metadanych')).toBeTruthy()
-    expect(screen.getByRole('button', { name: 'Odśwież pliki' })).toBeTruthy()
+    expect(screen.queryByRole('button', { name: 'Odśwież pliki' })).toBeNull()
   })
 
   it.each([

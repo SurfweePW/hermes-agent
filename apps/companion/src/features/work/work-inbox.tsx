@@ -226,7 +226,7 @@ export function WorkInbox(props: WorkInboxProps) {
   })
 
   return <section aria-labelledby="work-title" className="work-inbox">
-    <div className="section-heading"><div><p className="kicker">{workCopy.chrome.kicker}</p><h2 id="work-title">{workCopy.chrome.title}</h2></div><button disabled={props.status === 'loading' || props.pending} onClick={props.onRefresh} type="button">{workCopy.chrome.refresh}</button></div>
+    <div className="section-heading"><div><p className="kicker">{workCopy.chrome.kicker}</p><h2 id="work-title">{workCopy.chrome.title}</h2></div></div>
     <p>{workCopy.chrome.lede}</p>
     {props.status === 'unsupported' && <p role="status">{workCopy.status.unsupported}</p>}
     {props.status === 'loading' && <p role="status">{workCopy.status.loading}</p>}
