@@ -25,7 +25,8 @@ export const conversationCopy = {
     completed: (time: string) => `Zakończone · ${time}`,
     error: 'Błąd',
     unknown: 'Stan nieznany',
-    updated: (time: string) => `Zaktualizowano ${time}`
+    updated: (time: string) => `Zaktualizowano ${time}`,
+    updatedPrefix: 'Zaktualizowano'
   },
   technical: {
     details: 'Szczegóły techniczne',

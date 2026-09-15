@@ -262,7 +262,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 .pull-to-refresh { min-height: 100%; }
 .pull-to-refresh__indicator { height: 0; display: grid; place-items: center; overflow: hidden; color: var(--muted-text); font: 700 11px var(--mono); transition: height 120ms ease; }
 .pull-to-refresh__indicator--visible { height: 44px; }
-.main-content--conversation > .pull-to-refresh { min-height: 0; flex: 1; display: flex; overflow: hidden; }
+.main-content--conversation > .pull-to-refresh { min-height: 0; flex: 1; display: flex; flex-direction: column; overflow: hidden; }
 .main-content--conversation > .pull-to-refresh > .conversation-screen,
 .main-content--conversation > .pull-to-refresh > .chats-screen--conversation { min-height: 0; flex: 1; }
 
@@ -378,8 +378,9 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   button { min-width: 48px; min-height: 48px; }
   .app-shell { height: auto; min-height: 100dvh; overflow: visible; display: block; padding: calc(58px + env(safe-area-inset-top)) 0 env(safe-area-inset-bottom); }
   .left-rail, .desktop-topbar { display: none; }
-  .mobile-header { height: calc(58px + env(safe-area-inset-top)); padding: 5px 10px; padding-top: calc(5px + env(safe-area-inset-top)); display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 6px; position: fixed; z-index: 20; inset: 0 0 auto; border-bottom: 1px solid var(--line); background: var(--paper); white-space: nowrap; }
-  .mobile-header--conversation { grid-template-columns: 44px minmax(48px, 1fr) auto auto 44px; gap: 4px; }
+  .mobile-header { height: calc(58px + env(safe-area-inset-top)); padding: 5px 10px; padding-top: calc(5px + env(safe-area-inset-top)); display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 6px; position: fixed; z-index: 20; inset: 0 0 auto; border-bottom: 1px solid var(--line); background: var(--paper); white-space: nowrap; }
+  .mobile-header--conversation { grid-template-columns: 44px 44px minmax(0, 1fr) auto auto; gap: 4px; }
+  .mobile-header .conversation-updated__prefix { display: none; }
   .mobile-header__title { min-width: 0; margin: 0; overflow: hidden; color: var(--ink); font-size: 16px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap; }
   .mobile-header__back, .menu-button { width: 44px; height: 44px; min-width: 44px; min-height: 44px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 10px; background: var(--white); font-size: 20px; }
   .mobile-header .conversation-state { max-width: none; padding: 4px 7px; font-size: 9px; }

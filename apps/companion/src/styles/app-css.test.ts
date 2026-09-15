@@ -140,4 +140,10 @@ describe('Signal House CSS contract', () => {
     expect(appCss).toMatch(/\.recovery-card\s+label\s*\{[^}]*display:\s*grid[^}]*gap:/i)
     expect(appCss).toMatch(/\.recovery-card\s+input\s*\{[^}]*width:\s*100%[^}]*min-height:\s*48px/i)
   })
+
+  it('stacks the conversation refresh wrapper so the transcript keeps the full width', () => {
+    expect(appCss).toMatch(/\.main-content--conversation\s*>\s*\.pull-to-refresh\s*\{[^}]*display:\s*flex[^}]*flex-direction:\s*column/i)
+    expect(appCss).toMatch(/\.mobile-header--conversation\s*\{[^}]*grid-template-columns:\s*44px\s+44px\s+minmax\(0,\s*1fr\)\s+auto\s+auto/i)
+    expect(appCss).toMatch(/@media\s*\(max-width:\s*780px\)[\s\S]*?\.mobile-header\s+\.conversation-updated__prefix\s*\{[^}]*display:\s*none/i)
+  })
 })

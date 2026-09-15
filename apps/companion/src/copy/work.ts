@@ -15,7 +15,7 @@
 export const workCopy = {
   chrome: {
     kicker: 'Trwała praca biznesowa',
-    title: 'Do decyzji',
+    title: 'Decyzje',
     refresh: 'Odśwież pracę',
     lede: 'Pomysły, decyzje dotyczące przygotowania i ukierunkowana dyskusja, współdzielone między Twoimi urządzeniami. Niezależne od uprawnień narzędzi w aktywnej rozmowie.',
     viewOptions: 'Opcje widoku',

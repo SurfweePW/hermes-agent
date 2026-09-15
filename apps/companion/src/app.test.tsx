@@ -84,7 +84,7 @@ describe('App', () => {
     const store = await readyStore(gateway)
     render(<App store={store} />)
     fireEvent.click(screen.getAllByRole('button', { name: /^Decyzje/ })[0])
-    expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Decyzje' })).toBeTruthy()
     expect(screen.getByText(/nie obsługuje trwałej skrzynki pracy/)).toBeTruthy()
     expect(screen.queryByRole('heading', { name: /Akcje w aktywnych rozmowach/ })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Kanban' })).toBeNull()
@@ -108,7 +108,7 @@ describe('App', () => {
 
     expect(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 1' })).toHaveLength(1)
     fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 1' })[0])
-    expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Decyzje' })).toBeTruthy()
     expect(screen.queryByRole('heading', { name: /Akcje w aktywnych rozmowach/ })).toBeNull()
     expect(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 1' })).toHaveLength(1)
   })
@@ -130,7 +130,7 @@ describe('App', () => {
 
     expect(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 2' })).toHaveLength(1)
     fireEvent.click(screen.getAllByRole('button', { name: 'Decyzje, pozycji: 2' })[0])
-    expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Decyzje' })).toBeTruthy()
     expect(screen.getByRole('heading', { name: /^Akcje w aktywnych rozmowach/ })).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: /Live approval.*Only in the active conversation/ }))
     await waitFor(() => expect(Object.fromEntries(new URLSearchParams(window.location.search))).toMatchObject({ request: 'runtime-only-review', runtimeSession: 'runtime-review' }))
@@ -444,7 +444,7 @@ describe('App', () => {
 
   it.each([
     ['/?view=work', 'Rozmowy', 'Rozmowy', null],
-    ['/?view=needs', 'Decyzje', 'Do decyzji', null],
+    ['/?view=needs', 'Decyzje', 'Decyzje', null],
     ['/?view=library', 'Pliki', 'Pliki', null]
   ])('reaches constructible route %s', async (url, mainLabel, headerTitle, selectedTab) => {
     window.history.replaceState({}, '', url)
@@ -516,7 +516,12 @@ describe('App', () => {
     expect(document.querySelector('.desktop-topbar')).toBeNull()
     expect(document.querySelector('.mobile-header--conversation .mobile-header__title')).toBeTruthy()
     expect(document.querySelector('.mobile-header--conversation .conversation-state')).toBeTruthy()
-    expect(document.querySelector('.mobile-header--conversation .conversation-updated')?.textContent).toMatch(/^Zaktualizowano /)
+    const updated = document.querySelector('.mobile-header--conversation .conversation-updated')
+    expect(updated?.querySelector('.conversation-updated__prefix')?.textContent).toBe('Zaktualizowano')
+    expect(updated?.getAttribute('title')).toMatch(/^Zaktualizowano /)
+    const headerControls = Array.from(document.querySelectorAll('.mobile-header--conversation > *')).map((node) => (node as HTMLElement).className)
+    expect(headerControls[0]).toContain('menu-button')
+    expect(headerControls[1]).toContain('mobile-header__title')
     expect(screen.queryByRole('button', { name: /Conversation|Chat/ })).toBeNull()
   })
 

@@ -32,11 +32,11 @@ describe('durable work inbox', () => {
     expect(onOpenSourceSession).toHaveBeenCalledWith(sourceSession)
   })
 
-  it('defaults to a vertical Do decyzji list and filters the same records from view options', () => {
+  it('defaults to a vertical Decyzje list and filters the same records from view options', () => {
     const p = props({ selected: null, items: [card, { ...card, id: 'progress', bucket: 'in_progress', status: 'in_progress', title: 'Preparing now' }] })
     render(<WorkInbox {...p} />)
 
-    expect(screen.getByRole('heading', { name: 'Do decyzji' })).toBeTruthy()
+    expect(screen.getByRole('heading', { name: 'Decyzje' })).toBeTruthy()
     expect(screen.getByText(card.title)).toBeTruthy()
     expect(screen.queryByText('Preparing now')).toBeNull()
     const options = screen.getByText('Opcje widoku').closest('details') as HTMLDetailsElement
